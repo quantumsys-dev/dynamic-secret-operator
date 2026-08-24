@@ -377,6 +377,14 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, secret); err != nil {
 		return fmt.Errorf("failed to fetch secret revision %q for probe validation: %w", secretName, err)
 	}
+	defer func() {
+		if secret != nil && secret.Data != nil {
+			for k, v := range secret.Data {
+				azure.ZeroBytes(v)
+				delete(secret.Data, k)
+			}
+		}
+	}()
 
 	runner := r.ProbeRunner
 	if runner == nil {

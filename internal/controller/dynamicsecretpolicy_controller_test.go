@@ -889,12 +889,17 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 			WithObjects(secretObj).
 			Build()
 
-		var receivedSecretData map[string][]byte
+		var capturedValue string
+		var receivedNil bool
 		r := &DynamicSecretPolicyReconciler{
 			Client: c,
 			Scheme: scheme,
 			ProbeRunner: func(ctx context.Context, probe secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
-				receivedSecretData = secretData
+				if secretData == nil {
+					receivedNil = true
+				} else {
+					capturedValue = string(secretData["db-password"])
+				}
 				return nil
 			},
 		}
@@ -904,11 +909,11 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 			t.Fatalf("unexpected error running validation probes: %v", err)
 		}
 
-		if receivedSecretData == nil {
+		if receivedNil {
 			t.Fatalf("CRITICAL BUG: probe runner received nil secretData")
 		}
-		if string(receivedSecretData["db-password"]) != "super-secret-password" {
-			t.Errorf("expected 'super-secret-password', got %q", string(receivedSecretData["db-password"]))
+		if capturedValue != "super-secret-password" {
+			t.Errorf("expected 'super-secret-password' during probe execution, got %q", capturedValue)
 		}
 	})
 }
