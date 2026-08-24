@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -64,6 +65,55 @@ func setupTestScheme(t *testing.T) *runtime.Scheme {
 func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *testing.T) {
 	scheme := setupTestScheme(t)
 
+	targetDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "order-service",
+			Namespace: "default",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "app",
+							Image: "order-service:1.0.0",
+							Env: []corev1.EnvVar{
+								{
+									Name: "DB_PASS",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "order-service-rev-old",
+											},
+											Key: "db-pass",
+										},
+									},
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "secret-vol",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: "order-service-rev-old",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	canaryDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "order-service-canary",
+			Namespace: "default",
+		},
+	}
+
 	policy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "order-policy",
@@ -89,7 +139,7 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
-		WithObjects(policy).
+		WithObjects(policy, targetDeployment, canaryDeploy).
 		Build()
 
 	ackTriggered := false
@@ -131,7 +181,8 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	if !meta.IsStatusConditionTrue(updated.Status.Conditions, ConditionTypeRevisionPrepared) {
 		t.Errorf("expected RevisionPrepared condition to be True after step 1")
 	}
-	if updated.Status.DesiredRevision == "" {
+	desiredRevision := updated.Status.DesiredRevision
+	if desiredRevision == "" {
 		t.Errorf("expected DesiredRevision to be populated")
 	}
 
@@ -144,8 +195,8 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		t.Fatalf("expected 1 materialized secret, got %d", len(secretList.Items))
 	}
 	createdSecret := secretList.Items[0]
-	if createdSecret.Labels[LabelRevision] != updated.Status.DesiredRevision {
-		t.Errorf("expected secret revision label %q, got %q", updated.Status.DesiredRevision, createdSecret.Labels[LabelRevision])
+	if createdSecret.Labels[LabelRevision] != desiredRevision {
+		t.Errorf("expected secret revision label %q, got %q", desiredRevision, createdSecret.Labels[LabelRevision])
 	}
 	if len(createdSecret.OwnerReferences) == 0 {
 		t.Errorf("expected controller owner reference on created secret")
@@ -184,13 +235,45 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		t.Errorf("expected step 3 to requeue")
 	}
 
-	// Step 4: Validating -> Promoting
+	// Step 4: Validating -> Promoting (Patches target deployment and cleans up canary)
 	res, err = reconciler.Reconcile(ctx, req)
 	if err != nil {
 		t.Fatalf("step 4 reconcile failed: %v", err)
 	}
 	if !res.Requeue {
 		t.Errorf("expected step 4 to requeue")
+	}
+
+	// Assert target deployment was patched
+	patchedDeploy := &appsv1.Deployment{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "order-service", Namespace: "default"}, patchedDeploy); err != nil {
+		t.Fatalf("failed to get patched target deployment: %v", err)
+	}
+	expectedSecretName := fmt.Sprintf("order-service-rev-%s", desiredRevision)
+	if patchedDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName != expectedSecretName {
+		t.Errorf("expected volume secretName %q, got %q", expectedSecretName, patchedDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+	}
+	if patchedDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name != expectedSecretName {
+		t.Errorf("expected env secret ref %q, got %q", expectedSecretName, patchedDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
+	}
+	if patchedDeploy.Spec.Template.Annotations[LabelRevision] != desiredRevision {
+		t.Errorf("expected pod template revision annotation %q, got %q", desiredRevision, patchedDeploy.Spec.Template.Annotations[LabelRevision])
+	}
+
+	// Assert Canary resources were destroyed
+	if err := fakeClient.List(ctx, netpolList); err == nil && len(netpolList.Items) != 0 {
+		t.Errorf("expected 0 canary network policies after cleanup, got %d", len(netpolList.Items))
+	}
+
+	// Assert status update
+	if err := fakeClient.Get(ctx, req.NamespacedName, updated); err != nil {
+		t.Fatalf("failed to get policy: %v", err)
+	}
+	if updated.Status.CurrentRevision != desiredRevision {
+		t.Errorf("expected CurrentRevision to be %q, got %q", desiredRevision, updated.Status.CurrentRevision)
+	}
+	if updated.Status.DesiredRevision != "" {
+		t.Errorf("expected DesiredRevision to be empty after promotion, got %q", updated.Status.DesiredRevision)
 	}
 
 	// Step 5: Promoting -> Terminal state
@@ -202,7 +285,7 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		t.Errorf("expected step 5 (terminal) not to requeue")
 	}
 
-	// Step 6: Test Idempotency (reconcile when secret and network policy already exist)
+	// Step 6: Test Idempotency (reconcile second policy when secret already exists)
 	secondPolicy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "second-policy",
@@ -237,6 +320,80 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	}
 	if !res2.Requeue {
 		t.Errorf("expected requeue on successful materialization, got: %v", res2)
+	}
+}
+
+func TestDynamicSecretPolicyReconciler_RollbackCleanup(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	canaryDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "order-service-canary",
+			Namespace: "default",
+		},
+	}
+
+	canaryNetpol := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "order-service-canary-netpol",
+			Namespace: "default",
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rollback-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "order-service",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "failedrev123",
+			Conditions: []metav1.Condition{
+				{
+					Type:   ConditionTypeRolledBack,
+					Status: metav1.ConditionTrue,
+					Reason: ReasonRolledBack,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy, canaryDeploy, canaryNetpol).
+		Build()
+
+	reconciler := &DynamicSecretPolicyReconciler{
+		Client:        fakeClient,
+		Scheme:        scheme,
+		SecretFetcher: &mockSecretFetcher{},
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "rollback-policy",
+			Namespace: "default",
+		},
+	}
+
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected clean exit from rollback state, got: %v", err)
+	}
+	if res.Requeue {
+		t.Errorf("expected no requeue for terminal rollback state")
+	}
+
+	// Verify canary netpol is deleted
+	netpolList := &networkingv1.NetworkPolicyList{}
+	if err := fakeClient.List(context.Background(), netpolList); err == nil && len(netpolList.Items) != 0 {
+		t.Errorf("expected canary netpol to be destroyed on rollback, found %d", len(netpolList.Items))
 	}
 }
 

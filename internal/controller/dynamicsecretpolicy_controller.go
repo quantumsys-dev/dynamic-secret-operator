@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -44,6 +46,7 @@ const (
 	ConditionTypeCanaryProvisioning = "CanaryProvisioning"
 	ConditionTypeValidating         = "Validating"
 	ConditionTypePromoting          = "Promoting"
+	ConditionTypeRolledBack         = "RolledBack"
 )
 
 // Reason constants for DynamicSecretPolicy conditions.
@@ -52,6 +55,8 @@ const (
 	ReasonProvisioning  = "Provisioning"
 	ReasonProbesRunning = "ProbesRunning"
 	ReasonPromoting     = "Promoting"
+	ReasonCompleted     = "Completed"
+	ReasonRolledBack    = "RolledBack"
 )
 
 // LabelRevision is the standard label attached to materialized revision secrets.
@@ -70,6 +75,7 @@ type DynamicSecretPolicyReconciler struct {
 // +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -165,15 +171,29 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 
 	case ConditionTypeValidating:
-		// Transition to Promoting
+		// Transition to Promoting: Patch target workload Deployment and clean up ephemeral canary
+		if err := r.promoteTargetWorkload(ctx, policy); err != nil {
+			logger.Error(err, "failed to promote target workload")
+			return ctrl.Result{}, err
+		}
+
+		// Idempotently delete canary resources after successful promotion patch
+		if err := canary.CleanupCanaryResources(ctx, r.Client, policy); err != nil {
+			logger.Error(err, "failed during post-promotion canary cleanup")
+		}
+
+		// Update Status: Promote desired revision to current revision
+		policy.Status.CurrentRevision = policy.Status.DesiredRevision
+		policy.Status.DesiredRevision = ""
+
 		cond := metav1.Condition{
 			Type:    ConditionTypePromoting,
 			Status:  metav1.ConditionTrue,
-			Reason:  ReasonPromoting,
-			Message: "Promoting validated revision to primary workload",
+			Reason:  ReasonCompleted,
+			Message: fmt.Sprintf("Target workload successfully promoted to revision %s; canary cleaned up", policy.Status.CurrentRevision),
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
-			logger.Error(err, "failed to transition to Promoting")
+			logger.Error(err, "failed to update status to Promoting completed")
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -181,14 +201,77 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	case ConditionTypePromoting:
 		logger.Info("reconciliation cycle completed for policy",
 			"currentRevision", policy.Status.CurrentRevision,
-			"desiredRevision", policy.Status.DesiredRevision,
 		)
+		return ctrl.Result{}, nil
+
+	case ConditionTypeRolledBack:
+		// Failure path: Clean up canary resources to prevent orphaned pods
+		logger.Info("policy in RolledBack state; ensuring canary resources are destroyed")
+		if err := canary.CleanupCanaryResources(ctx, r.Client, policy); err != nil {
+			logger.Error(err, "failed during rollback canary cleanup")
+		}
+		policy.Status.DesiredRevision = ""
 		return ctrl.Result{}, nil
 
 	default:
 		logger.Info("unhandled state encountered; requeuing", "state", currentState)
 		return ctrl.Result{Requeue: true}, nil
 	}
+}
+
+// promoteTargetWorkload patches the production target Deployment with the new Secret revision.
+func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) error {
+	logger := log.FromContext(ctx)
+	targetName := policy.Spec.WorkloadSelector.Name
+	targetKey := types.NamespacedName{
+		Name:      targetName,
+		Namespace: policy.Namespace,
+	}
+
+	targetDeploy := &appsv1.Deployment{}
+	if err := r.Get(ctx, targetKey, targetDeploy); err != nil {
+		return fmt.Errorf("failed to fetch target deployment %q: %w", targetName, err)
+	}
+
+	originalDeploy := targetDeploy.DeepCopy()
+	secretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+
+	if targetDeploy.Spec.Template.Annotations == nil {
+		targetDeploy.Spec.Template.Annotations = make(map[string]string)
+	}
+	targetDeploy.Spec.Template.Annotations[LabelRevision] = policy.Status.DesiredRevision
+
+	// Update volume mounts referencing secrets
+	for i := range targetDeploy.Spec.Template.Spec.Volumes {
+		if targetDeploy.Spec.Template.Spec.Volumes[i].Secret != nil {
+			targetDeploy.Spec.Template.Spec.Volumes[i].Secret.SecretName = secretName
+		}
+	}
+
+	// Update container environment secret references
+	for cIdx := range targetDeploy.Spec.Template.Spec.Containers {
+		for eIdx := range targetDeploy.Spec.Template.Spec.Containers[cIdx].Env {
+			if targetDeploy.Spec.Template.Spec.Containers[cIdx].Env[eIdx].ValueFrom != nil &&
+				targetDeploy.Spec.Template.Spec.Containers[cIdx].Env[eIdx].ValueFrom.SecretKeyRef != nil {
+				targetDeploy.Spec.Template.Spec.Containers[cIdx].Env[eIdx].ValueFrom.SecretKeyRef.Name = secretName
+			}
+		}
+		for efIdx := range targetDeploy.Spec.Template.Spec.Containers[cIdx].EnvFrom {
+			if targetDeploy.Spec.Template.Spec.Containers[cIdx].EnvFrom[efIdx].SecretRef != nil {
+				targetDeploy.Spec.Template.Spec.Containers[cIdx].EnvFrom[efIdx].SecretRef.Name = secretName
+			}
+		}
+	}
+
+	if err := r.Patch(ctx, targetDeploy, client.MergeFrom(originalDeploy)); err != nil {
+		return fmt.Errorf("failed to patch target deployment %q: %w", targetName, err)
+	}
+
+	logger.Info("successfully patched target deployment with new secret revision",
+		"targetDeployment", targetName,
+		"secretRevision", policy.Status.DesiredRevision,
+	)
+	return nil
 }
 
 // materializeSecretRevision pulls the secret payload from Azure Key Vault, calculates a deterministic hash,
@@ -288,6 +371,9 @@ func (r *DynamicSecretPolicyReconciler) updateStatus(ctx context.Context, policy
 
 // determineState evaluates which progressive delivery phase is currently active.
 func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.DynamicSecretPolicy) string {
+	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeRolledBack) {
+		return ConditionTypeRolledBack
+	}
 	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypePromoting) {
 		return ConditionTypePromoting
 	}
