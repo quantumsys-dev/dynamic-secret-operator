@@ -1,6 +1,6 @@
-.PHONY: all build clean test fmt vet
+.PHONY: all build clean test fmt vet lint
 
-all: fmt vet build
+all: fmt vet lint build
 
 build:
 	go build -o bin/dso-manager ./cmd/main.go
@@ -17,3 +17,6 @@ fmt:
 
 vet:
 	go vet ./...
+
+lint:
+	golangci-lint run ./...
