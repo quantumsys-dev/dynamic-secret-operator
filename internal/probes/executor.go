@@ -27,22 +27,6 @@ type ProbeExecutor interface {
 	Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error
 }
 
-// HTTPProbe validates canary connectivity over HTTP/HTTPS.
-type HTTPProbe struct{}
-
-// Execute executes synthetic HTTP validation requests.
-func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
-	return nil
-}
-
-// TLSProbe validates TLS certificate validity and TLS handshakes against canary endpoints.
-type TLSProbe struct{}
-
-// Execute executes TLS handshake and certificate validation.
-func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
-	return nil
-}
-
 // PostgresProbe validates database authentication against PostgreSQL using rotated credentials.
 type PostgresProbe struct{}
 

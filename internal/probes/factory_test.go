@@ -17,7 +17,6 @@ limitations under the License.
 package probes
 
 import (
-	"context"
 	"testing"
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
@@ -86,14 +85,6 @@ func TestNewProbeExecutor(t *testing.T) {
 			}
 			if executor == nil {
 				t.Fatalf("expected non-nil executor for probe type %q", tt.probeType)
-			}
-
-			// Verify stub execution
-			ctx := context.Background()
-			cfg := secretv1alpha1.ValidationProbe{Type: secretv1alpha1.ProbeType(tt.probeType)}
-			secretData := map[string][]byte{"key": []byte("val")}
-			if err := executor.Execute(ctx, cfg, secretData); err != nil {
-				t.Errorf("stub Execute failed unexpectedly: %v", err)
 			}
 		})
 	}
