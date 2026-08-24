@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +35,7 @@ import (
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
+	"github.com/quantumsys/dynamic-secret-operator/internal/canary"
 )
 
 // Condition Types for DynamicSecretPolicy state machine transitions.
@@ -68,6 +70,7 @@ type DynamicSecretPolicyReconciler struct {
 // +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -122,12 +125,24 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 
 	case ConditionTypeRevisionPrepared:
-		// Transition to CanaryProvisioning
+		// Transition to CanaryProvisioning and enforce strict NetworkPolicy isolation
+		netpol := canary.BuildNetworkPolicy(policy)
+		if err := controllerutil.SetControllerReference(policy, netpol, r.Scheme); err != nil {
+			logger.Error(err, "failed to set controller reference on canary network policy")
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Create(ctx, netpol); err != nil && !apierrors.IsAlreadyExists(err) {
+			logger.Error(err, "failed to create canary network policy")
+			return ctrl.Result{}, err
+		}
+		logger.Info("enforced canary network policy isolation", "networkPolicy", netpol.Name)
+
 		cond := metav1.Condition{
 			Type:    ConditionTypeCanaryProvisioning,
 			Status:  metav1.ConditionTrue,
 			Reason:  ReasonProvisioning,
-			Message: "Canary workload pod provisioning initiated",
+			Message: fmt.Sprintf("Canary isolation network policy %s provisioned", netpol.Name),
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to CanaryProvisioning")
@@ -293,5 +308,6 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&secretv1alpha1.DynamicSecretPolicy{}).
 		Owns(&corev1.Secret{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Complete(r)
 }

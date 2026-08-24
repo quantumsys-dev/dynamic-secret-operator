@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -78,6 +79,9 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 			WorkloadSelector: secretv1alpha1.WorkloadSelector{
 				Kind: "Deployment",
 				Name: "order-service",
+			},
+			ValidationProbes: []secretv1alpha1.ValidationProbe{
+				{Type: secretv1alpha1.ProbeTypePostgreSQL},
 			},
 		},
 	}
@@ -147,7 +151,58 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		t.Errorf("expected controller owner reference on created secret")
 	}
 
-	// Step 2: Test Idempotency (reconcile when secret already exists)
+	// Step 2: RevisionPrepared -> CanaryProvisioning (NetworkPolicy creation)
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("step 2 reconcile failed: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("expected step 2 to requeue")
+	}
+
+	netpolList := &networkingv1.NetworkPolicyList{}
+	if err := fakeClient.List(ctx, netpolList); err != nil {
+		t.Fatalf("failed to list network policies: %v", err)
+	}
+	if len(netpolList.Items) != 1 {
+		t.Fatalf("expected 1 canary network policy, got %d", len(netpolList.Items))
+	}
+	createdNetpol := netpolList.Items[0]
+	if createdNetpol.Name != "order-service-canary-netpol" {
+		t.Errorf("expected netpol name 'order-service-canary-netpol', got %q", createdNetpol.Name)
+	}
+	if len(createdNetpol.OwnerReferences) == 0 {
+		t.Errorf("expected controller owner reference on network policy")
+	}
+
+	// Step 3: CanaryProvisioning -> Validating
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("step 3 reconcile failed: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("expected step 3 to requeue")
+	}
+
+	// Step 4: Validating -> Promoting
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("step 4 reconcile failed: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("expected step 4 to requeue")
+	}
+
+	// Step 5: Promoting -> Terminal state
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("step 5 reconcile failed: %v", err)
+	}
+	if res.Requeue {
+		t.Errorf("expected step 5 (terminal) not to requeue")
+	}
+
+	// Step 6: Test Idempotency (reconcile when secret and network policy already exist)
 	secondPolicy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "second-policy",
