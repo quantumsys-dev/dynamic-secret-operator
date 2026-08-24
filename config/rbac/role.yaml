@@ -29,19 +29,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - networking.k8s.io
-  resources:
-  - networkpolicies
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - secret.quantumsys.io
+  - dso.quantumsys.dev
   resources:
   - dynamicsecretpolicies
   verbs:
@@ -53,16 +41,28 @@ rules:
   - update
   - watch
 - apiGroups:
-  - secret.quantumsys.io
+  - dso.quantumsys.dev
   resources:
   - dynamicsecretpolicies/finalizers
   verbs:
   - update
 - apiGroups:
-  - secret.quantumsys.io
+  - dso.quantumsys.dev
   resources:
   - dynamicsecretpolicies/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

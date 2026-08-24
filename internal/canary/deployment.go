@@ -27,7 +27,7 @@ import (
 )
 
 // LabelRevision is the standard label attached to revision secrets.
-const LabelRevision = "dso.quantumsys.io/revision"
+const LabelRevision = "dso.quantumsys.dev/revision"
 
 // BuildCanaryDeployment constructs an isolated 1-replica canary Deployment cloned from the
 // target production deployment, mounting the newly materialized secret revision.

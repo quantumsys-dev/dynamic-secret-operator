@@ -160,7 +160,7 @@ func main() {
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "81b37f41.quantumsys.io",
+		LeaderElectionID:       "81b37f41.quantumsys.dev",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

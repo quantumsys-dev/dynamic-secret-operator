@@ -19,10 +19,10 @@ metadata:
   name: <target-workload>-rev-<sha256-short>
   namespace: <namespace>
   labels:
-    dso.quantumsys.io/managed: "true"
-    dso.quantumsys.io/revision: "<sha256-short>"
+    dso.quantumsys.dev/managed: "true"
+    dso.quantumsys.dev/revision: "<sha256-short>"
   ownerReferences:
-    - apiVersion: secret.quantumsys.io/v1alpha1
+    - apiVersion: dso.quantumsys.dev/v1alpha1
       kind: DynamicSecretPolicy
       name: <policy-name>
       controller: true

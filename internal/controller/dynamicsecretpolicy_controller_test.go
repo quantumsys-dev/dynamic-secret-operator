@@ -563,8 +563,8 @@ func TestDynamicSecretPolicyReconciler_StateTransitions(t *testing.T) {
 			Build()
 
 		r := &DynamicSecretPolicyReconciler{
-			Client: c,
-			Scheme: scheme,
+			Client:        c,
+			Scheme:        scheme,
 			SecretFetcher: &mockSecretFetcher{},
 		}
 
@@ -1571,5 +1571,3 @@ func TestDynamicSecretPolicyReconciler_MultipleSequentialRotations(t *testing.T)
 		t.Fatalf("expected idle reconcile after rotation 2: %v", err)
 	}
 }
-
-

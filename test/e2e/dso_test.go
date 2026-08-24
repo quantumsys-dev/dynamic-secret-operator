@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	labelRevision = "dso.quantumsys.io/revision"
+	labelRevision = "dso.quantumsys.dev/revision"
 )
 
 func TestHappyPath_Promotion(t *testing.T) {

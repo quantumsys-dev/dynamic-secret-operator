@@ -124,7 +124,7 @@ helm install dso ./deploy/helm/dso \
 Create a policy linking your Azure Key Vault secret to your target Kubernetes `Deployment`:
 
 ```yaml
-apiVersion: secret.quantumsys.io/v1alpha1
+apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
   name: order-service-secret-policy

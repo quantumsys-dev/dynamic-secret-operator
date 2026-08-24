@@ -28,10 +28,10 @@ import (
 )
 
 // LabelCanary is the label key identifying canary workloads.
-const LabelCanary = "dso.quantumsys.io/canary"
+const LabelCanary = "dso.quantumsys.dev/canary"
 
 // LabelTargetWorkload identifies the primary workload being rotated.
-const LabelTargetWorkload = "dso.quantumsys.io/target"
+const LabelTargetWorkload = "dso.quantumsys.dev/target"
 
 // BuildNetworkPolicy constructs an isolating Kubernetes NetworkPolicy around the canary workload.
 // It enforces strict zero-trust default-deny on all Ingress, and restricts Egress strictly to DNS
