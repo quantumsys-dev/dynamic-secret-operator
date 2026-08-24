@@ -27,7 +27,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	"github.com/quantumsys/dynamic-secret-operator/pkg/telemetry"
 )
 
 // TLSProbe validates endpoint TLS handshakes, certificate expiration, and cryptographic thumbprints.
@@ -36,8 +40,18 @@ type TLSProbe struct{}
 // Execute connects via TLS to config.Endpoint, inspects peer certificates for expiration,
 // and optionally verifies the certificate thumbprint against secretData.
 func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+	ctx, span := telemetry.Tracer.Start(ctx, "ExecuteTLSProbe",
+		trace.WithAttributes(
+			attribute.String("probe.type", string(secretv1alpha1.ProbeTypeTLS)),
+			attribute.String("probe.endpoint", config.Endpoint),
+		),
+	)
+	defer span.End()
+
 	if config.Endpoint == "" {
-		return errors.New("tls probe endpoint must not be empty")
+		err := errors.New("tls probe endpoint must not be empty")
+		span.RecordError(err)
+		return err
 	}
 
 	if config.QueryTimeout > 0 {
@@ -54,7 +68,9 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 
 	rawConn, err := dialer.DialContext(ctx, "tcp", config.Endpoint)
 	if err != nil {
-		return fmt.Errorf("tls dial failed for %q: %w", config.Endpoint, err)
+		dialErr := fmt.Errorf("tls dial failed for %q: %w", config.Endpoint, err)
+		span.RecordError(dialErr)
+		return dialErr
 	}
 	defer func() {
 		if rawConn != nil {
@@ -64,12 +80,16 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 
 	tlsConn, ok := rawConn.(*tls.Conn)
 	if !ok || tlsConn == nil {
-		return fmt.Errorf("failed to obtain tls connection state for %q", config.Endpoint)
+		connErr := fmt.Errorf("failed to obtain tls connection state for %q", config.Endpoint)
+		span.RecordError(connErr)
+		return connErr
 	}
 
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
-		return fmt.Errorf("no peer certificates presented by endpoint %q", config.Endpoint)
+		certErr := fmt.Errorf("no peer certificates presented by endpoint %q", config.Endpoint)
+		span.RecordError(certErr)
+		return certErr
 	}
 
 	leafCert := state.PeerCertificates[0]
@@ -77,10 +97,14 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 
 	// 1. Expiration check
 	if now.After(leafCert.NotAfter) {
-		return fmt.Errorf("certificate expired on %s", leafCert.NotAfter.Format(time.RFC3339))
+		expErr := fmt.Errorf("certificate expired on %s", leafCert.NotAfter.Format(time.RFC3339))
+		span.RecordError(expErr)
+		return expErr
 	}
 	if now.Before(leafCert.NotBefore) {
-		return fmt.Errorf("certificate is not yet valid (valid from %s)", leafCert.NotBefore.Format(time.RFC3339))
+		validErr := fmt.Errorf("certificate is not yet valid (valid from %s)", leafCert.NotBefore.Format(time.RFC3339))
+		span.RecordError(validErr)
+		return validErr
 	}
 
 	// 2. Cryptographic Thumbprint & Secret Content Verification
@@ -98,7 +122,9 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 			actualSHA1 := fmt.Sprintf("%x", sha1.Sum(leafCert.Raw))
 
 			if expected != actualSHA256 && expected != actualSHA1 {
-				return fmt.Errorf("tls certificate thumbprint mismatch against expected secret value")
+				mismatchErr := fmt.Errorf("tls certificate thumbprint mismatch against expected secret value")
+				span.RecordError(mismatchErr)
+				return mismatchErr
 			}
 		}
 
@@ -116,7 +142,9 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 				expectedHash := sha256.Sum256(block.Bytes)
 				actualHash := sha256.Sum256(leafCert.Raw)
 				if expectedHash != actualHash {
-					return fmt.Errorf("tls certificate DER hash does not match tls.crt payload")
+					derErr := fmt.Errorf("tls certificate DER hash does not match tls.crt payload")
+					span.RecordError(derErr)
+					return derErr
 				}
 			}
 		}

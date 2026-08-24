@@ -24,9 +24,12 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
+	"github.com/quantumsys/dynamic-secret-operator/pkg/telemetry"
 )
 
 // MySQLProbe executes synthetic connectivity and authentication validation against MySQL.
@@ -38,8 +41,17 @@ type MySQLProbe struct {
 // Execute parses rotated credentials, opens a connection to MySQL, executes a lightweight "SELECT 1"
 // query, wipes in-memory secrets, and strictly sanitizes any returned errors.
 func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+	ctx, span := telemetry.Tracer.Start(ctx, "ExecuteMySQLProbe",
+		trace.WithAttributes(
+			attribute.String("probe.type", string(secretv1alpha1.ProbeTypeMySQL)),
+		),
+	)
+	defer span.End()
+
 	if config.Endpoint == "" {
-		return errors.New("mysql probe endpoint must not be empty")
+		err := errors.New("mysql probe endpoint must not be empty")
+		span.RecordError(err)
+		return err
 	}
 
 	if config.QueryTimeout > 0 {
@@ -65,7 +77,9 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 
 	host, port, err := splitHostPort(config.Endpoint, "3306")
 	if err != nil {
-		return fmt.Errorf("invalid mysql endpoint %q: %w", config.Endpoint, err)
+		hostErr := fmt.Errorf("invalid mysql endpoint %q: %w", config.Endpoint, err)
+		span.RecordError(hostErr)
+		return hostErr
 	}
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=5s",
@@ -78,7 +92,9 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 
 	db, err := connector("mysql", dsn)
 	if err != nil {
-		return SanitizeDBError(err, password, dsn)
+		sanitized := SanitizeDBError(err, password, dsn)
+		span.RecordError(sanitized)
+		return sanitized
 	}
 	defer func() {
 		if db != nil {
@@ -87,12 +103,16 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 	}()
 
 	if err := db.PingContext(ctx); err != nil {
-		return SanitizeDBError(err, password, dsn)
+		sanitized := SanitizeDBError(err, password, dsn)
+		span.RecordError(sanitized)
+		return sanitized
 	}
 
 	var result int
 	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&result); err != nil {
-		return SanitizeDBError(err, password, dsn)
+		sanitized := SanitizeDBError(err, password, dsn)
+		span.RecordError(sanitized)
+		return sanitized
 	}
 
 	return nil

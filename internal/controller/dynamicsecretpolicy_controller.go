@@ -22,6 +22,9 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -39,6 +42,7 @@ import (
 	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys/dynamic-secret-operator/internal/canary"
 	"github.com/quantumsys/dynamic-secret-operator/internal/probes"
+	"github.com/quantumsys/dynamic-secret-operator/pkg/telemetry"
 )
 
 // Condition Types for DynamicSecretPolicy state machine transitions.
@@ -91,6 +95,14 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	ctx, span := telemetry.Tracer.Start(ctx, "ReconcileDynamicSecretPolicy",
+		trace.WithAttributes(
+			attribute.String("policy.name", req.Name),
+			attribute.String("policy.namespace", req.Namespace),
+		),
+	)
+	defer span.End()
+
 	logger := log.FromContext(ctx).WithValues(
 		"dynamicSecretPolicy", req.NamespacedName,
 	)
@@ -112,6 +124,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Evaluate state machine progression based on current status conditions
 	currentState := r.determineState(policy)
 	logger.Info("evaluating DynamicSecretPolicy state machine", "currentState", currentState)
+	span.SetAttributes(attribute.String("policy.state", currentState))
 
 	// If Circuit Breaker is tripped during an active rollout, halt reconciliation
 	if currentState != "" && policy.Status.ConsecutiveFailures >= threshold {
@@ -119,6 +132,9 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			"consecutiveFailures", policy.Status.ConsecutiveFailures,
 			"threshold", threshold,
 		)
+		telemetry.CircuitBreakersTripped.WithLabelValues(policy.Name, policy.Namespace).Inc()
+		span.SetStatus(codes.Error, "Circuit breaker tripped")
+
 		if !meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCircuitBreakerTripped) {
 			cond := metav1.Condition{
 				Type:    ConditionTypeCircuitBreakerTripped,
@@ -135,10 +151,13 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	switch currentState {
 	case "":
+		telemetry.RotationsTotal.WithLabelValues(policy.Name, policy.Namespace).Inc()
+
 		// Initial State: Materialize immutable SecretRevision from Key Vault
 		revisionHash, err := r.materializeSecretRevision(ctx, policy)
 		if err != nil {
 			logger.Error(err, "failed to materialize secret revision from Key Vault")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 
@@ -160,6 +179,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to RevisionPrepared")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 
@@ -176,11 +196,13 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		netpol := canary.BuildNetworkPolicy(policy)
 		if err := controllerutil.SetControllerReference(policy, netpol, r.Scheme); err != nil {
 			logger.Error(err, "failed to set controller reference on canary network policy")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 
 		if err := r.Create(ctx, netpol); err != nil && !apierrors.IsAlreadyExists(err) {
 			logger.Error(err, "failed to create canary network policy")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 		logger.Info("enforced canary network policy isolation", "networkPolicy", netpol.Name)
@@ -193,6 +215,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to CanaryProvisioning")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -207,6 +230,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to Validating")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -215,12 +239,15 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		// Execute validation probes against the canary workload
 		if err := r.runValidationProbes(ctx, policy); err != nil {
 			policy.Status.ConsecutiveFailures++
+			telemetry.RotationsFailed.WithLabelValues(policy.Name, policy.Namespace).Inc()
+			span.RecordError(err)
 			logger.Error(err, "validation probe failed",
 				"consecutiveFailures", policy.Status.ConsecutiveFailures,
 				"threshold", threshold,
 			)
 
 			if policy.Status.ConsecutiveFailures >= threshold {
+				telemetry.CircuitBreakersTripped.WithLabelValues(policy.Name, policy.Namespace).Inc()
 				logger.Error(err, "consecutive failure threshold reached; tripping circuit breaker",
 					"failures", policy.Status.ConsecutiveFailures,
 					"threshold", threshold,
@@ -252,6 +279,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 		if err := r.promoteTargetWorkload(ctx, policy); err != nil {
 			logger.Error(err, "failed to promote target workload")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 
@@ -272,6 +300,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to update status to Promoting completed")
+			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -315,7 +344,10 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 	}
 
 	for _, probe := range policy.Spec.ValidationProbes {
-		if err := runner(ctx, probe, nil); err != nil {
+		start := time.Now()
+		err := runner(ctx, probe, nil)
+		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Name, policy.Namespace, string(probe.Type)).Observe(time.Since(start).Seconds())
+		if err != nil {
 			return err
 		}
 	}

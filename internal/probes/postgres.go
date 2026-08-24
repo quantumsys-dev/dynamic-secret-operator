@@ -26,9 +26,12 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
+	"github.com/quantumsys/dynamic-secret-operator/pkg/telemetry"
 )
 
 // PostgresProbe executes synthetic connectivity and authentication validation against PostgreSQL.
@@ -40,8 +43,17 @@ type PostgresProbe struct {
 // Execute parses rotated credentials, opens a connection to PostgreSQL, executes a lightweight "SELECT 1"
 // query, wipes in-memory secrets, and strictly sanitizes any returned errors.
 func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+	ctx, span := telemetry.Tracer.Start(ctx, "ExecutePostgresProbe",
+		trace.WithAttributes(
+			attribute.String("probe.type", string(secretv1alpha1.ProbeTypePostgreSQL)),
+		),
+	)
+	defer span.End()
+
 	if config.Endpoint == "" {
-		return errors.New("postgresql probe endpoint must not be empty")
+		err := errors.New("postgresql probe endpoint must not be empty")
+		span.RecordError(err)
+		return err
 	}
 
 	if config.QueryTimeout > 0 {
@@ -70,7 +82,9 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 
 	host, port, err := splitHostPort(config.Endpoint, "5432")
 	if err != nil {
-		return fmt.Errorf("invalid postgres endpoint %q: %w", config.Endpoint, err)
+		hostErr := fmt.Errorf("invalid postgres endpoint %q: %w", config.Endpoint, err)
+		span.RecordError(hostErr)
+		return hostErr
 	}
 
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=%d",
@@ -83,7 +97,9 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 
 	db, err := connector("postgres", dsn)
 	if err != nil {
-		return SanitizeDBError(err, password, dsn)
+		sanitized := SanitizeDBError(err, password, dsn)
+		span.RecordError(sanitized)
+		return sanitized
 	}
 	defer func() {
 		if db != nil {
@@ -92,12 +108,16 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 	}()
 
 	if err := db.PingContext(ctx); err != nil {
-		return SanitizeDBError(err, password, dsn)
+		sanitized := SanitizeDBError(err, password, dsn)
+		span.RecordError(sanitized)
+		return sanitized
 	}
 
 	var result int
 	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&result); err != nil {
-		return SanitizeDBError(err, password, dsn)
+		sanitized := SanitizeDBError(err, password, dsn)
+		span.RecordError(sanitized)
+		return sanitized
 	}
 
 	return nil
@@ -111,7 +131,6 @@ func extractSecretValue(data map[string][]byte, keys ...string) string {
 		if val, ok := data[k]; ok && len(val) > 0 {
 			return string(val)
 		}
-		// Also check case-insensitive match
 		for dataKey, val := range data {
 			if strings.EqualFold(dataKey, k) && len(val) > 0 {
 				return string(val)

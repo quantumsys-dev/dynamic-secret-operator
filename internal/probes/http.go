@@ -23,7 +23,11 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	"github.com/quantumsys/dynamic-secret-operator/pkg/telemetry"
 )
 
 // HTTPProbe validates canary health by issuing synthetic HTTP GET requests.
@@ -34,8 +38,18 @@ type HTTPProbe struct {
 
 // Execute performs an HTTP GET against config.Endpoint and asserts a 2xx or 3xx status code.
 func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+	ctx, span := telemetry.Tracer.Start(ctx, "ExecuteHTTPProbe",
+		trace.WithAttributes(
+			attribute.String("probe.type", string(secretv1alpha1.ProbeTypeHTTP)),
+			attribute.String("probe.endpoint", config.Endpoint),
+		),
+	)
+	defer span.End()
+
 	if config.Endpoint == "" {
-		return fmt.Errorf("http probe endpoint must not be empty")
+		err := fmt.Errorf("http probe endpoint must not be empty")
+		span.RecordError(err)
+		return err
 	}
 
 	if config.QueryTimeout > 0 {
@@ -60,17 +74,23 @@ func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.Validatio
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, config.Endpoint, nil)
 	if err != nil {
-		return fmt.Errorf("failed to construct http probe request for %q: %w", config.Endpoint, err)
+		reqErr := fmt.Errorf("failed to construct http probe request for %q: %w", config.Endpoint, err)
+		span.RecordError(reqErr)
+		return reqErr
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("http probe request failed for %q: %w", config.Endpoint, err)
+		doErr := fmt.Errorf("http probe request failed for %q: %w", config.Endpoint, err)
+		span.RecordError(doErr)
+		return doErr
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return fmt.Errorf("http probe received unsuccessful status code %d from %q", resp.StatusCode, config.Endpoint)
+		statusErr := fmt.Errorf("http probe received unsuccessful status code %d from %q", resp.StatusCode, config.Endpoint)
+		span.RecordError(statusErr)
+		return statusErr
 	}
 
 	return nil
