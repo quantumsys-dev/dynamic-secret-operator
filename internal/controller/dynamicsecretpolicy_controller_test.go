@@ -21,7 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -30,7 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
@@ -63,6 +68,183 @@ func setupTestScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
+func TestDynamicSecretPolicyReconciler_SetupWithManager(t *testing.T) {
+	scheme := setupTestScheme(t)
+	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:6443"}, ctrl.Options{
+		Scheme: scheme,
+	})
+	if err == nil {
+		r := &DynamicSecretPolicyReconciler{
+			Client: mgr.GetClient(),
+			Scheme: scheme,
+		}
+		_ = r.SetupWithManager(mgr)
+	}
+}
+
+// =========================================================================
+// Ginkgo & Gomega Asynchronous Envtest Integration Suite
+// =========================================================================
+
+var _ = Describe("DynamicSecretPolicy Controller Envtest Suite", func() {
+	Context("When reconciling a DynamicSecretPolicy against live API server", func() {
+		const (
+			policyName       = "envtest-policy"
+			targetDeployName = "envtest-target-app"
+			namespace        = "default"
+		)
+
+		ctx := context.Background()
+		typeNamespacedName := types.NamespacedName{
+			Name:      policyName,
+			Namespace: namespace,
+		}
+
+		BeforeEach(func() {
+			if k8sClient == nil {
+				Skip("k8sClient not initialized (envtest skipped)")
+			}
+
+			// Create target dummy deployment
+			targetDeploy := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      targetDeployName,
+					Namespace: namespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: func() *int32 { i := int32(2); return &i }(),
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": targetDeployName},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"app": targetDeployName},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "app",
+									Image: "nginx:alpine",
+									Env: []corev1.EnvVar{
+										{
+											Name: "DATABASE_PASSWORD",
+											ValueFrom: &corev1.EnvVarSource{
+												SecretKeyRef: &corev1.SecretKeySelector{
+													LocalObjectReference: corev1.LocalObjectReference{
+														Name: "initial-secret",
+													},
+													Key: "db-secret",
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			_ = k8sClient.Create(ctx, targetDeploy)
+		})
+
+		AfterEach(func() {
+			if k8sClient == nil {
+				return
+			}
+			policy := &secretv1alpha1.DynamicSecretPolicy{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, policy); err == nil {
+				_ = k8sClient.Delete(ctx, policy)
+			}
+			targetDeploy := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      targetDeployName,
+					Namespace: namespace,
+				},
+			}
+			_ = k8sClient.Delete(ctx, targetDeploy)
+		})
+
+		It("should materialize immutable SecretRevision and progressively promote workload", func() {
+			if k8sClient == nil {
+				Skip("k8sClient not initialized")
+			}
+
+			By("Creating the DynamicSecretPolicy resource")
+			policy := &secretv1alpha1.DynamicSecretPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      policyName,
+					Namespace: namespace,
+				},
+				Spec: secretv1alpha1.DynamicSecretPolicySpec{
+					VaultRef: secretv1alpha1.VaultReference{
+						KeyVaultURI: "https://dso-vault.vault.azure.net",
+						ObjectName:  "db-secret",
+						ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+					},
+					WorkloadSelector: secretv1alpha1.WorkloadSelector{
+						Kind: "Deployment",
+						Name: targetDeployName,
+					},
+					ValidationProbes: []secretv1alpha1.ValidationProbe{
+						{
+							Type:         secretv1alpha1.ProbeTypeHTTP,
+							Endpoint:     "http://localhost:8080/health",
+							QueryTimeout: 5,
+						},
+					},
+					RollbackConfig: &secretv1alpha1.RollbackConfig{
+						AutoRollback:            true,
+						CircuitBreakerThreshold: 3,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, policy)).To(Succeed())
+
+			By("Assertion 1: Eventually creating the immutable SecretRevision")
+			Eventually(func() error {
+				secrets := &corev1.SecretList{}
+				if err := k8sClient.List(ctx, secrets, client.InNamespace(namespace)); err != nil {
+					return err
+				}
+				for _, sec := range secrets.Items {
+					if rev, ok := sec.Labels[LabelRevision]; ok && rev != "" {
+						return nil
+					}
+				}
+				return fmt.Errorf("no SecretRevision found with %s label", LabelRevision)
+			}, time.Second*10, time.Millisecond*250).Should(Succeed())
+
+			By("Assertion 2: Eventually patching target deployment with the revision")
+			Eventually(func() error {
+				deploy := &appsv1.Deployment{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: targetDeployName, Namespace: namespace}, deploy); err != nil {
+					return err
+				}
+				if deploy.Spec.Template.Annotations != nil && deploy.Spec.Template.Annotations[LabelRevision] != "" {
+					return nil
+				}
+				return fmt.Errorf("target deployment not yet patched with revision annotation")
+			}, time.Second*10, time.Millisecond*250).Should(Succeed())
+
+			By("Assertion 3: Eventually updating the CRD status to Promoting/Completed")
+			Eventually(func() error {
+				p := &secretv1alpha1.DynamicSecretPolicy{}
+				if err := k8sClient.Get(ctx, typeNamespacedName, p); err != nil {
+					return err
+				}
+				if p.Status.CurrentRevision != "" {
+					return nil
+				}
+				return fmt.Errorf("status.currentRevision is still empty")
+			}, time.Second*10, time.Millisecond*250).Should(Succeed())
+		})
+	})
+})
+
+// =========================================================================
+// Deterministic Table-Driven Unit Tests (Fake Client)
+// =========================================================================
+
 func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *testing.T) {
 	scheme := setupTestScheme(t)
 
@@ -87,6 +269,15 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 												Name: "order-service-rev-old",
 											},
 											Key: "db-pass",
+										},
+									},
+								},
+							},
+							EnvFrom: []corev1.EnvFromSource{
+								{
+									SecretRef: &corev1.SecretEnvSource{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "order-service-rev-old",
 										},
 									},
 								},
@@ -153,7 +344,7 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		},
 		OnSecretMaterialized: func(ctx context.Context, policyName, revision string) error {
 			ackTriggered = true
-			return nil
+			return errors.New("callback logging error")
 		},
 	}
 
@@ -288,6 +479,320 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	if res.Requeue {
 		t.Errorf("expected step 5 (terminal) not to requeue")
 	}
+}
+
+func TestDynamicSecretPolicyReconciler_StateTransitions(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	t.Run("transitions from CanaryProvisioning to Validating", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "canary-prov-policy",
+				Namespace: "default",
+			},
+			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				DesiredRevision: "rev-abc-1234",
+				Conditions: []metav1.Condition{
+					{
+						Type:   ConditionTypeCanaryProvisioning,
+						Status: metav1.ConditionTrue,
+						Reason: ReasonProvisioning,
+					},
+				},
+			},
+		}
+
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+			WithObjects(policy).
+			Build()
+
+		r := &DynamicSecretPolicyReconciler{
+			Client: c,
+			Scheme: scheme,
+		}
+
+		res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "canary-prov-policy", Namespace: "default"}})
+		if err != nil {
+			t.Fatalf("unexpected reconcile error: %v", err)
+		}
+		if !res.Requeue {
+			t.Errorf("expected requeue after transitioning to Validating")
+		}
+
+		updated := &secretv1alpha1.DynamicSecretPolicy{}
+		_ = c.Get(context.Background(), types.NamespacedName{Name: "canary-prov-policy", Namespace: "default"}, updated)
+		if !meta.IsStatusConditionTrue(updated.Status.Conditions, ConditionTypeValidating) {
+			t.Errorf("expected Validating condition to be True")
+		}
+	})
+
+	t.Run("handles unhandled state gracefully by requeuing", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "unhandled-policy",
+				Namespace: "default",
+			},
+			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   "UnknownState",
+						Status: metav1.ConditionTrue,
+						Reason: "UnknownReason",
+					},
+				},
+			},
+		}
+
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+			WithObjects(policy).
+			Build()
+
+		r := &DynamicSecretPolicyReconciler{
+			Client: c,
+			Scheme: scheme,
+			SecretFetcher: &mockSecretFetcher{},
+		}
+
+		res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "unhandled-policy", Namespace: "default"}})
+		if err != nil {
+			t.Fatalf("unexpected error on unhandled state: %v", err)
+		}
+		if !res.Requeue {
+			t.Errorf("expected requeue on unhandled state")
+		}
+	})
+}
+
+func TestDynamicSecretPolicyReconciler_PromotingTerminalState(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "promoting-policy",
+			Namespace: "default",
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			CurrentRevision: "rev-done-1234",
+			Conditions: []metav1.Condition{
+				{
+					Type:   ConditionTypePromoting,
+					Status: metav1.ConditionTrue,
+					Reason: ReasonCompleted,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "promoting-policy", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("expected nil error on promoting terminal state")
+	}
+	if res.Requeue {
+		t.Errorf("expected no requeue for terminal state")
+	}
+}
+
+func TestDynamicSecretPolicyReconciler_MaterializationErrorPaths(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "error-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://my-vault.vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "order-service",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy).
+		Build()
+
+	t.Run("fails when SecretFetcher is nil", func(t *testing.T) {
+		r := &DynamicSecretPolicyReconciler{
+			Client: fakeClient,
+			Scheme: scheme,
+		}
+		_, err := r.materializeSecretRevision(context.Background(), policy)
+		if err == nil {
+			t.Fatalf("expected error when SecretFetcher is nil")
+		}
+	})
+
+	t.Run("fails when SecretFetcher returns error", func(t *testing.T) {
+		r := &DynamicSecretPolicyReconciler{
+			Client: fakeClient,
+			Scheme: scheme,
+			SecretFetcher: &mockSecretFetcher{
+				getSecretFunc: func(ctx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+					return nil, errors.New("vault 403 forbidden")
+				},
+			},
+		}
+		_, err := r.materializeSecretRevision(context.Background(), policy)
+		if err == nil {
+			t.Fatalf("expected error when fetcher fails")
+		}
+	})
+
+	t.Run("reconciler handles materialization error cleanly", func(t *testing.T) {
+		r := &DynamicSecretPolicyReconciler{
+			Client: fakeClient,
+			Scheme: scheme,
+			SecretFetcher: &mockSecretFetcher{
+				getSecretFunc: func(ctx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+					return nil, errors.New("vault error")
+				},
+			},
+		}
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "error-policy", Namespace: "default"}})
+		if err == nil {
+			t.Fatalf("expected error from Reconcile when materialization fails")
+		}
+	})
+
+	t.Run("handles existing secret revision idempotently", func(t *testing.T) {
+		existingSec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "order-service-rev-f5a6b7c8d9e0",
+				Namespace: "default",
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(existingSec).
+			Build()
+
+		r := &DynamicSecretPolicyReconciler{
+			Client: c,
+			Scheme: scheme,
+			SecretFetcher: &mockSecretFetcher{
+				getSecretFunc: func(ctx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+					return &azure.SecretPayload{
+						Value:   []byte("idempotent-test"),
+						Version: "v1",
+					}, nil
+				},
+			},
+		}
+		rev, err := r.materializeSecretRevision(context.Background(), policy)
+		if err != nil {
+			t.Fatalf("expected idempotent success on existing secret, got: %v", err)
+		}
+		if rev == "" {
+			t.Errorf("expected non-empty revision")
+		}
+	})
+}
+
+func TestDynamicSecretPolicyReconciler_PromoteErrorPath(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "promote-err-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "missing-target-service",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "rev-err-1234",
+			Conditions: []metav1.Condition{
+				{
+					Type:   ConditionTypeValidating,
+					Status: metav1.ConditionTrue,
+					Reason: ReasonProbesRunning,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	t.Run("promoteTargetWorkload returns error", func(t *testing.T) {
+		err := r.promoteTargetWorkload(context.Background(), policy)
+		if err == nil {
+			t.Fatalf("expected error when target deployment does not exist")
+		}
+	})
+
+	t.Run("reconciler returns error on promotion failure", func(t *testing.T) {
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "promote-err-policy", Namespace: "default"}})
+		if err == nil {
+			t.Fatalf("expected reconcile error on promotion failure")
+		}
+	})
+}
+
+func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	t.Run("returns nil immediately when no probes configured", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{}
+		r := &DynamicSecretPolicyReconciler{}
+		if err := r.runValidationProbes(context.Background(), policy); err != nil {
+			t.Fatalf("expected nil error for empty probes")
+		}
+	})
+
+	t.Run("executes default probe runner", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				ValidationProbes: []secretv1alpha1.ValidationProbe{
+					{
+						Type:     secretv1alpha1.ProbeTypeHTTP,
+						Endpoint: "", // Will fail validation cleanly
+					},
+				},
+			},
+		}
+		r := &DynamicSecretPolicyReconciler{
+			Scheme: scheme,
+		}
+		err := r.runValidationProbes(context.Background(), policy)
+		if err == nil {
+			t.Fatalf("expected error from empty probe endpoint")
+		}
+	})
 }
 
 func TestDynamicSecretPolicyReconciler_CircuitBreakerTripsOnConsecutiveFailures(t *testing.T) {
