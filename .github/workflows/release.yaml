@@ -83,6 +83,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+          outputs: type=image,oci-mediatypes=true,name=canonical,push=true
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v4.1.2
