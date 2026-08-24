@@ -20,13 +20,10 @@ jobs:
 
       - name: Verify DCO Sign-off
         run: |
-          # Define o range de commits a ser verificado dependendo do evento
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             RANGE="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
           else
-            # Para push na main, valida o último commit ou o range do push
             RANGE="${{ github.event.before }}..${{ github.event.after }}"
-            # Caso seja o primeiro push do repositório (before é vazio de zeros)
             if [ "$RANGE" == "0000000000000000000000000000000000000000..${{ github.event.after }}" ]; then
               RANGE="HEAD~1..HEAD"
             fi
@@ -35,9 +32,8 @@ jobs:
           echo "Checking commits in range: $RANGE"
           FAILED=0
           
-          # Itera por cada commit no range verificando se contém a tag Signed-off-by
           for commit in $(git rev-list $RANGE); do
-            if ! git log --format=body --no-merges -n 1 $commit | grep -q "Signed-off-by:"; then
+            if ! git log --format=%B --no-merges -n 1 $commit | grep -q "Signed-off-by:"; then
               echo "❌ Commit $(git rev-parse --short $commit) lacks a 'Signed-off-by' sign-off."
               git log --format="%s" -n 1 $commit
               FAILED=1
