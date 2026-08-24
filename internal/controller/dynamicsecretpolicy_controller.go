@@ -37,7 +37,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
@@ -76,6 +79,8 @@ type DynamicSecretPolicyReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	SecretFetcher azure.SecretFetcher
+	// EventsChannel allows external event streams (like Azure Service Bus) to trigger reconciliations
+	EventsChannel <-chan event.GenericEvent
 	// ProbeRunner allows executing or mocking validation probes
 	ProbeRunner func(ctx context.Context, probe secretv1alpha1.ValidationProbe, secretData map[string][]byte) error
 	// OnSecretMaterialized optional callback for Service Bus transaction completion
@@ -595,10 +600,15 @@ func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.Dy
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&secretv1alpha1.DynamicSecretPolicy{}).
 		Owns(&corev1.Secret{}).
 		Owns(&networkingv1.NetworkPolicy{}).
-		Owns(&appsv1.Deployment{}).
-		Complete(r)
+		Owns(&appsv1.Deployment{})
+
+	if r.EventsChannel != nil {
+		builder = builder.WatchesRawSource(source.Channel(r.EventsChannel, &handler.EnqueueRequestForObject{}))
+	}
+
+	return builder.Complete(r)
 }

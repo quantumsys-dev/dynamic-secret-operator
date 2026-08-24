@@ -19,18 +19,23 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -162,21 +167,93 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create buffered channel to bridge Service Bus rotation triggers to controller-runtime watch queue
+	eventsChannel := make(chan event.GenericEvent, 100)
+
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 		SecretFetcher: secretFetcher,
+		EventsChannel: eventsChannel,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamicSecretPolicy")
 		os.Exit(1)
 	}
 
 	if sbListener != nil {
+		// Wire Service Bus message callback handler to forward events to controller-runtime
+		sbListener.SetHandler(func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack azure.AckFunc) error {
+			handlerLog := ctrl.LoggerFrom(ctx).WithName("servicebus-handler").WithValues("messageID", msg.MessageID)
+			handlerLog.Info("processing Service Bus event for secret rotation")
+
+			var eventData struct {
+				Subject   string `json:"subject"`
+				EventType string `json:"eventType"`
+				Data      struct {
+					ObjectName string `json:"ObjectName"`
+					ObjectType string `json:"ObjectType"`
+					Version    string `json:"Version"`
+				} `json:"data"`
+				PolicyName string `json:"policyName"`
+				Namespace  string `json:"namespace"`
+			}
+
+			_ = json.Unmarshal(msg.Body, &eventData)
+
+			targetObjectName := eventData.Data.ObjectName
+			if targetObjectName == "" && eventData.Subject != "" {
+				parts := strings.Split(eventData.Subject, "/")
+				for i, part := range parts {
+					if part == "secrets" && i+1 < len(parts) {
+						targetObjectName = parts[i+1]
+						break
+					}
+				}
+			}
+
+			policyList := &secretv1alpha1.DynamicSecretPolicyList{}
+			listOpts := []client.ListOption{}
+			if eventData.Namespace != "" {
+				listOpts = append(listOpts, client.InNamespace(eventData.Namespace))
+			}
+
+			if err := mgr.GetClient().List(ctx, policyList, listOpts...); err != nil {
+				handlerLog.Error(err, "failed to list DynamicSecretPolicies for Service Bus event")
+				return err
+			}
+
+			matchedCount := 0
+			for i := range policyList.Items {
+				p := &policyList.Items[i]
+				if targetObjectName == "" || p.Spec.VaultRef.ObjectName == targetObjectName || p.Name == eventData.PolicyName {
+					select {
+					case eventsChannel <- event.GenericEvent{Object: p}:
+						matchedCount++
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+			}
+
+			handlerLog.Info("enqueued reconciliation events for matching policies",
+				"matchedPolicies", matchedCount,
+				"objectName", targetObjectName,
+			)
+
+			// Acknowledge message only after successfully pushing to event channel
+			if err := ack(ctx); err != nil {
+				handlerLog.Error(err, "failed to complete Service Bus message")
+				return err
+			}
+
+			return nil
+		})
+
 		if err := mgr.Add(sbListener); err != nil {
 			setupLog.Error(err, "unable to register ServiceBusListener with manager")
 			os.Exit(1)
 		}
-		setupLog.Info("registered Azure Service Bus peek-lock listener with manager")
+		setupLog.Info("registered Azure Service Bus peek-lock listener with manager and wired event bridge")
 	}
 
 	if os.Getenv("ENABLE_WEBHOOKS") == "true" {
