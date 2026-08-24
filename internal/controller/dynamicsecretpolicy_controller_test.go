@@ -786,7 +786,14 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 
 	t.Run("executes default probe runner", func(t *testing.T) {
 		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "probe-test-policy",
+				Namespace: "default",
+			},
 			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{
+					Name: "order-service",
+				},
 				ValidationProbes: []secretv1alpha1.ValidationProbe{
 					{
 						Type:     secretv1alpha1.ProbeTypeHTTP,
@@ -794,13 +801,89 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 					},
 				},
 			},
+			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				DesiredRevision: "probe123",
+			},
 		}
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "order-service-rev-probe123",
+				Namespace: "default",
+			},
+			Data: map[string][]byte{
+				"password": []byte("valid-pass"),
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(sec).
+			Build()
+
 		r := &DynamicSecretPolicyReconciler{
+			Client: c,
 			Scheme: scheme,
 		}
 		err := r.runValidationProbes(context.Background(), policy)
 		if err == nil {
 			t.Fatalf("expected error from empty probe endpoint")
+		}
+	})
+
+	t.Run("passes materialized secret.Data to ProbeRunner", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "secret-data-policy",
+				Namespace: "default",
+			},
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{
+					Name: "auth-service",
+				},
+				ValidationProbes: []secretv1alpha1.ValidationProbe{
+					{
+						Type:     secretv1alpha1.ProbeTypePostgreSQL,
+						Endpoint: "postgres:5432",
+					},
+				},
+			},
+			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				DesiredRevision: "rev-abc-456",
+			},
+		}
+		secretObj := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "auth-service-rev-rev-abc-456",
+				Namespace: "default",
+			},
+			Data: map[string][]byte{
+				"db-password": []byte("super-secret-password"),
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(secretObj).
+			Build()
+
+		var receivedSecretData map[string][]byte
+		r := &DynamicSecretPolicyReconciler{
+			Client: c,
+			Scheme: scheme,
+			ProbeRunner: func(ctx context.Context, probe secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+				receivedSecretData = secretData
+				return nil
+			},
+		}
+
+		err := r.runValidationProbes(context.Background(), policy)
+		if err != nil {
+			t.Fatalf("unexpected error running validation probes: %v", err)
+		}
+
+		if receivedSecretData == nil {
+			t.Fatalf("CRITICAL BUG: probe runner received nil secretData")
+		}
+		if string(receivedSecretData["db-password"]) != "super-secret-password" {
+			t.Errorf("expected 'super-secret-password', got %q", string(receivedSecretData["db-password"]))
 		}
 	})
 }
@@ -843,10 +926,20 @@ func TestDynamicSecretPolicyReconciler_CircuitBreakerTripsOnConsecutiveFailures(
 		},
 	}
 
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payment-api-rev-badrevision12",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"db-pass": []byte("invalid-password"),
+		},
+	}
+
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
-		WithObjects(policy).
+		WithObjects(policy, secret).
 		Build()
 
 	reconciler := &DynamicSecretPolicyReconciler{

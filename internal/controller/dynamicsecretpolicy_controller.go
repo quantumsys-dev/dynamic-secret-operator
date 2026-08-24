@@ -352,10 +352,18 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 }
 
-// runValidationProbes iterates over configured probes and executes them sequentially.
+// runValidationProbes iterates over configured probes and executes them sequentially against the canary workload.
 func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) error {
 	if len(policy.Spec.ValidationProbes) == 0 {
 		return nil
+	}
+
+	targetName := policy.Spec.WorkloadSelector.Name
+	secretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, secret); err != nil {
+		return fmt.Errorf("failed to fetch secret revision %q for probe validation: %w", secretName, err)
 	}
 
 	runner := r.ProbeRunner
@@ -371,7 +379,7 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 
 	for _, probe := range policy.Spec.ValidationProbes {
 		start := time.Now()
-		err := runner(ctx, probe, nil)
+		err := runner(ctx, probe, secret.Data)
 		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Name, policy.Namespace, string(probe.Type)).Observe(time.Since(start).Seconds())
 		if err != nil {
 			return err
