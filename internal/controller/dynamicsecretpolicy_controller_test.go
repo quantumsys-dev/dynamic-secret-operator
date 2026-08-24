@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"testing"
@@ -580,13 +581,29 @@ func TestDynamicSecretPolicyReconciler_StateTransitions(t *testing.T) {
 func TestDynamicSecretPolicyReconciler_PromotingTerminalState(t *testing.T) {
 	scheme := setupTestScheme(t)
 
+	payload := []byte("synced-secret")
+	hasher := sha256.New()
+	hasher.Write(payload)
+	hasher.Write([]byte("v1"))
+	expectedHash := fmt.Sprintf("%x", hasher.Sum(nil))[:12]
+
 	policy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "promoting-policy",
 			Namespace: "default",
 		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://my-vault.vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Name: "my-app",
+			},
+		},
 		Status: secretv1alpha1.DynamicSecretPolicyStatus{
-			CurrentRevision: "rev-done-1234",
+			CurrentRevision: expectedHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:   ConditionTypePromoting,
@@ -606,14 +623,22 @@ func TestDynamicSecretPolicyReconciler_PromotingTerminalState(t *testing.T) {
 	r := &DynamicSecretPolicyReconciler{
 		Client: fakeClient,
 		Scheme: scheme,
+		SecretFetcher: &mockSecretFetcher{
+			getSecretFunc: func(ctx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+				return &azure.SecretPayload{
+					Value:   payload,
+					Version: "v1",
+				}, nil
+			},
+		},
 	}
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "promoting-policy", Namespace: "default"}})
 	if err != nil {
-		t.Fatalf("expected nil error on promoting terminal state")
+		t.Fatalf("expected nil error on promoting terminal state, got: %v", err)
 	}
 	if res.Requeue {
-		t.Errorf("expected no requeue for terminal state")
+		t.Errorf("expected no requeue for in-sync terminal state")
 	}
 }
 
@@ -1345,4 +1370,201 @@ func TestDynamicSecretPolicyReconciler_PreservesUnrelatedSecretsDuringPromotion(
 		t.Errorf("CRITICAL BUG: ingress-tls-cert volume was corrupted: got %q, expected 'ingress-tls-cert'", vols[1].Secret.SecretName)
 	}
 }
+
+func TestDynamicSecretPolicyReconciler_MultipleSequentialRotations(t *testing.T) {
+	scheme := setupTestScheme(t)
+	ctx := context.Background()
+
+	targetDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "user-service",
+			Namespace: "default",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "app",
+							Image: "user-service:1.0.0",
+							Env: []corev1.EnvVar{
+								{
+									Name: "DB_PASS",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "user-service-rev-init",
+											},
+											Key: "db-pass",
+										},
+									},
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "managed-vol",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: "user-service-rev-init",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "user-policy",
+			Namespace: "default",
+			UID:       types.UID("user-policy-uid"),
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "user-service",
+			},
+		},
+	}
+
+	currentVaultSecret := "initial-secret-value"
+	currentVaultVersion := "v1"
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy, targetDeployment).
+		Build()
+
+	reconciler := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		SecretFetcher: &mockSecretFetcher{
+			getSecretFunc: func(fCtx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+				return &azure.SecretPayload{
+					Value:   []byte(currentVaultSecret),
+					Version: currentVaultVersion,
+				}, nil
+			},
+		},
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "user-policy",
+			Namespace: "default",
+		},
+	}
+
+	// ==========================================
+	// ROTATION 1: Initial Rollout of v1
+	// ==========================================
+	// 1. Step 1: Detects drift from "" -> Materializes v1 secret -> RevisionPrepared
+	res, err := reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 1 step 1 failed: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// 2. Step 2: RevisionPrepared -> Provisions Canary & NetworkPolicy -> CanaryProvisioning
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 1 step 2 failed: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// 3. Step 3: CanaryProvisioning -> Validating
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 1 step 3 failed: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// 4. Step 4: Validating -> Promotes target deployment -> Promoting completed (Requeue: true)
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 1 step 4 failed: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// Verify Rotation 1 completed
+	updatedPolicy := &secretv1alpha1.DynamicSecretPolicy{}
+	if err := fakeClient.Get(ctx, req.NamespacedName, updatedPolicy); err != nil {
+		t.Fatalf("failed to get policy: %v", err)
+	}
+	firstRevision := updatedPolicy.Status.CurrentRevision
+	if firstRevision == "" {
+		t.Fatalf("expected non-empty CurrentRevision after rotation 1")
+	}
+
+	// 5. In-Sync Terminal Verification Check (Zero Deadlock)
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || res.Requeue {
+		t.Fatalf("expected idle reconcile with no requeue and no error: %v", err)
+	}
+
+	// ==========================================
+	// ROTATION 2: Upstream Secret Rotated to v2
+	// ==========================================
+	currentVaultSecret = "rotated-secret-value-v2"
+	currentVaultVersion = "v2"
+
+	// 1. Step 1: Detects drift between firstRevision and v2 -> Materializes v2 -> RevisionPrepared
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 2 step 1 failed to detect drift: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// 2. Step 2: RevisionPrepared -> Provisions Canary & NetworkPolicy -> CanaryProvisioning
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 2 step 2 failed: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// 3. Step 3: CanaryProvisioning -> Validating
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 2 step 3 failed: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// 4. Step 4: Validating -> Promotes target deployment to v2 -> Promoting completed (Requeue: true)
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || !res.Requeue {
+		t.Fatalf("Rotation 2 step 4 failed: %v (requeue: %v)", err, res.Requeue)
+	}
+
+	// Verify Rotation 2 completed with a new distinct revision!
+	if err := fakeClient.Get(ctx, req.NamespacedName, updatedPolicy); err != nil {
+		t.Fatalf("failed to get policy: %v", err)
+	}
+	secondRevision := updatedPolicy.Status.CurrentRevision
+	if secondRevision == "" {
+		t.Fatalf("expected non-empty CurrentRevision after rotation 2")
+	}
+	if secondRevision == firstRevision {
+		t.Errorf("CRITICAL BUG: second revision %q should be different from first revision %q", secondRevision, firstRevision)
+	}
+
+	// Verify target deployment was patched with secondRevision
+	finalDeploy := &appsv1.Deployment{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "user-service", Namespace: "default"}, finalDeploy); err != nil {
+		t.Fatalf("failed to get target deployment: %v", err)
+	}
+	expectedV2Secret := fmt.Sprintf("user-service-rev-%s", secondRevision)
+	if finalDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name != expectedV2Secret {
+		t.Errorf("expected target deployment to reference v2 secret %q, got %q", expectedV2Secret, finalDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
+	}
+
+	// 5. Subsequent In-Sync Verification Check (Zero Deadlock)
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil || res.Requeue {
+		t.Fatalf("expected idle reconcile after rotation 2: %v", err)
+	}
+}
+
 

@@ -122,9 +122,13 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		threshold = policy.Spec.RollbackConfig.CircuitBreakerThreshold
 	}
 
-	// Evaluate state machine progression based on current status conditions
+	// Evaluate state machine progression based on version drift and active rollout phase
 	currentState := r.determineState(policy)
-	logger.Info("evaluating DynamicSecretPolicy state machine", "currentState", currentState)
+	logger.Info("evaluating DynamicSecretPolicy state machine",
+		"currentState", currentState,
+		"currentRevision", policy.Status.CurrentRevision,
+		"desiredRevision", policy.Status.DesiredRevision,
+	)
 	span.SetAttributes(attribute.String("policy.state", currentState))
 
 	// If Circuit Breaker is tripped during an active rollout, halt reconciliation
@@ -152,9 +156,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	switch currentState {
 	case "":
-		telemetry.RotationsTotal.WithLabelValues(policy.Name, policy.Namespace).Inc()
-
-		// Initial State: Materialize immutable SecretRevision from Key Vault
+		// Check for Version Drift: Materialize upstream secret revision from Key Vault
 		revisionHash, err := r.materializeSecretRevision(ctx, policy)
 		if err != nil {
 			logger.Error(err, "failed to materialize secret revision from Key Vault")
@@ -162,21 +164,31 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 
-		// Reset failure counters and circuit breaker condition on new revision materialization
+		// In-Sync Check: If the upstream secret hash equals active CurrentRevision, workload is already up-to-date
+		if policy.Status.CurrentRevision != "" && revisionHash == policy.Status.CurrentRevision {
+			logger.Info("workload in sync with current secret revision",
+				"currentRevision", policy.Status.CurrentRevision,
+			)
+			return ctrl.Result{}, nil
+		}
+
+		// Drift Detected: Initiate new progressive rollout cycle
+		telemetry.RotationsTotal.WithLabelValues(policy.Name, policy.Namespace).Inc()
+
+		// Reset failure counters and clear prior rollout / breaker conditions
 		policy.Status.ConsecutiveFailures = 0
-		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
-			Type:    ConditionTypeCircuitBreakerTripped,
-			Status:  metav1.ConditionFalse,
-			Reason:  ReasonCircuitBreakerReset,
-			Message: "Circuit breaker reset for new revision attempt",
-		})
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeCircuitBreakerTripped)
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeRolledBack)
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypePromoting)
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeValidating)
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeCanaryProvisioning)
 
 		policy.Status.DesiredRevision = revisionHash
 		cond := metav1.Condition{
 			Type:    ConditionTypeRevisionPrepared,
 			Status:  metav1.ConditionTrue,
 			Reason:  ReasonPrepared,
-			Message: fmt.Sprintf("Secret revision %s successfully materialized", revisionHash),
+			Message: fmt.Sprintf("Secret revision %s successfully materialized; initiating rollout", revisionHash),
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to RevisionPrepared")
@@ -233,6 +245,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		logger.Info("enforced canary network policy isolation", "networkPolicy", netpol.Name)
 
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeRevisionPrepared)
 		cond := metav1.Condition{
 			Type:    ConditionTypeCanaryProvisioning,
 			Status:  metav1.ConditionTrue,
@@ -248,6 +261,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	case ConditionTypeCanaryProvisioning:
 		// Transition to Validating
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeCanaryProvisioning)
 		cond := metav1.Condition{
 			Type:    ConditionTypeValidating,
 			Status:  metav1.ConditionTrue,
@@ -314,10 +328,11 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			logger.Error(err, "failed during post-promotion canary cleanup")
 		}
 
-		// Update Status: Promote desired revision to current revision
+		// Update Status: Promote desired revision to current revision and clear desired revision
 		policy.Status.CurrentRevision = policy.Status.DesiredRevision
 		policy.Status.DesiredRevision = ""
 
+		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeValidating)
 		cond := metav1.Condition{
 			Type:    ConditionTypePromoting,
 			Status:  metav1.ConditionTrue,
@@ -330,12 +345,6 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
-
-	case ConditionTypePromoting:
-		logger.Info("reconciliation cycle completed for policy",
-			"currentRevision", policy.Status.CurrentRevision,
-		)
-		return ctrl.Result{}, nil
 
 	case ConditionTypeRolledBack:
 		// Failure path: Clean up canary resources to prevent orphaned pods
@@ -559,13 +568,16 @@ func (r *DynamicSecretPolicyReconciler) updateStatus(ctx context.Context, policy
 	return r.Status().Patch(ctx, policy, client.MergeFrom(base))
 }
 
-// determineState evaluates which progressive delivery phase is currently active.
+// determineState evaluates which progressive delivery phase is currently active based on version drift and rollout state.
 func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.DynamicSecretPolicy) string {
+	// If there is no active desired revision, we are in-sync or checking drift against upstream
+	if policy.Status.DesiredRevision == "" {
+		return ""
+	}
+
+	// An active rollout is in progress for policy.Status.DesiredRevision
 	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeRolledBack) {
 		return ConditionTypeRolledBack
-	}
-	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypePromoting) {
-		return ConditionTypePromoting
 	}
 	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeValidating) != nil {
 		return ConditionTypeValidating
@@ -576,7 +588,9 @@ func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.Dy
 	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeRevisionPrepared) != nil {
 		return ConditionTypeRevisionPrepared
 	}
-	return ""
+
+	// If DesiredRevision is set but condition is pending, start rollout at RevisionPrepared
+	return ConditionTypeRevisionPrepared
 }
 
 // SetupWithManager sets up the controller with the Manager.
