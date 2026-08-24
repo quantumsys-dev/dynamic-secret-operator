@@ -98,6 +98,7 @@ func BuildCanaryDeployment(targetDeploy *appsv1.Deployment, policy *secretv1alph
 			envFrom := &container.EnvFrom[efIdx]
 			if envFrom.SecretRef != nil {
 				if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
+					(policy.Status.CurrentRevision == "" && envFrom.SecretRef.Name == policy.Spec.VaultRef.ObjectName) ||
 					(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
 					envFrom.SecretRef.Name = newSecretName
 				}
