@@ -1,13 +1,11 @@
 version: 2
 updates:
-  # Monitorar e atualizar dependências Go (go.mod / go.sum)
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
 
-  # Monitorar e atualizar as GitHub Actions usadas nos workflows (.github/workflows/)
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
