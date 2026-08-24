@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys/dynamic-secret-operator/internal/controller"
 	//+kubebuilder:scaffold:imports
 )
@@ -76,6 +77,13 @@ func main() {
 	logger := zap.New(zap.UseFlagOptions(&opts), zap.JSONEncoder()).WithValues("operator", "dynamic-secret-operator")
 	ctrl.SetLogger(logger)
 	setupLog = ctrl.Log.WithName("setup")
+
+	// Initialize zero-trust Azure Workload Identity authentication (fail-fast)
+	if _, err := azure.NewAzureCredential(); err != nil {
+		setupLog.Error(err, "unable to initialize Azure Workload Identity credential; refusing to start")
+		os.Exit(1)
+	}
+	setupLog.Info("successfully initialized Azure Workload Identity token credential")
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
