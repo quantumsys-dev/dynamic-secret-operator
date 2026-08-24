@@ -52,7 +52,7 @@ jobs:
 
       - name: Build local Docker image for vulnerability scanning
         id: docker-build-local
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -73,7 +73,7 @@ jobs:
 
       - name: Push production Docker image to GHCR
         id: docker-build-push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
