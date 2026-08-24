@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= quantumsys/dso:e2e
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by setup-envtest.
 ENVTEST_K8S_VERSION = 1.31.0
 
@@ -42,14 +42,26 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./... -coverprofile coverage.out
+test: manifests generate fmt vet envtest ## Run unit & integration tests.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./internal/... ./pkg/... -coverprofile coverage.out
+
+.PHONY: test-e2e
+test-e2e: manifests generate docker-build ## Run end-to-end KIND tests.
+	go test -v ./test/e2e/... -timeout 20m
 
 ##@ Build
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+
+.PHONY: docker-build
+docker-build: ## Build docker image with the manager.
+	docker build -t $(IMG) .
+
+.PHONY: docker-push
+docker-push: ## Push docker image with the manager.
+	docker push $(IMG)
 
 ##@ Dependencies
 

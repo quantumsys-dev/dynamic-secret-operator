@@ -17,8 +17,10 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -52,6 +54,20 @@ func init() {
 	//+kubebuilder:scaffold:scheme
 }
 
+// syntheticFetcher is used exclusively in local E2E container tests
+type syntheticFetcher struct{}
+
+func (s *syntheticFetcher) GetSecret(ctx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+	if version == "" {
+		version = "v1"
+	}
+	return &azure.SecretPayload{
+		Value:   []byte("synthetic-e2e-secret-content"),
+		Version: version,
+		ID:      fmt.Sprintf("%s/secrets/%s/%s", vaultURI, secretName, version),
+	}, nil
+}
+
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
@@ -78,20 +94,43 @@ func main() {
 	ctrl.SetLogger(logger)
 	setupLog = ctrl.Log.WithName("setup")
 
-	// Initialize zero-trust Azure Workload Identity authentication (fail-fast)
-	azureCred, err := azure.NewAzureCredential()
-	if err != nil {
-		setupLog.Error(err, "unable to initialize Azure Workload Identity credential; refusing to start")
-		os.Exit(1)
-	}
-	setupLog.Info("successfully initialized Azure Workload Identity token credential")
+	var secretFetcher azure.SecretFetcher
+	var sbListener *azure.ServiceBusListener
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancelation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
+	// In E2E synthetic testing mode, bypass Azure cloud dependencies
+	if os.Getenv("E2E_SYNTHETIC_MODE") == "true" {
+		setupLog.Info("operating in E2E_SYNTHETIC_MODE; using synthetic secret fetcher")
+		secretFetcher = &syntheticFetcher{}
+	} else {
+		// Initialize zero-trust Azure Workload Identity authentication (fail-fast)
+		azureCred, err := azure.NewAzureCredential()
+		if err != nil {
+			setupLog.Error(err, "unable to initialize Azure Workload Identity credential; refusing to start")
+			os.Exit(1)
+		}
+		setupLog.Info("successfully initialized Azure Workload Identity token credential")
+
+		kvFetcher, err := azure.NewKeyVaultFetcher(azureCred)
+		if err != nil {
+			setupLog.Error(err, "unable to create Key Vault fetcher")
+			os.Exit(1)
+		}
+		secretFetcher = kvFetcher
+
+		// Register Azure Service Bus Peek-Lock Listener if configured
+		sbNamespace := os.Getenv("SERVICEBUS_NAMESPACE")
+		sbQueue := os.Getenv("SERVICEBUS_QUEUE_NAME")
+		if sbNamespace != "" && sbQueue != "" {
+			var err error
+			sbListener, err = azure.NewServiceBusListener(sbNamespace, sbQueue, azureCred)
+			if err != nil {
+				setupLog.Error(err, "unable to create Azure Service Bus listener")
+				os.Exit(1)
+			}
+			setupLog.Info("configured Azure Service Bus peek-lock listener", "namespace", sbNamespace, "queue", sbQueue)
+		}
+	}
+
 	disableHTTP2 := func(c *tls.Config) {
 		setupLog.Info("disabling http/2")
 		c.NextProtos = []string{"http/1.1"}
@@ -117,59 +156,34 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "81b37f41.quantumsys.io",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
-	kvFetcher, err := azure.NewKeyVaultFetcher(azureCred)
-	if err != nil {
-		setupLog.Error(err, "unable to create Key Vault fetcher")
-		os.Exit(1)
-	}
-
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
-		SecretFetcher: kvFetcher,
+		SecretFetcher: secretFetcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamicSecretPolicy")
 		os.Exit(1)
 	}
 
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err = (&secretv1alpha1.DynamicSecretPolicy{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "DynamicSecretPolicy")
-			os.Exit(1)
-		}
-	}
-
-	// Register Azure Service Bus Peek-Lock Listener if configured
-	sbNamespace := os.Getenv("SERVICEBUS_NAMESPACE")
-	sbQueue := os.Getenv("SERVICEBUS_QUEUE_NAME")
-	if sbNamespace != "" && sbQueue != "" {
-		sbListener, err := azure.NewServiceBusListener(sbNamespace, sbQueue, azureCred)
-		if err != nil {
-			setupLog.Error(err, "unable to create Azure Service Bus listener")
-			os.Exit(1)
-		}
+	if sbListener != nil {
 		if err := mgr.Add(sbListener); err != nil {
 			setupLog.Error(err, "unable to register ServiceBusListener with manager")
 			os.Exit(1)
 		}
-		setupLog.Info("registered Azure Service Bus peek-lock listener with manager", "namespace", sbNamespace, "queue", sbQueue)
+		setupLog.Info("registered Azure Service Bus peek-lock listener with manager")
+	}
+
+	if os.Getenv("ENABLE_WEBHOOKS") == "true" {
+		if err = (&secretv1alpha1.DynamicSecretPolicy{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "DynamicSecretPolicy")
+			os.Exit(1)
+		}
 	}
 	//+kubebuilder:scaffold:builder
 
