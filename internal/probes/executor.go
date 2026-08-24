@@ -26,19 +26,3 @@ import (
 type ProbeExecutor interface {
 	Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error
 }
-
-// PostgresProbe validates database authentication against PostgreSQL using rotated credentials.
-type PostgresProbe struct{}
-
-// Execute executes a synthetic connection and lightweight query against PostgreSQL.
-func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
-	return nil
-}
-
-// MySQLProbe validates database authentication against MySQL using rotated credentials.
-type MySQLProbe struct{}
-
-// Execute executes a synthetic connection and lightweight query against MySQL.
-func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
-	return nil
-}
