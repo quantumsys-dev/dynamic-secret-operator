@@ -1074,3 +1074,172 @@ func TestDynamicSecretPolicyReconciler_NotFoundIgnored(t *testing.T) {
 		t.Errorf("expected no requeue for not found resource")
 	}
 }
+
+func TestDynamicSecretPolicyReconciler_PreservesUnrelatedSecretsDuringPromotion(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	targetDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "order-service",
+			Namespace: "default",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "app",
+							Image: "order-service:1.0.0",
+							Env: []corev1.EnvVar{
+								{
+									Name: "DB_PASS",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "order-service-rev-old",
+											},
+											Key: "db-pass",
+										},
+									},
+								},
+								{
+									Name: "DATADOG_API_KEY",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "datadog-secret",
+											},
+											Key: "api-key",
+										},
+									},
+								},
+								{
+									Name: "STRIPE_KEY",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "stripe-credentials",
+											},
+											Key: "secret-key",
+										},
+									},
+								},
+							},
+							EnvFrom: []corev1.EnvFromSource{
+								{
+									SecretRef: &corev1.SecretEnvSource{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "order-service-rev-old",
+										},
+									},
+								},
+								{
+									SecretRef: &corev1.SecretEnvSource{
+										LocalObjectReference: corev1.LocalObjectReference{
+											Name: "third-party-configs",
+										},
+									},
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "managed-vol",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: "order-service-rev-old",
+								},
+							},
+						},
+						{
+							Name: "tls-certificates",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: "ingress-tls-cert",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "order-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://my-vault.vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "order-service",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "newrev9988",
+			CurrentRevision: "old",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy, targetDeployment).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := r.promoteTargetWorkload(context.Background(), policy)
+	if err != nil {
+		t.Fatalf("promoteTargetWorkload failed: %v", err)
+	}
+
+	updatedDeploy := &appsv1.Deployment{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "order-service", Namespace: "default"}, updatedDeploy); err != nil {
+		t.Fatalf("failed to get updated deployment: %v", err)
+	}
+
+	expectedManagedSecret := "order-service-rev-newrev9988"
+
+	// 1. Assert managed env var was updated
+	c := updatedDeploy.Spec.Template.Spec.Containers[0]
+	if c.Env[0].ValueFrom.SecretKeyRef.Name != expectedManagedSecret {
+		t.Errorf("expected DB_PASS secret name %q, got %q", expectedManagedSecret, c.Env[0].ValueFrom.SecretKeyRef.Name)
+	}
+
+	// 2. Assert UNRELATED env vars were NOT modified
+	if c.Env[1].ValueFrom.SecretKeyRef.Name != "datadog-secret" {
+		t.Errorf("CRITICAL BUG: DATADOG_API_KEY secret name was corrupted: got %q, expected 'datadog-secret'", c.Env[1].ValueFrom.SecretKeyRef.Name)
+	}
+	if c.Env[2].ValueFrom.SecretKeyRef.Name != "stripe-credentials" {
+		t.Errorf("CRITICAL BUG: STRIPE_KEY secret name was corrupted: got %q, expected 'stripe-credentials'", c.Env[2].ValueFrom.SecretKeyRef.Name)
+	}
+
+	// 3. Assert EnvFrom: managed is updated, unmanaged is untouched
+	if c.EnvFrom[0].SecretRef.Name != expectedManagedSecret {
+		t.Errorf("expected managed EnvFrom %q, got %q", expectedManagedSecret, c.EnvFrom[0].SecretRef.Name)
+	}
+	if c.EnvFrom[1].SecretRef.Name != "third-party-configs" {
+		t.Errorf("CRITICAL BUG: third-party-configs EnvFrom was corrupted: got %q", c.EnvFrom[1].SecretRef.Name)
+	}
+
+	// 4. Assert Volumes: managed is updated, TLS/unmanaged is untouched
+	vols := updatedDeploy.Spec.Template.Spec.Volumes
+	if vols[0].Secret.SecretName != expectedManagedSecret {
+		t.Errorf("expected managed volume %q, got %q", expectedManagedSecret, vols[0].Secret.SecretName)
+	}
+	if vols[1].Secret.SecretName != "ingress-tls-cert" {
+		t.Errorf("CRITICAL BUG: ingress-tls-cert volume was corrupted: got %q, expected 'ingress-tls-cert'", vols[1].Secret.SecretName)
+	}
+}
+

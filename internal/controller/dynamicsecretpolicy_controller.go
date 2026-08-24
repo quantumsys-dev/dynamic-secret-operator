@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -355,6 +356,9 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 }
 
 // promoteTargetWorkload patches the production target Deployment with the new Secret revision.
+// It strictly replaces only operator-managed secret references (<targetWorkload.Name>-rev-<hash>
+// or matching the Key Vault object key), preserving all third-party secrets, TLS certificates,
+// and unmanaged environment configurations.
 func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) error {
 	logger := log.FromContext(ctx)
 	targetName := policy.Spec.WorkloadSelector.Name
@@ -369,31 +373,49 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 	}
 
 	originalDeploy := targetDeploy.DeepCopy()
-	secretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+	newSecretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+	managedPrefix := fmt.Sprintf("%s-rev-", targetName)
 
 	if targetDeploy.Spec.Template.Annotations == nil {
 		targetDeploy.Spec.Template.Annotations = make(map[string]string)
 	}
 	targetDeploy.Spec.Template.Annotations[LabelRevision] = policy.Status.DesiredRevision
 
-	// Update volume mounts referencing secrets
+	// Update only volume mounts referencing operator-managed secrets
 	for i := range targetDeploy.Spec.Template.Spec.Volumes {
-		if targetDeploy.Spec.Template.Spec.Volumes[i].Secret != nil {
-			targetDeploy.Spec.Template.Spec.Volumes[i].Secret.SecretName = secretName
+		vol := &targetDeploy.Spec.Template.Spec.Volumes[i]
+		if vol.Secret != nil {
+			if strings.HasPrefix(vol.Secret.SecretName, managedPrefix) ||
+				(policy.Status.CurrentRevision == "" && vol.Name == policy.Spec.VaultRef.ObjectName) {
+				vol.Secret.SecretName = newSecretName
+			}
 		}
 	}
 
-	// Update container environment secret references
+	// Update container environment secret references (targeted replacement)
 	for cIdx := range targetDeploy.Spec.Template.Spec.Containers {
-		for eIdx := range targetDeploy.Spec.Template.Spec.Containers[cIdx].Env {
-			if targetDeploy.Spec.Template.Spec.Containers[cIdx].Env[eIdx].ValueFrom != nil &&
-				targetDeploy.Spec.Template.Spec.Containers[cIdx].Env[eIdx].ValueFrom.SecretKeyRef != nil {
-				targetDeploy.Spec.Template.Spec.Containers[cIdx].Env[eIdx].ValueFrom.SecretKeyRef.Name = secretName
+		container := &targetDeploy.Spec.Template.Spec.Containers[cIdx]
+
+		for eIdx := range container.Env {
+			envVar := &container.Env[eIdx]
+			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+				ref := envVar.ValueFrom.SecretKeyRef
+				// Only update if it's already an operator-managed revision or matches the Key Vault secret key
+				if strings.HasPrefix(ref.Name, managedPrefix) ||
+					ref.Key == policy.Spec.VaultRef.ObjectName ||
+					(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
+					ref.Name = newSecretName
+				}
 			}
 		}
-		for efIdx := range targetDeploy.Spec.Template.Spec.Containers[cIdx].EnvFrom {
-			if targetDeploy.Spec.Template.Spec.Containers[cIdx].EnvFrom[efIdx].SecretRef != nil {
-				targetDeploy.Spec.Template.Spec.Containers[cIdx].EnvFrom[efIdx].SecretRef.Name = secretName
+
+		for efIdx := range container.EnvFrom {
+			envFrom := &container.EnvFrom[efIdx]
+			if envFrom.SecretRef != nil {
+				if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
+					(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
+					envFrom.SecretRef.Name = newSecretName
+				}
 			}
 		}
 	}
