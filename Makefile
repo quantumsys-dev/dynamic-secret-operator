@@ -3,7 +3,7 @@
 all: fmt vet build
 
 build:
-	go build -o bin/dso-manager ./cmd/dso-manager/main.go
+	go build -o bin/dso-manager ./cmd/main.go
 
 clean:
 	go clean
