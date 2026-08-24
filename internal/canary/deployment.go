@@ -46,7 +46,8 @@ func BuildCanaryDeployment(targetDeploy *appsv1.Deployment, policy *secretv1alph
 	replicas := int32(1)
 	canaryDeploy.Spec.Replicas = &replicas
 
-	// 2. Set distinct canary labels
+	// 2. Strictly overwrite labels and Pod template selector with isolated canary labels
+	// to prevent production Kubernetes Services from routing live user traffic to the canary pod.
 	canaryLabels := map[string]string{
 		LabelCanary:         "true",
 		LabelTargetWorkload: targetName,
@@ -56,12 +57,10 @@ func BuildCanaryDeployment(targetDeploy *appsv1.Deployment, policy *secretv1alph
 	canaryDeploy.Spec.Selector = &metav1.LabelSelector{
 		MatchLabels: canaryLabels,
 	}
-
-	if canaryDeploy.Spec.Template.Labels == nil {
-		canaryDeploy.Spec.Template.Labels = make(map[string]string)
+	canaryDeploy.Spec.Template.Labels = map[string]string{
+		LabelCanary:         "true",
+		LabelTargetWorkload: targetName,
 	}
-	canaryDeploy.Spec.Template.Labels[LabelCanary] = "true"
-	canaryDeploy.Spec.Template.Labels[LabelTargetWorkload] = targetName
 
 	if canaryDeploy.Spec.Template.Annotations == nil {
 		canaryDeploy.Spec.Template.Annotations = make(map[string]string)

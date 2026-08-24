@@ -34,10 +34,26 @@ func TestBuildCanaryDeployment(t *testing.T) {
 			Namespace:       "prod",
 			ResourceVersion: "12345",
 			UID:             "abc-123",
+			Labels: map[string]string{
+				"app":  "payment-service",
+				"tier": "backend",
+			},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app":  "payment-service",
+					"tier": "backend",
+				},
+			},
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app":  "payment-service",
+						"tier": "backend",
+					},
+				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
@@ -138,6 +154,19 @@ func TestBuildCanaryDeployment(t *testing.T) {
 	if canaryDeploy.Labels[LabelCanary] != "true" || canaryDeploy.Labels[LabelTargetWorkload] != "payment-service" {
 		t.Errorf("expected canary labels, got %v", canaryDeploy.Labels)
 	}
+
+	// Assert Pod Template labels are strictly isolated (no inherited production app labels)
+	tplLabels := canaryDeploy.Spec.Template.Labels
+	if tplLabels[LabelCanary] != "true" || tplLabels[LabelTargetWorkload] != "payment-service" {
+		t.Errorf("expected canary pod template labels, got %v", tplLabels)
+	}
+	if _, exists := tplLabels["app"]; exists {
+		t.Errorf("CRITICAL SECURITY / TRAFFIC BLEED BUG: inherited production label 'app' found on canary pod template: %v", tplLabels)
+	}
+	if _, exists := tplLabels["tier"]; exists {
+		t.Errorf("CRITICAL SECURITY / TRAFFIC BLEED BUG: inherited production label 'tier' found on canary pod template: %v", tplLabels)
+	}
+
 	if canaryDeploy.Spec.Template.Annotations[LabelRevision] != "newrev1234" {
 		t.Errorf("expected revision annotation 'newrev1234', got %q", canaryDeploy.Spec.Template.Annotations[LabelRevision])
 	}
