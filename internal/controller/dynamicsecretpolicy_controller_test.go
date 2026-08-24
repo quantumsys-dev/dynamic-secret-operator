@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -147,6 +148,9 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		Client:        fakeClient,
 		Scheme:        scheme,
 		SecretFetcher: &mockSecretFetcher{},
+		ProbeRunner: func(ctx context.Context, probe secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+			return nil // Mock probe success
+		},
 		OnSecretMaterialized: func(ctx context.Context, policyName, revision string) error {
 			ackTriggered = true
 			return nil
@@ -235,7 +239,7 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		t.Errorf("expected step 3 to requeue")
 	}
 
-	// Step 4: Validating -> Promoting (Patches target deployment and cleans up canary)
+	// Step 4: Validating -> Promoting (Runs mock probe, patches target deployment, cleans up canary)
 	res, err = reconciler.Reconcile(ctx, req)
 	if err != nil {
 		t.Fatalf("step 4 reconcile failed: %v", err)
@@ -284,13 +288,16 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	if res.Requeue {
 		t.Errorf("expected step 5 (terminal) not to requeue")
 	}
+}
 
-	// Step 6: Test Idempotency (reconcile second policy when secret already exists)
-	secondPolicy := &secretv1alpha1.DynamicSecretPolicy{
+func TestDynamicSecretPolicyReconciler_CircuitBreakerTripsOnConsecutiveFailures(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "second-policy",
+			Name:      "cb-policy",
 			Namespace: "default",
-			UID:       types.UID("second-uid-9999"),
+			UID:       types.UID("cb-uid-1234"),
 		},
 		Spec: secretv1alpha1.DynamicSecretPolicySpec{
 			VaultRef: secretv1alpha1.VaultReference{
@@ -300,26 +307,166 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 			},
 			WorkloadSelector: secretv1alpha1.WorkloadSelector{
 				Kind: "Deployment",
-				Name: "order-service",
+				Name: "payment-api",
+			},
+			ValidationProbes: []secretv1alpha1.ValidationProbe{
+				{Type: secretv1alpha1.ProbeTypePostgreSQL},
+			},
+			RollbackConfig: &secretv1alpha1.RollbackConfig{
+				CircuitBreakerThreshold: 3,
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "badrevision12",
+			Conditions: []metav1.Condition{
+				{
+					Type:   ConditionTypeValidating,
+					Status: metav1.ConditionTrue,
+					Reason: ReasonProbesRunning,
+				},
 			},
 		},
 	}
-	if err := fakeClient.Create(ctx, secondPolicy); err != nil {
-		t.Fatalf("failed to create second policy: %v", err)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy).
+		Build()
+
+	reconciler := &DynamicSecretPolicyReconciler{
+		Client:        fakeClient,
+		Scheme:        scheme,
+		SecretFetcher: &mockSecretFetcher{},
+		ProbeRunner: func(ctx context.Context, probe secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+			return errors.New("database connection refused")
+		},
 	}
 
-	secondReq := ctrl.Request{
+	req := ctrl.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "second-policy",
+			Name:      "cb-policy",
 			Namespace: "default",
 		},
 	}
-	res2, err := reconciler.Reconcile(ctx, secondReq)
-	if err != nil {
-		t.Fatalf("expected idempotent reconciliation when secret already exists, got err: %v", err)
+
+	ctx := context.Background()
+
+	// Failure 1: Under threshold -> returns error for backoff
+	_, err := reconciler.Reconcile(ctx, req)
+	if err == nil {
+		t.Fatalf("expected error from failed probe on attempt 1")
 	}
-	if !res2.Requeue {
-		t.Errorf("expected requeue on successful materialization, got: %v", res2)
+
+	updated := &secretv1alpha1.DynamicSecretPolicy{}
+	_ = fakeClient.Get(ctx, req.NamespacedName, updated)
+	if updated.Status.ConsecutiveFailures != 1 {
+		t.Errorf("expected ConsecutiveFailures=1, got %d", updated.Status.ConsecutiveFailures)
+	}
+
+	// Failure 2: Under threshold -> returns error for backoff
+	_, err = reconciler.Reconcile(ctx, req)
+	if err == nil {
+		t.Fatalf("expected error from failed probe on attempt 2")
+	}
+	_ = fakeClient.Get(ctx, req.NamespacedName, updated)
+	if updated.Status.ConsecutiveFailures != 2 {
+		t.Errorf("expected ConsecutiveFailures=2, got %d", updated.Status.ConsecutiveFailures)
+	}
+
+	// Failure 3: Threshold reached (3) -> Circuit breaker trips, returns nil error & no requeue
+	res, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("expected nil error on circuit breaker trip, got: %v", err)
+	}
+	if res.Requeue {
+		t.Errorf("expected no requeue once circuit breaker trips")
+	}
+
+	_ = fakeClient.Get(ctx, req.NamespacedName, updated)
+	if updated.Status.ConsecutiveFailures != 3 {
+		t.Errorf("expected ConsecutiveFailures=3, got %d", updated.Status.ConsecutiveFailures)
+	}
+	if !meta.IsStatusConditionTrue(updated.Status.Conditions, ConditionTypeCircuitBreakerTripped) {
+		t.Errorf("expected CircuitBreakerTripped condition to be True")
+	}
+
+	// Step 4: Next reconcile iteration is immediately halted by Circuit Breaker check
+	res2, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("expected nil error from halted circuit breaker, got: %v", err)
+	}
+	if res2.Requeue {
+		t.Errorf("expected no requeue from halted circuit breaker")
+	}
+}
+
+func TestDynamicSecretPolicyReconciler_CircuitBreakerResetOnNewRevision(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "reset-policy",
+			Namespace: "default",
+			UID:       types.UID("reset-uid-5678"),
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://my-vault.vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "auth-service",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			ConsecutiveFailures: 5,
+			Conditions: []metav1.Condition{
+				{
+					Type:   ConditionTypeCircuitBreakerTripped,
+					Status: metav1.ConditionTrue,
+					Reason: ReasonValidationThresholdExceeded,
+				},
+			},
+		},
+	}
+
+	// Clear conditions to simulate a newly triggered revision from state ""
+	policy.Status.Conditions = nil
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy).
+		Build()
+
+	reconciler := &DynamicSecretPolicyReconciler{
+		Client:        fakeClient,
+		Scheme:        scheme,
+		SecretFetcher: &mockSecretFetcher{},
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "reset-policy",
+			Namespace: "default",
+		},
+	}
+
+	res, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("expected requeue after materializing new revision")
+	}
+
+	updated := &secretv1alpha1.DynamicSecretPolicy{}
+	_ = fakeClient.Get(context.Background(), req.NamespacedName, updated)
+	if updated.Status.ConsecutiveFailures != 0 {
+		t.Errorf("expected ConsecutiveFailures to reset to 0, got %d", updated.Status.ConsecutiveFailures)
 	}
 }
 

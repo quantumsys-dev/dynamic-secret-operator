@@ -38,25 +38,29 @@ import (
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys/dynamic-secret-operator/internal/canary"
+	"github.com/quantumsys/dynamic-secret-operator/internal/probes"
 )
 
 // Condition Types for DynamicSecretPolicy state machine transitions.
 const (
-	ConditionTypeRevisionPrepared   = "RevisionPrepared"
-	ConditionTypeCanaryProvisioning = "CanaryProvisioning"
-	ConditionTypeValidating         = "Validating"
-	ConditionTypePromoting          = "Promoting"
-	ConditionTypeRolledBack         = "RolledBack"
+	ConditionTypeRevisionPrepared      = "RevisionPrepared"
+	ConditionTypeCanaryProvisioning    = "CanaryProvisioning"
+	ConditionTypeValidating            = "Validating"
+	ConditionTypePromoting             = "Promoting"
+	ConditionTypeRolledBack            = "RolledBack"
+	ConditionTypeCircuitBreakerTripped = "CircuitBreakerTripped"
 )
 
 // Reason constants for DynamicSecretPolicy conditions.
 const (
-	ReasonPrepared      = "Prepared"
-	ReasonProvisioning  = "Provisioning"
-	ReasonProbesRunning = "ProbesRunning"
-	ReasonPromoting     = "Promoting"
-	ReasonCompleted     = "Completed"
-	ReasonRolledBack    = "RolledBack"
+	ReasonPrepared                    = "Prepared"
+	ReasonProvisioning                = "Provisioning"
+	ReasonProbesRunning               = "ProbesRunning"
+	ReasonPromoting                   = "Promoting"
+	ReasonCompleted                   = "Completed"
+	ReasonRolledBack                  = "RolledBack"
+	ReasonValidationThresholdExceeded = "ValidationThresholdExceeded"
+	ReasonCircuitBreakerReset         = "CircuitBreakerReset"
 )
 
 // LabelRevision is the standard label attached to materialized revision secrets.
@@ -67,6 +71,8 @@ type DynamicSecretPolicyReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	SecretFetcher azure.SecretFetcher
+	// ProbeRunner allows executing or mocking validation probes
+	ProbeRunner func(ctx context.Context, probe secretv1alpha1.ValidationProbe, secretData map[string][]byte) error
 	// OnSecretMaterialized optional callback for Service Bus transaction completion
 	OnSecretMaterialized func(ctx context.Context, policyName, revision string) error
 }
@@ -97,9 +103,35 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	basePolicy := policy.DeepCopy()
 
+	// Evaluate Circuit Breaker threshold
+	var threshold int32 = 3
+	if policy.Spec.RollbackConfig != nil && policy.Spec.RollbackConfig.CircuitBreakerThreshold > 0 {
+		threshold = policy.Spec.RollbackConfig.CircuitBreakerThreshold
+	}
+
 	// Evaluate state machine progression based on current status conditions
 	currentState := r.determineState(policy)
 	logger.Info("evaluating DynamicSecretPolicy state machine", "currentState", currentState)
+
+	// If Circuit Breaker is tripped during an active rollout, halt reconciliation
+	if currentState != "" && policy.Status.ConsecutiveFailures >= threshold {
+		logger.Error(nil, "circuit breaker tripped; halting reconciliation loop",
+			"consecutiveFailures", policy.Status.ConsecutiveFailures,
+			"threshold", threshold,
+		)
+		if !meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCircuitBreakerTripped) {
+			cond := metav1.Condition{
+				Type:    ConditionTypeCircuitBreakerTripped,
+				Status:  metav1.ConditionTrue,
+				Reason:  ReasonValidationThresholdExceeded,
+				Message: fmt.Sprintf("Circuit breaker tripped after %d consecutive failures (threshold: %d)", policy.Status.ConsecutiveFailures, threshold),
+			}
+			_ = r.updateStatus(ctx, policy, basePolicy, cond)
+			_ = canary.CleanupCanaryResources(ctx, r.Client, policy)
+		}
+		// Returning no error and no requeue stops the controller loop until manual intervention or a new event arrives
+		return ctrl.Result{}, nil
+	}
 
 	switch currentState {
 	case "":
@@ -109,6 +141,15 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			logger.Error(err, "failed to materialize secret revision from Key Vault")
 			return ctrl.Result{}, err
 		}
+
+		// Reset failure counters and circuit breaker condition on new revision materialization
+		policy.Status.ConsecutiveFailures = 0
+		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
+			Type:    ConditionTypeCircuitBreakerTripped,
+			Status:  metav1.ConditionFalse,
+			Reason:  ReasonCircuitBreakerReset,
+			Message: "Circuit breaker reset for new revision attempt",
+		})
 
 		policy.Status.DesiredRevision = revisionHash
 		cond := metav1.Condition{
@@ -171,7 +212,44 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 
 	case ConditionTypeValidating:
-		// Transition to Promoting: Patch target workload Deployment and clean up ephemeral canary
+		// Execute validation probes against the canary workload
+		if err := r.runValidationProbes(ctx, policy); err != nil {
+			policy.Status.ConsecutiveFailures++
+			logger.Error(err, "validation probe failed",
+				"consecutiveFailures", policy.Status.ConsecutiveFailures,
+				"threshold", threshold,
+			)
+
+			if policy.Status.ConsecutiveFailures >= threshold {
+				logger.Error(err, "consecutive failure threshold reached; tripping circuit breaker",
+					"failures", policy.Status.ConsecutiveFailures,
+					"threshold", threshold,
+				)
+				cond := metav1.Condition{
+					Type:    ConditionTypeCircuitBreakerTripped,
+					Status:  metav1.ConditionTrue,
+					Reason:  ReasonValidationThresholdExceeded,
+					Message: fmt.Sprintf("Circuit breaker tripped after %d consecutive failures (threshold: %d): %v", policy.Status.ConsecutiveFailures, threshold, err),
+				}
+				_ = r.updateStatus(ctx, policy, basePolicy, cond)
+				_ = canary.CleanupCanaryResources(ctx, r.Client, policy)
+				return ctrl.Result{}, nil
+			}
+
+			// Under threshold: update status and return error to trigger exponential backoff
+			cond := metav1.Condition{
+				Type:    ConditionTypeValidating,
+				Status:  metav1.ConditionFalse,
+				Reason:  "ProbeFailed",
+				Message: fmt.Sprintf("Validation probe failed: %v", err),
+			}
+			_ = r.updateStatus(ctx, policy, basePolicy, cond)
+			return ctrl.Result{}, err
+		}
+
+		// Validation succeeded: reset failure counter and promote
+		policy.Status.ConsecutiveFailures = 0
+
 		if err := r.promoteTargetWorkload(ctx, policy); err != nil {
 			logger.Error(err, "failed to promote target workload")
 			return ctrl.Result{}, err
@@ -217,6 +295,31 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		logger.Info("unhandled state encountered; requeuing", "state", currentState)
 		return ctrl.Result{Requeue: true}, nil
 	}
+}
+
+// runValidationProbes iterates over configured probes and executes them sequentially.
+func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) error {
+	if len(policy.Spec.ValidationProbes) == 0 {
+		return nil
+	}
+
+	runner := r.ProbeRunner
+	if runner == nil {
+		runner = func(pCtx context.Context, probe secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
+			executor, err := probes.NewProbeExecutor(string(probe.Type))
+			if err != nil {
+				return err
+			}
+			return executor.Execute(pCtx, probe, secretData)
+		}
+	}
+
+	for _, probe := range policy.Spec.ValidationProbes {
+		if err := runner(ctx, probe, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // promoteTargetWorkload patches the production target Deployment with the new Secret revision.
@@ -377,13 +480,13 @@ func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.Dy
 	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypePromoting) {
 		return ConditionTypePromoting
 	}
-	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeValidating) {
+	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeValidating) != nil {
 		return ConditionTypeValidating
 	}
-	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCanaryProvisioning) {
+	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeCanaryProvisioning) != nil {
 		return ConditionTypeCanaryProvisioning
 	}
-	if meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeRevisionPrepared) {
+	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeRevisionPrepared) != nil {
 		return ConditionTypeRevisionPrepared
 	}
 	return ""
