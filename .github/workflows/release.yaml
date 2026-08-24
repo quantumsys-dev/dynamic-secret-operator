@@ -57,6 +57,7 @@ jobs:
           context: .
           file: ./Dockerfile
           load: true
+          platforms: linux/amd64
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:scan-test
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -78,6 +79,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
