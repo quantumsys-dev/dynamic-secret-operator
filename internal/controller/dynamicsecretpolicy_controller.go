@@ -97,10 +97,6 @@ type DynamicSecretPolicyReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	// Enforce 10-second timeout on all reconciliation network and API calls
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
 	ctx, span := telemetry.Tracer.Start(ctx, "ReconcileDynamicSecretPolicy",
 		trace.WithAttributes(
 			attribute.String("policy.name", req.Name),
@@ -202,7 +198,9 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 
 		if r.OnSecretMaterialized != nil {
-			if err := r.OnSecretMaterialized(ctx, policy.Name, revisionHash); err != nil {
+			cbCtx, cbCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cbCancel()
+			if err := r.OnSecretMaterialized(cbCtx, policy.Name, revisionHash); err != nil {
 				logger.Error(err, "failed executing post-materialization callback")
 			}
 		}
@@ -392,8 +390,14 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 	}
 
 	for _, probe := range policy.Spec.ValidationProbes {
+		timeout := 15 * time.Second
+		if probe.QueryTimeout > 0 {
+			timeout = time.Duration(probe.QueryTimeout) * time.Second
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, timeout)
 		start := time.Now()
-		err := runner(ctx, probe, secret.Data)
+		err := runner(probeCtx, probe, secret.Data)
+		probeCancel()
 		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(probe.Type)).Observe(time.Since(start).Seconds())
 		if err != nil {
 			return err
@@ -487,8 +491,11 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 		return "", fmt.Errorf("secret fetcher is not configured on reconciler")
 	}
 
+	kvCtx, kvCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer kvCancel()
+
 	payload, err := r.SecretFetcher.GetSecret(
-		ctx,
+		kvCtx,
 		policy.Spec.VaultRef.KeyVaultURI,
 		policy.Spec.VaultRef.ObjectName,
 		"",
