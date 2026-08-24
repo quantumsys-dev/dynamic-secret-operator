@@ -27,7 +27,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 )
 
-// mockTokenCredential implements azcore.TokenCredential for tests.
 type mockTokenCredential struct{}
 
 func (m *mockTokenCredential) GetToken(ctx context.Context, options policy.TokenRequestOptions) (azcore.AccessToken, error) {
@@ -37,10 +36,10 @@ func (m *mockTokenCredential) GetToken(ctx context.Context, options policy.Token
 	}, nil
 }
 
-// mockReceiver implements Receiver interface for tests.
 type mockReceiver struct {
-	receiveFunc func(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error)
-	closeFunc   func(ctx context.Context) error
+	receiveFunc  func(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error)
+	completeFunc func(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error
+	closeFunc    func(ctx context.Context) error
 }
 
 func (m *mockReceiver) ReceiveMessages(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error) {
@@ -49,6 +48,13 @@ func (m *mockReceiver) ReceiveMessages(ctx context.Context, maxMessages int, opt
 	}
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+func (m *mockReceiver) CompleteMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error {
+	if m.completeFunc != nil {
+		return m.completeFunc(ctx, message, options)
+	}
+	return nil
 }
 
 func (m *mockReceiver) Close(ctx context.Context) error {
@@ -106,7 +112,6 @@ func TestServiceBusListener_Start_GracefulShutdown(t *testing.T) {
 	closedCalled := false
 	mock := &mockReceiver{
 		receiveFunc: func(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error) {
-			// Simulate waiting on context cancellation
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
@@ -124,7 +129,6 @@ func TestServiceBusListener_Start_GracefulShutdown(t *testing.T) {
 		done <- listener.Start(ctx)
 	}()
 
-	// Allow goroutine to start and enter receive loop
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 
@@ -150,6 +154,7 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 	}
 
 	receivedCount := 0
+	ackCalled := false
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -171,12 +176,19 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 					},
 				}, nil
 			}
-			// Cancel context after first batch
 			cancel()
 			return nil, errors.New("context canceled")
 		},
+		completeFunc: func(c context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error {
+			ackCalled = true
+			return nil
+		},
 	}
 	listener.customReceiver = mock
+
+	listener.SetHandler(func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack AckFunc) error {
+		return ack(ctx)
+	})
 
 	err = listener.Start(ctx)
 	if err != nil {
@@ -184,5 +196,8 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 	}
 	if receivedCount != 1 {
 		t.Errorf("expected 1 receive iteration, got %d", receivedCount)
+	}
+	if !ackCalled {
+		t.Errorf("expected AckFunc to trigger CompleteMessage")
 	}
 }

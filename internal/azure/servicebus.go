@@ -31,19 +31,27 @@ import (
 var _ manager.Runnable = &ServiceBusListener{}
 var _ manager.LeaderElectionRunnable = &ServiceBusListener{}
 
+// AckFunc acknowledges and completes a message in Azure Service Bus.
+type AckFunc func(ctx context.Context) error
+
+// MessageHandler processes an ingested Service Bus event and receives an Ack callback.
+type MessageHandler func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack AckFunc) error
+
 // Receiver defines the interface for receiving messages, allowing unit test mocking.
 type Receiver interface {
 	ReceiveMessages(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error)
+	CompleteMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error
 	Close(ctx context.Context) error
 }
 
 // ServiceBusListener implements manager.Runnable to listen to Azure Service Bus queue events
-// via Peek-Lock mode.
+// via Peek-Lock mode and provides transactional message completion.
 type ServiceBusListener struct {
 	Namespace   string
 	QueueName   string
 	Cred        azcore.TokenCredential
 	MaxMessages int
+	Handler     MessageHandler
 
 	// customReceiver allows injecting a mock receiver for testing.
 	customReceiver Receiver
@@ -67,6 +75,11 @@ func NewServiceBusListener(namespace, queueName string, cred azcore.TokenCredent
 		Cred:        cred,
 		MaxMessages: 10,
 	}, nil
+}
+
+// SetHandler sets the callback handler for received messages.
+func (l *ServiceBusListener) SetHandler(h MessageHandler) {
+	l.Handler = h
 }
 
 // NeedLeaderElection ensures this listener only runs on the active leader manager.
@@ -164,8 +177,18 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 				"contentType", contentType,
 				"bodySize", len(msg.Body),
 			)
-			// NOTE: Do not call CompleteMessage() here.
-			// Message completion and dead-letter handling is delegated to the progressive rollout reconciler.
+
+			// Construct transactional Ack function for the message
+			ackFunc := func(ackCtx context.Context) error {
+				log.Info("completing Service Bus message after successful reconciliation", "messageID", msg.MessageID)
+				return receiver.CompleteMessage(ackCtx, msg, nil)
+			}
+
+			if l.Handler != nil {
+				if err := l.Handler(ctx, msg, ackFunc); err != nil {
+					log.Error(err, "handler failed to process message", "messageID", msg.MessageID)
+				}
+			}
 		}
 	}
 }
