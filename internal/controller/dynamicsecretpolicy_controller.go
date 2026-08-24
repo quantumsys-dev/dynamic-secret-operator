@@ -193,7 +193,32 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 
 	case ConditionTypeRevisionPrepared:
-		// Transition to CanaryProvisioning and enforce strict NetworkPolicy isolation
+		targetName := policy.Spec.WorkloadSelector.Name
+		targetDeploy := &appsv1.Deployment{}
+		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: policy.Namespace}, targetDeploy); err != nil {
+			logger.Error(err, "failed to fetch target deployment for canary provisioning", "targetDeployment", targetName)
+			span.RecordError(err)
+			return ctrl.Result{}, err
+		}
+
+		secretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+
+		// 1. Provision Canary Deployment
+		canaryDeploy := canary.BuildCanaryDeployment(targetDeploy, policy, secretName)
+		if err := controllerutil.SetControllerReference(policy, canaryDeploy, r.Scheme); err != nil {
+			logger.Error(err, "failed to set controller reference on canary deployment")
+			span.RecordError(err)
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Create(ctx, canaryDeploy); err != nil && !apierrors.IsAlreadyExists(err) {
+			logger.Error(err, "failed to create canary deployment")
+			span.RecordError(err)
+			return ctrl.Result{}, err
+		}
+		logger.Info("provisioned canary deployment", "canaryDeployment", canaryDeploy.Name)
+
+		// 2. Provision Canary NetworkPolicy
 		netpol := canary.BuildNetworkPolicy(policy)
 		if err := controllerutil.SetControllerReference(policy, netpol, r.Scheme); err != nil {
 			logger.Error(err, "failed to set controller reference on canary network policy")
@@ -212,7 +237,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			Type:    ConditionTypeCanaryProvisioning,
 			Status:  metav1.ConditionTrue,
 			Reason:  ReasonProvisioning,
-			Message: fmt.Sprintf("Canary isolation network policy %s provisioned", netpol.Name),
+			Message: fmt.Sprintf("Canary deployment %s and isolation policy %s provisioned", canaryDeploy.Name, netpol.Name),
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to CanaryProvisioning")
@@ -552,5 +577,6 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 		For(&secretv1alpha1.DynamicSecretPolicy{}).
 		Owns(&corev1.Secret{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&appsv1.Deployment{}).
 		Complete(r)
 }

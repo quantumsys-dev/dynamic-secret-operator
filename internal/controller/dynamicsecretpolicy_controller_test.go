@@ -28,6 +28,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -299,13 +300,6 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		},
 	}
 
-	canaryDeploy := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "order-service-canary",
-			Namespace: "default",
-		},
-	}
-
 	policy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "order-policy",
@@ -331,7 +325,7 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
-		WithObjects(policy, targetDeployment, canaryDeploy).
+		WithObjects(policy, targetDeployment).
 		Build()
 
 	ackTriggered := false
@@ -397,13 +391,25 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 		t.Errorf("expected controller owner reference on created secret")
 	}
 
-	// Step 2: RevisionPrepared -> CanaryProvisioning (NetworkPolicy creation)
+	// Step 2: RevisionPrepared -> CanaryProvisioning (Canary Deployment and NetworkPolicy creation)
 	res, err = reconciler.Reconcile(ctx, req)
 	if err != nil {
 		t.Fatalf("step 2 reconcile failed: %v", err)
 	}
 	if !res.Requeue {
 		t.Errorf("expected step 2 to requeue")
+	}
+
+	// Verify canary deployment was created
+	createdCanary := &appsv1.Deployment{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "order-service-canary", Namespace: "default"}, createdCanary); err != nil {
+		t.Fatalf("failed to get created canary deployment: %v", err)
+	}
+	if len(createdCanary.OwnerReferences) == 0 {
+		t.Errorf("expected controller owner reference on canary deployment")
+	}
+	if *createdCanary.Spec.Replicas != 1 {
+		t.Errorf("expected 1 canary replica, got %d", *createdCanary.Spec.Replicas)
 	}
 
 	netpolList := &networkingv1.NetworkPolicyList{}
@@ -458,6 +464,10 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	// Assert Canary resources were destroyed
 	if err := fakeClient.List(ctx, netpolList); err == nil && len(netpolList.Items) != 0 {
 		t.Errorf("expected 0 canary network policies after cleanup, got %d", len(netpolList.Items))
+	}
+	deletedCanary := &appsv1.Deployment{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "order-service-canary", Namespace: "default"}, deletedCanary); !apierrors.IsNotFound(err) {
+		t.Errorf("expected canary deployment to be deleted after promotion, got err: %v", err)
 	}
 
 	// Assert status update
