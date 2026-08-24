@@ -1,0 +1,6 @@
+domain: quantumsys.io
+layout:
+- go.kubebuilder.io/v4
+projectName: dynamic-secret-operator
+repo: github.com/quantumsys/dynamic-secret-operator
+version: "3"
