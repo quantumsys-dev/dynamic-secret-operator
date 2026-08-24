@@ -3,4 +3,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: dynamic-secret-operator
 repo: github.com/quantumsys/dynamic-secret-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: quantumsys.io
+  group: secret
+  kind: DynamicSecretPolicy
+  path: github.com/quantumsys/dynamic-secret-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"
