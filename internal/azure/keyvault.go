@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -42,11 +43,13 @@ func (p *SecretPayload) Wipe() {
 	p.Value = nil
 }
 
-// ZeroBytes overwrites a byte slice with zeros in-place.
+// ZeroBytes overwrites a byte slice with zeros in-place and enforces runtime.KeepAlive
+// to prevent compiler Dead Store Elimination (DSE) optimizations from stripping the wipe.
 func ZeroBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+	runtime.KeepAlive(b)
 }
 
 // SecretFetcher defines the contract for retrieving secrets from external vault backends.
