@@ -42,7 +42,7 @@ func (r *DynamicSecretPolicy) SetupWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-//+kubebuilder:webhook:path=/mutate-secret-quantumsys-io-v1alpha1-dynamicsecretpolicy,mutating=true,failurePolicy=fail,sideEffects=None,groups=secret.quantumsys.io,resources=dynamicsecretpolicies,verbs=create;update,versions=v1alpha1,name=mdynamicsecretpolicy.kb.io,admissionReviewVersions=v1
+//+kubebuilder:webhook:path=/mutate-dso-quantumsys-dev-v1alpha1-dynamicsecretpolicy,mutating=true,failurePolicy=fail,sideEffects=None,groups=dso.quantumsys.dev,resources=dynamicsecretpolicies,verbs=create;update,versions=v1alpha1,name=mdynamicsecretpolicy.kb.io,admissionReviewVersions=v1
 
 var _ admission.Defaulter[*DynamicSecretPolicy] = &DynamicSecretPolicy{}
 
@@ -72,7 +72,7 @@ func (r *DynamicSecretPolicy) Default(ctx context.Context, obj *DynamicSecretPol
 	return nil
 }
 
-//+kubebuilder:webhook:path=/validate-secret-quantumsys-io-v1alpha1-dynamicsecretpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=secret.quantumsys.io,resources=dynamicsecretpolicies,verbs=create;update,versions=v1alpha1,name=vdynamicsecretpolicy.kb.io,admissionReviewVersions=v1
+//+kubebuilder:webhook:path=/validate-dso-quantumsys-dev-v1alpha1-dynamicsecretpolicy,mutating=false,failurePolicy=fail,sideEffects=None,groups=dso.quantumsys.dev,resources=dynamicsecretpolicies,verbs=create;update,versions=v1alpha1,name=vdynamicsecretpolicy.kb.io,admissionReviewVersions=v1
 
 var _ admission.Validator[*DynamicSecretPolicy] = &DynamicSecretPolicy{}
 

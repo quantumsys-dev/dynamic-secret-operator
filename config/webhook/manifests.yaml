@@ -10,12 +10,12 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /mutate-secret-quantumsys-io-v1alpha1-dynamicsecretpolicy
+      path: /mutate-dso-quantumsys-dev-v1alpha1-dynamicsecretpolicy
   failurePolicy: Fail
   name: mdynamicsecretpolicy.kb.io
   rules:
   - apiGroups:
-    - secret.quantumsys.io
+    - dso.quantumsys.dev
     apiVersions:
     - v1alpha1
     operations:
@@ -36,12 +36,12 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-secret-quantumsys-io-v1alpha1-dynamicsecretpolicy
+      path: /validate-dso-quantumsys-dev-v1alpha1-dynamicsecretpolicy
   failurePolicy: Fail
   name: vdynamicsecretpolicy.kb.io
   rules:
   - apiGroups:
-    - secret.quantumsys.io
+    - dso.quantumsys.dev
     apiVersions:
     - v1alpha1
     operations:

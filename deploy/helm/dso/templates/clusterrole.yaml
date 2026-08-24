@@ -43,7 +43,7 @@ rules:
       - update
       - watch
   - apiGroups:
-      - secret.quantumsys.io
+      - dso.quantumsys.dev
     resources:
       - dynamicsecretpolicies
     verbs:
@@ -55,7 +55,7 @@ rules:
       - update
       - watch
   - apiGroups:
-      - secret.quantumsys.io
+      - dso.quantumsys.dev
     resources:
       - dynamicsecretpolicies/status
       - dynamicsecretpolicies/finalizers

@@ -1,4 +1,4 @@
-domain: quantumsys.io
+domain: quantumsys.dev
 layout:
 - go.kubebuilder.io/v4
 projectName: dynamic-secret-operator
@@ -8,8 +8,8 @@ resources:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: quantumsys.io
-  group: secret
+  domain: quantumsys.dev
+  group: dso
   kind: DynamicSecretPolicy
   path: github.com/quantumsys/dynamic-secret-operator/api/v1alpha1
   webhooks:

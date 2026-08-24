@@ -72,7 +72,7 @@ const (
 )
 
 // LabelRevision is the standard label attached to materialized revision secrets.
-const LabelRevision = "dso.quantumsys.io/revision"
+const LabelRevision = "dso.quantumsys.dev/revision"
 
 // DynamicSecretPolicyReconciler reconciles a DynamicSecretPolicy object
 type DynamicSecretPolicyReconciler struct {
@@ -87,9 +87,9 @@ type DynamicSecretPolicyReconciler struct {
 	OnSecretMaterialized func(ctx context.Context, policyName, revision string) error
 }
 
-// +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/finalizers,verbs=update
+// +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
