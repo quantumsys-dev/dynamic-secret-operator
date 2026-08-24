@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -87,8 +88,12 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 		return hostErr
 	}
 
-	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=%d",
-		host, port, username, password, dbname, 5)
+	escapedUser := url.QueryEscape(username)
+	escapedPassword := url.QueryEscape(password)
+	escapedDBName := url.QueryEscape(dbname)
+
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable&connect_timeout=%d",
+		escapedUser, escapedPassword, host, port, escapedDBName, 5)
 
 	connector := p.DBConnector
 	if connector == nil {

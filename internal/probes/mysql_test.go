@@ -124,4 +124,47 @@ func TestMySQLProbe_Execute(t *testing.T) {
 			t.Fatalf("expected error for empty endpoint, got nil")
 		}
 	})
+
+	t.Run("correctly URL-encodes special characters in credentials", func(t *testing.T) {
+		var capturedDSN string
+		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("failed to create sqlmock: %v", err)
+		}
+		defer db.Close()
+
+		mock.ExpectPing()
+		mock.ExpectQuery("SELECT 1").WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+
+		probe := &MySQLProbe{
+			DBConnector: func(driverName, dataSourceName string) (*sql.DB, error) {
+				capturedDSN = dataSourceName
+				return db, nil
+			},
+		}
+
+		cfg := secretv1alpha1.ValidationProbe{
+			Type:     secretv1alpha1.ProbeTypeMySQL,
+			Endpoint: "mysql-db:3306",
+		}
+
+		secretData := map[string][]byte{
+			"username": []byte("admin@tenant:1"),
+			"password": []byte("p@ss:w/ord?#123"),
+			"dbname":   []byte("app/db"),
+		}
+
+		if err := probe.Execute(context.Background(), cfg, secretData); err != nil {
+			t.Fatalf("expected successful probe execution with special characters, got: %v", err)
+		}
+
+		expectedUser := "admin%40tenant%3A1"
+		expectedPass := "p%40ss%3Aw%2Ford%3F%23123"
+		expectedDB := "app%2Fdb"
+		expectedPrefix := expectedUser + ":" + expectedPass + "@tcp(mysql-db:3306)/" + expectedDB
+
+		if !strings.HasPrefix(capturedDSN, expectedPrefix) {
+			t.Errorf("expected DSN to contain encoded credentials prefix %q, got %q", expectedPrefix, capturedDSN)
+		}
+	})
 }

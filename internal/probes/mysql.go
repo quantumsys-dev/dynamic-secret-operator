@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -82,8 +83,12 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 		return hostErr
 	}
 
+	escapedUser := url.QueryEscape(username)
+	escapedPassword := url.QueryEscape(password)
+	escapedDBName := url.QueryEscape(dbname)
+
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=5s",
-		username, password, host, port, dbname)
+		escapedUser, escapedPassword, host, port, escapedDBName)
 
 	connector := p.DBConnector
 	if connector == nil {
