@@ -8,7 +8,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write # Required for creating release tags and attaching SBOM release assets
   id-token: write # Strictly required for Sigstore / Cosign keyless OIDC signing
   packages: write
 
