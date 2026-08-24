@@ -8,10 +8,6 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-  pull-requests: read
-
 jobs:
   dco:
     name: Check DCO (Sign-off)
@@ -23,6 +19,37 @@ jobs:
           fetch-depth: 0
 
       - name: Verify DCO Sign-off
-        uses: tibdex/dco@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Define o range de commits a ser verificado dependendo do evento
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            RANGE="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          else
+            # Para push na main, valida o último commit ou o range do push
+            RANGE="${{ github.event.before }}..${{ github.event.after }}"
+            # Caso seja o primeiro push do repositório (before é vazio de zeros)
+            if [ "$RANGE" == "0000000000000000000000000000000000000000..${{ github.event.after }}" ]; then
+              RANGE="HEAD~1..HEAD"
+            fi
+          fi
+
+          echo "Checking commits in range: $RANGE"
+          FAILED=0
+          
+          # Itera por cada commit no range verificando se contém a tag Signed-off-by
+          for commit in $(git rev-list $RANGE); do
+            if ! git log --format=body --no-merges -n 1 $commit | grep -q "Signed-off-by:"; then
+              echo "❌ Commit $(git rev-parse --short $commit) lacks a 'Signed-off-by' sign-off."
+              git log --format="%s" -n 1 $commit
+              FAILED=1
+            else
+              echo "✅ Commit $(git rev-parse --short $commit) is properly signed off."
+            fi
+          done
+
+          if [ $FAILED -eq 1 ]; then
+            echo "----------------------------------------------------"
+            echo "Error: One or more commits are missing a Developer Certificate of Origin (DCO) sign-off."
+            echo "Please fix your commits using: git commit --amend -s"
+            echo "----------------------------------------------------"
+            exit 1
+          fi
