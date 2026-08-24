@@ -162,6 +162,45 @@ func TestDynamicSecretPolicy_ValidateCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("security: rejects SSRF unanchored domain suffix bypasses", func(t *testing.T) {
+		ssrfPayloads := []string{
+			"https://my-vault.vault.azure.net.attacker.com",
+			"https://my-vault.vault.azure.net.attacker.com/secrets/steal",
+			"https://my-vault.vault.azure.net-malicious.org",
+			"https://my-vault.vault.azure.net.evil.io",
+			"https://evil.com/https://my-vault.vault.azure.net",
+		}
+
+		for _, payload := range ssrfPayloads {
+			policy := newValidPolicy()
+			policy.Spec.VaultRef.KeyVaultURI = payload
+
+			_, err := policy.ValidateCreate(ctx, policy)
+			if err == nil {
+				t.Errorf("CRITICAL SECURITY VULNERABILITY (SSRF): webhook accepted malicious URI %q", payload)
+			}
+		}
+	})
+
+	t.Run("security: accepts valid anchored Azure Key Vault endpoints", func(t *testing.T) {
+		validURIs := []string{
+			"https://my-prod-vault.vault.azure.net",
+			"https://my-prod-vault.vault.azure.net/",
+			"https://my-prod-vault.vault.azure.net/secrets/db-pass",
+			"https://vault-123.vault.azure.net",
+		}
+
+		for _, uri := range validURIs {
+			policy := newValidPolicy()
+			policy.Spec.VaultRef.KeyVaultURI = uri
+
+			_, err := policy.ValidateCreate(ctx, policy)
+			if err != nil {
+				t.Errorf("expected valid Key Vault URI %q to pass, got: %v", uri, err)
+			}
+		}
+	})
+
 	t.Run("rejects empty ObjectName", func(t *testing.T) {
 		policy := newValidPolicy()
 		policy.Spec.VaultRef.ObjectName = ""

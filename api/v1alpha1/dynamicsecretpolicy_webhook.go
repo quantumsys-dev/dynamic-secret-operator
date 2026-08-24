@@ -31,8 +31,8 @@ import (
 // log is for logging in this package.
 var dynamicsecretpolicylog = logf.Log.WithName("dynamicsecretpolicy-resource")
 
-// azureKeyVaultURIRegex strictly matches valid Azure Key Vault endpoints.
-var azureKeyVaultURIRegex = regexp.MustCompile(`^https://[a-zA-Z0-9-]+\.vault\.azure\.net/?.*$`)
+// azureKeyVaultURIRegex strictly matches valid Azure Key Vault endpoints with exact domain boundary anchoring.
+var azureKeyVaultURIRegex = regexp.MustCompile(`^https://[a-zA-Z0-9-]+(?:\.vault\.azure\.net)(?:/.*)?$`)
 
 // SetupWebhookWithManager registers the webhook with the controller manager.
 func (r *DynamicSecretPolicy) SetupWebhookWithManager(mgr ctrl.Manager) error {
