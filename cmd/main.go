@@ -79,7 +79,8 @@ func main() {
 	setupLog = ctrl.Log.WithName("setup")
 
 	// Initialize zero-trust Azure Workload Identity authentication (fail-fast)
-	if _, err := azure.NewAzureCredential(); err != nil {
+	azureCred, err := azure.NewAzureCredential()
+	if err != nil {
 		setupLog.Error(err, "unable to initialize Azure Workload Identity credential; refusing to start")
 		os.Exit(1)
 	}
@@ -146,6 +147,22 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "DynamicSecretPolicy")
 			os.Exit(1)
 		}
+	}
+
+	// Register Azure Service Bus Peek-Lock Listener if configured
+	sbNamespace := os.Getenv("SERVICEBUS_NAMESPACE")
+	sbQueue := os.Getenv("SERVICEBUS_QUEUE_NAME")
+	if sbNamespace != "" && sbQueue != "" {
+		sbListener, err := azure.NewServiceBusListener(sbNamespace, sbQueue, azureCred)
+		if err != nil {
+			setupLog.Error(err, "unable to create Azure Service Bus listener")
+			os.Exit(1)
+		}
+		if err := mgr.Add(sbListener); err != nil {
+			setupLog.Error(err, "unable to register ServiceBusListener with manager")
+			os.Exit(1)
+		}
+		setupLog.Info("registered Azure Service Bus peek-lock listener with manager", "namespace", sbNamespace, "queue", sbQueue)
 	}
 	//+kubebuilder:scaffold:builder
 
