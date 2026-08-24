@@ -134,9 +134,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	kvFetcher, err := azure.NewKeyVaultFetcher(azureCred)
+	if err != nil {
+		setupLog.Error(err, "unable to create Key Vault fetcher")
+		os.Exit(1)
+	}
+
 	if err = (&controller.DynamicSecretPolicyReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		SecretFetcher: kvFetcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamicSecretPolicy")
 		os.Exit(1)

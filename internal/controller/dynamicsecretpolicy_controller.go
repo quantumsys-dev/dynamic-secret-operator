@@ -18,16 +18,22 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
 )
 
 // Condition Types for DynamicSecretPolicy state machine transitions.
@@ -46,15 +52,22 @@ const (
 	ReasonPromoting     = "Promoting"
 )
 
+// LabelRevision is the standard label attached to materialized revision secrets.
+const LabelRevision = "dso.quantumsys.io/revision"
+
 // DynamicSecretPolicyReconciler reconciles a DynamicSecretPolicy object
 type DynamicSecretPolicyReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	SecretFetcher azure.SecretFetcher
+	// OnSecretMaterialized optional callback for Service Bus transaction completion
+	OnSecretMaterialized func(ctx context.Context, policyName, revision string) error
 }
 
 // +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=secret.quantumsys.io,resources=dynamicsecretpolicies/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -73,23 +86,39 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	basePolicy := policy.DeepCopy()
+
 	// Evaluate state machine progression based on current status conditions
 	currentState := r.determineState(policy)
 	logger.Info("evaluating DynamicSecretPolicy state machine", "currentState", currentState)
 
 	switch currentState {
 	case "":
-		// Initial State: Transition to RevisionPrepared
+		// Initial State: Materialize immutable SecretRevision from Key Vault
+		revisionHash, err := r.materializeSecretRevision(ctx, policy)
+		if err != nil {
+			logger.Error(err, "failed to materialize secret revision from Key Vault")
+			return ctrl.Result{}, err
+		}
+
+		policy.Status.DesiredRevision = revisionHash
 		cond := metav1.Condition{
 			Type:    ConditionTypeRevisionPrepared,
 			Status:  metav1.ConditionTrue,
 			Reason:  ReasonPrepared,
-			Message: "Secret revision prepared for canary rollout",
+			Message: fmt.Sprintf("Secret revision %s successfully materialized", revisionHash),
 		}
-		if err := r.updateStatus(ctx, policy, cond); err != nil {
+		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to RevisionPrepared")
 			return ctrl.Result{}, err
 		}
+
+		if r.OnSecretMaterialized != nil {
+			if err := r.OnSecretMaterialized(ctx, policy.Name, revisionHash); err != nil {
+				logger.Error(err, "failed executing post-materialization callback")
+			}
+		}
+
 		return ctrl.Result{Requeue: true}, nil
 
 	case ConditionTypeRevisionPrepared:
@@ -100,7 +129,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			Reason:  ReasonProvisioning,
 			Message: "Canary workload pod provisioning initiated",
 		}
-		if err := r.updateStatus(ctx, policy, cond); err != nil {
+		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to CanaryProvisioning")
 			return ctrl.Result{}, err
 		}
@@ -114,7 +143,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			Reason:  ReasonProbesRunning,
 			Message: "Synthetic probes and health validation in progress",
 		}
-		if err := r.updateStatus(ctx, policy, cond); err != nil {
+		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to Validating")
 			return ctrl.Result{}, err
 		}
@@ -128,7 +157,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			Reason:  ReasonPromoting,
 			Message: "Promoting validated revision to primary workload",
 		}
-		if err := r.updateStatus(ctx, policy, cond); err != nil {
+		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to Promoting")
 			return ctrl.Result{}, err
 		}
@@ -147,8 +176,89 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 }
 
+// materializeSecretRevision pulls the secret payload from Azure Key Vault, calculates a deterministic hash,
+// materializes the immutable Secret in the cluster, and zeroes in-memory byte buffers immediately.
+func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) (string, error) {
+	logger := log.FromContext(ctx)
+
+	if r.SecretFetcher == nil {
+		return "", fmt.Errorf("secret fetcher is not configured on reconciler")
+	}
+
+	payload, err := r.SecretFetcher.GetSecret(
+		ctx,
+		policy.Spec.VaultRef.KeyVaultURI,
+		policy.Spec.VaultRef.ObjectName,
+		"",
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch secret from vault: %w", err)
+	}
+
+	// Ensure secret payload memory is zeroed out as soon as materialization completes
+	defer payload.Wipe()
+
+	// Compute deterministic short hash (first 12 characters of SHA-256)
+	hasher := sha256.New()
+	hasher.Write(payload.Value)
+	if payload.Version != "" {
+		hasher.Write([]byte(payload.Version))
+	}
+	revisionHash := fmt.Sprintf("%x", hasher.Sum(nil))[:12]
+	secretName := fmt.Sprintf("%s-rev-%s", policy.Spec.WorkloadSelector.Name, revisionHash)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: policy.Namespace,
+			Labels: map[string]string{
+				LabelRevision: revisionHash,
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			policy.Spec.VaultRef.ObjectName: payload.Value,
+		},
+	}
+
+	// Set ControllerReference for automatic garbage collection when policy is deleted
+	if err := controllerutil.SetControllerReference(policy, secret, r.Scheme); err != nil {
+		return "", fmt.Errorf("failed to set controller reference on secret: %w", err)
+	}
+
+	// Execute Kubernetes API call
+	createErr := r.Create(ctx, secret)
+
+	// Memory Security: Overwrite and purge secret data in the Kubernetes struct immediately
+	if secret.Data != nil {
+		for k, v := range secret.Data {
+			azure.ZeroBytes(v)
+			delete(secret.Data, k)
+		}
+	}
+
+	// Idempotency: If secret already exists, treat materialization as successful
+	if createErr != nil {
+		if apierrors.IsAlreadyExists(createErr) {
+			logger.Info("secret revision already exists; proceeding idempotently",
+				"secretName", secretName,
+				"revision", revisionHash,
+			)
+			return revisionHash, nil
+		}
+		return "", fmt.Errorf("failed to create immutable secret %q: %w", secretName, createErr)
+	}
+
+	logger.Info("materialized new immutable secret revision",
+		"secretName", secretName,
+		"revision", revisionHash,
+	)
+
+	return revisionHash, nil
+}
+
 // updateStatus safely sets the condition and executes a status patch to avoid concurrency conflicts.
-func (r *DynamicSecretPolicyReconciler) updateStatus(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy, condition metav1.Condition) error {
+func (r *DynamicSecretPolicyReconciler) updateStatus(ctx context.Context, policy, base *secretv1alpha1.DynamicSecretPolicy, condition metav1.Condition) error {
 	logger := log.FromContext(ctx)
 	logger.Info("transitioning state",
 		"condition", condition.Type,
@@ -157,9 +267,8 @@ func (r *DynamicSecretPolicyReconciler) updateStatus(ctx context.Context, policy
 		"message", condition.Message,
 	)
 
-	patch := client.MergeFrom(policy.DeepCopy())
 	meta.SetStatusCondition(&policy.Status.Conditions, condition)
-	return r.Status().Patch(ctx, policy, patch)
+	return r.Status().Patch(ctx, policy, client.MergeFrom(base))
 }
 
 // determineState evaluates which progressive delivery phase is currently active.
@@ -183,5 +292,6 @@ func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.Dy
 func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&secretv1alpha1.DynamicSecretPolicy{}).
+		Owns(&corev1.Secret{}).
 		Complete(r)
 }
