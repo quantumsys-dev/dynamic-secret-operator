@@ -1,9 +1,11 @@
 # Build the manager binary
-FROM golang:1.23 AS builder
+FROM golang:1.24 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
 WORKDIR /workspace
+ENV GOTOOLCHAIN=auto
+
 # Copy Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum

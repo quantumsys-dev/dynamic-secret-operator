@@ -1,6 +1,6 @@
 module github.com/quantumsys/dynamic-secret-operator
 
-go 1.26.4
+go 1.26.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.0
