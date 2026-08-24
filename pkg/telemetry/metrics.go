@@ -28,7 +28,7 @@ var (
 			Name: "dso_rotations_total",
 			Help: "Total number of dynamic secret rotation progression cycles started",
 		},
-		[]string{"policy_name", "namespace"},
+		[]string{"namespace"},
 	)
 
 	// RotationsFailed tracks failed validation probe cycles.
@@ -37,7 +37,7 @@ var (
 			Name: "dso_rotations_failed",
 			Help: "Total number of failed canary validation probe runs",
 		},
-		[]string{"policy_name", "namespace"},
+		[]string{"namespace"},
 	)
 
 	// CircuitBreakersTripped tracks when a policy trips its consecutive failure threshold.
@@ -46,7 +46,7 @@ var (
 			Name: "dso_circuit_breakers_tripped",
 			Help: "Total number of times a circuit breaker has tripped and halted reconciliations",
 		},
-		[]string{"policy_name", "namespace"},
+		[]string{"namespace"},
 	)
 
 	// ProbeDurationSeconds records latency distribution for validation probes.
@@ -56,7 +56,7 @@ var (
 			Help:    "Execution duration of synthetic validation probes in seconds",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"policy_name", "namespace", "probe_type"},
+		[]string{"namespace", "probe_type"},
 	)
 )
 

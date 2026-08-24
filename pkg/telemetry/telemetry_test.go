@@ -26,13 +26,12 @@ import (
 
 func TestTelemetry_MetricsAndTracing(t *testing.T) {
 	t.Run("records metrics safely without panic", func(t *testing.T) {
-		policyName := "test-policy"
 		ns := "default"
 
-		RotationsTotal.WithLabelValues(policyName, ns).Inc()
-		RotationsFailed.WithLabelValues(policyName, ns).Inc()
-		CircuitBreakersTripped.WithLabelValues(policyName, ns).Inc()
-		ProbeDurationSeconds.WithLabelValues(policyName, ns, "HTTP").Observe(0.125)
+		RotationsTotal.WithLabelValues(ns).Inc()
+		RotationsFailed.WithLabelValues(ns).Inc()
+		CircuitBreakersTripped.WithLabelValues(ns).Inc()
+		ProbeDurationSeconds.WithLabelValues(ns, "HTTP").Observe(0.125)
 	})
 
 	t.Run("starts and ends tracer spans cleanly", func(t *testing.T) {

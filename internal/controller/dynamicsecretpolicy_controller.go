@@ -142,7 +142,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			"consecutiveFailures", policy.Status.ConsecutiveFailures,
 			"threshold", threshold,
 		)
-		telemetry.CircuitBreakersTripped.WithLabelValues(policy.Name, policy.Namespace).Inc()
+		telemetry.CircuitBreakersTripped.WithLabelValues(policy.Namespace).Inc()
 		span.SetStatus(codes.Error, "Circuit breaker tripped")
 
 		if !meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCircuitBreakerTripped) {
@@ -178,7 +178,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 
 		// Drift Detected: Initiate new progressive rollout cycle
-		telemetry.RotationsTotal.WithLabelValues(policy.Name, policy.Namespace).Inc()
+		telemetry.RotationsTotal.WithLabelValues(policy.Namespace).Inc()
 
 		// Reset failure counters and clear prior rollout / breaker conditions
 		policy.Status.ConsecutiveFailures = 0
@@ -284,7 +284,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		// Execute validation probes against the canary workload
 		if err := r.runValidationProbes(ctx, policy); err != nil {
 			policy.Status.ConsecutiveFailures++
-			telemetry.RotationsFailed.WithLabelValues(policy.Name, policy.Namespace).Inc()
+			telemetry.RotationsFailed.WithLabelValues(policy.Namespace).Inc()
 			span.RecordError(err)
 			logger.Error(err, "validation probe failed",
 				"consecutiveFailures", policy.Status.ConsecutiveFailures,
@@ -292,7 +292,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			)
 
 			if policy.Status.ConsecutiveFailures >= threshold {
-				telemetry.CircuitBreakersTripped.WithLabelValues(policy.Name, policy.Namespace).Inc()
+				telemetry.CircuitBreakersTripped.WithLabelValues(policy.Namespace).Inc()
 				logger.Error(err, "consecutive failure threshold reached; tripping circuit breaker",
 					"failures", policy.Status.ConsecutiveFailures,
 					"threshold", threshold,
@@ -394,7 +394,7 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 	for _, probe := range policy.Spec.ValidationProbes {
 		start := time.Now()
 		err := runner(ctx, probe, secret.Data)
-		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Name, policy.Namespace, string(probe.Type)).Observe(time.Since(start).Seconds())
+		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(probe.Type)).Observe(time.Since(start).Seconds())
 		if err != nil {
 			return err
 		}
