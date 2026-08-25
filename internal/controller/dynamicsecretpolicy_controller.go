@@ -19,7 +19,9 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/pem"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -535,6 +537,24 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 	revisionHash := fmt.Sprintf("%x", hasher.Sum(nil))[:12]
 	secretName := fmt.Sprintf("%s-%s-rev-%s", policy.Spec.WorkloadSelector.Name, policy.Spec.VaultRef.ObjectName, revisionHash)
 
+	secretType := corev1.SecretTypeOpaque
+	secretData := map[string][]byte{
+		policy.Spec.VaultRef.ObjectName: payload.Value,
+	}
+
+	// For TLS certificates, split and map PEM blocks into standard kubernetes.io/tls keys
+	if policy.Spec.VaultRef.ObjectType == secretv1alpha1.VaultObjectTypeCertificate ||
+		strings.Contains(string(payload.Value), "-----BEGIN ") {
+		certData, keyData := parsePEMCertAndKey(payload.Value)
+		if len(certData) > 0 {
+			secretData[corev1.TLSCertKey] = certData
+			if len(keyData) > 0 {
+				secretData[corev1.TLSPrivateKeyKey] = keyData
+			}
+			secretType = corev1.SecretTypeTLS
+		}
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -544,10 +564,8 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 				canary.LabelTargetWorkload: policy.Spec.WorkloadSelector.Name,
 			},
 		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			policy.Spec.VaultRef.ObjectName: payload.Value,
-		},
+		Type: secretType,
+		Data: secretData,
 	}
 
 	// Set ControllerReference for automatic garbage collection when policy is deleted
@@ -641,4 +659,27 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 	}
 
 	return builder.Complete(r)
+}
+
+// parsePEMCertAndKey decodes raw PEM-encoded payload bytes and partitions them into
+// certificate blocks (tls.crt) and private key blocks (tls.key).
+func parsePEMCertAndKey(data []byte) ([]byte, []byte) {
+	var certBlocks []byte
+	var keyBlocks []byte
+
+	rest := data
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		encoded := pem.EncodeToMemory(block)
+		if strings.Contains(block.Type, "CERTIFICATE") {
+			certBlocks = append(certBlocks, encoded...)
+		} else if strings.Contains(block.Type, "PRIVATE KEY") || strings.Contains(block.Type, "KEY") {
+			keyBlocks = append(keyBlocks, encoded...)
+		}
+	}
+	return certBlocks, keyBlocks
 }

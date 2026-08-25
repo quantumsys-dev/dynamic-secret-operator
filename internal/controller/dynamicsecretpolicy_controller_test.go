@@ -1739,3 +1739,68 @@ func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *test
 	}
 }
 
+func TestDynamicSecretPolicyReconciler_MaterializeTLSSecretRevision(t *testing.T) {
+	scheme := setupTestScheme(t)
+
+	demoCertPEM := "-----BEGIN CERTIFICATE-----\nMIIBkDCB+aADAgECAgEBMA0GCSqGSIb3DQEBCwUAMBMxETAPBgNVBAMTCHRl\nc3RjZXJ0MB4XDTI2MDEwMTAwMDAwMFoXDTM2MDEwMTAwMDAwMFowEzERMA8G\nA1UEAxMIdGVzdGNlcnQwXDANBgkqhkiG9w0BAQEFAANLADBIAkEAv2k/xP4h\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4k8yF6oQ/123\n-----END PRIVATE KEY-----\n"
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tls-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://vault.vault.azure.net",
+				ObjectName:  "ingress-tls",
+				ObjectType:  secretv1alpha1.VaultObjectTypeCertificate,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "tls-gateway",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		SecretFetcher: &mockSecretFetcher{
+			getSecretFunc: func(ctx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+				return &azure.SecretPayload{
+					Value:   []byte(demoCertPEM),
+					Version: "v1",
+				}, nil
+			},
+		},
+	}
+
+	rev, err := r.materializeSecretRevision(context.Background(), policy)
+	if err != nil {
+		t.Fatalf("failed to materialize TLS secret revision: %v", err)
+	}
+
+	secretName := fmt.Sprintf("tls-gateway-ingress-tls-rev-%s", rev)
+	secret := &corev1.Secret{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: secretName}, secret); err != nil {
+		t.Fatalf("failed to get materialized TLS secret: %v", err)
+	}
+
+	if secret.Type != corev1.SecretTypeTLS {
+		t.Errorf("expected SecretTypeTLS (%q), got %q", corev1.SecretTypeTLS, secret.Type)
+	}
+
+	if _, ok := secret.Data[corev1.TLSCertKey]; !ok {
+		t.Errorf("expected %q key in secret data", corev1.TLSCertKey)
+	}
+	if _, ok := secret.Data[corev1.TLSPrivateKeyKey]; !ok {
+		t.Errorf("expected %q key in secret data", corev1.TLSPrivateKeyKey)
+	}
+}
+
