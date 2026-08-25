@@ -204,3 +204,73 @@ func TestReconcileArgoCDIgnoreDifferences_RolloutSupport(t *testing.T) {
 		t.Errorf("expected 2 JSON pointers after merge, got %d", len(entry.JSONPointers))
 	}
 }
+
+func TestReconcileArgoCDIgnoreDifferences_PreservesCustomUserEntries(t *testing.T) {
+	_ = os.Setenv(EnvArgoCDAutoPatchEnabled, "true")
+	ctx := context.Background()
+	scheme := newTestScheme()
+
+	app := &Application{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "custom-app",
+			Namespace: "argocd",
+		},
+		Spec: ApplicationSpec{
+			IgnoreDifferences: []ResourceIgnoreDifferences{
+				{
+					Group: "apps",
+					Kind:  "StatefulSet",
+					JSONPointers: []string{
+						"/spec/replicas",
+					},
+				},
+				{
+					Group: "custom.io",
+					Kind:  "CustomResource",
+					JSONPointers: []string{
+						"/spec/customField",
+					},
+				},
+			},
+		},
+	}
+
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "order-service",
+			Namespace: "prod",
+			Labels: map[string]string{
+				LabelArgoCDInstance: "custom-app",
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app, deploy).Build()
+
+	if err := ReconcileArgoCDIgnoreDifferences(ctx, client, deploy, "Deployment"); err != nil {
+		t.Fatalf("expected successful reconcile, got %v", err)
+	}
+
+	updatedApp := &Application{}
+	if err := client.Get(ctx, types.NamespacedName{Name: "custom-app", Namespace: "argocd"}, updatedApp); err != nil {
+		t.Fatalf("failed to fetch updated application: %v", err)
+	}
+
+	// Must now have 3 entries (2 pre-existing custom ones + 1 DSO deployment entry)
+	if len(updatedApp.Spec.IgnoreDifferences) != 3 {
+		t.Fatalf("CRITICAL BUG: user-defined ignoreDifferences were wiped! Expected 3 entries, got %d", len(updatedApp.Spec.IgnoreDifferences))
+	}
+
+	// Verify custom entries were preserved
+	if updatedApp.Spec.IgnoreDifferences[0].Kind != "StatefulSet" || updatedApp.Spec.IgnoreDifferences[0].JSONPointers[0] != "/spec/replicas" {
+		t.Errorf("expected StatefulSet entry preserved untouched")
+	}
+	if updatedApp.Spec.IgnoreDifferences[1].Kind != "CustomResource" || updatedApp.Spec.IgnoreDifferences[1].JSONPointers[0] != "/spec/customField" {
+		t.Errorf("expected CustomResource entry preserved untouched")
+	}
+	// Verify DSO entry was appended
+	if updatedApp.Spec.IgnoreDifferences[2].Kind != "Deployment" || len(updatedApp.Spec.IgnoreDifferences[2].JSONPointers) != 2 {
+		t.Errorf("expected Deployment entry correctly added with 2 JSON pointers")
+	}
+}
+
