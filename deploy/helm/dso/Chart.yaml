@@ -4,7 +4,7 @@ description: Production-grade Kubernetes operator for automated zero-downtime se
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-icon: https://raw.githubusercontent.com/quantumsys/dynamic-secret-operator/main/docs/assets/logo.png
+icon: https://raw.githubusercontent.com/quantumsys-dev/dynamic-secret-operator/main/docs/assets/logo.png
 keywords:
   - dynamic-secrets
   - keyvault
@@ -12,9 +12,9 @@ keywords:
   - operator
   - canary
   - security
-home: https://github.com/quantumsys/dynamic-secret-operator
+home: https://github.com/quantumsys-dev/dynamic-secret-operator
 sources:
-  - https://github.com/quantumsys/dynamic-secret-operator
+  - https://github.com/quantumsys-dev/dynamic-secret-operator
 maintainers:
   - name: QuantumSys Architecture Team
-    email: engineering@quantumsys.io
+    email: engineering@quantumsys.dev

@@ -19,7 +19,7 @@ package probes
 import (
 	"context"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 )
 
 // ProbeExecutor defines the standard execution contract for synthetic health and connectivity probes.

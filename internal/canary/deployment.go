@@ -23,7 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 )
 
 // LabelRevision is the standard label attached to revision secrets.

@@ -2,7 +2,7 @@ domain: quantumsys.dev
 layout:
 - go.kubebuilder.io/v4
 projectName: dynamic-secret-operator
-repo: github.com/quantumsys/dynamic-secret-operator
+repo: github.com/quantumsys-dev/dynamic-secret-operator
 resources:
 - api:
     crdVersion: v1
@@ -11,7 +11,7 @@ resources:
   domain: quantumsys.dev
   group: dso
   kind: DynamicSecretPolicy
-  path: github.com/quantumsys/dynamic-secret-operator/api/v1alpha1
+  path: github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1
   webhooks:
     defaulting: true
     validation: true

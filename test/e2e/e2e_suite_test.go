@@ -38,13 +38,13 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/features"
 	"sigs.k8s.io/e2e-framework/support/kind"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 )
 
 var (
 	testenv         env.Environment
 	clusterName     = "dso-e2e-cluster"
-	operatorImage   = "quantumsys/dso:e2e"
+	operatorImage   = "quantumsys-dev/dso:e2e"
 	systemNamespace = "dso-system"
 	crdBasePath     = filepath.Join("..", "..", "config", "crd", "bases")
 )

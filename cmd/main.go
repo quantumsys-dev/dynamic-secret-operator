@@ -41,9 +41,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
-	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
-	"github.com/quantumsys/dynamic-secret-operator/internal/controller"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/controller"
 	//+kubebuilder:scaffold:imports
 )
 

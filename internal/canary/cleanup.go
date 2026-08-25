@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 )
 
 // CleanupCanaryResources deletes ephemeral canary resources (Deployment and NetworkPolicy)

@@ -23,7 +23,7 @@ import (
 
 const (
 	// InstrumentationScopeName identifies the operator tracer scope.
-	InstrumentationScopeName = "github.com/quantumsys/dynamic-secret-operator"
+	InstrumentationScopeName = "github.com/quantumsys-dev/dynamic-secret-operator"
 )
 
 // Tracer is the shared global OpenTelemetry tracer for dynamic secret operator operations.
