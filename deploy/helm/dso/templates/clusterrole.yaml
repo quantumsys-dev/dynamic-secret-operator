@@ -44,6 +44,17 @@ rules:
       - patch
       - update
       - watch
+  {{- if .Values.argoCD.autoPatch }}
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - applications
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+  {{- end }}
   - apiGroups:
       - networking.k8s.io
     resources:

@@ -45,6 +45,7 @@ import (
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/canary"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/integration"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/probes"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/workload"
 	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
@@ -93,7 +94,7 @@ type DynamicSecretPolicyReconciler struct {
 // +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=argoproj.io,resources=rollouts;applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -452,6 +453,11 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 
 	if err := adapter.Fetch(ctx, r.Client, targetKey); err != nil {
 		return fmt.Errorf("failed to fetch target %s %q: %w", targetKind, targetName, err)
+	}
+
+	// Reconcile Argo CD ignoreDifferences if auto-patching is enabled
+	if err := integration.ReconcileArgoCDIgnoreDifferences(ctx, r.Client, adapter.TargetObject(), targetKind); err != nil {
+		logger.Error(err, "failed to reconcile Argo CD ignoreDifferences; continuing with workload promotion", "targetWorkload", targetName)
 	}
 
 	newSecretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)

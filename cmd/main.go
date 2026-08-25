@@ -45,6 +45,7 @@ import (
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/controller"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/integration"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -58,6 +59,7 @@ func init() {
 
 	utilruntime.Must(secretv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(argorolloutsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(integration.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 

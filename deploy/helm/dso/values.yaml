@@ -38,6 +38,12 @@ azure:
     # Name of the queue receiving Key Vault EventGrid events
     queueName: ""
 
+# Argo CD GitOps integration
+argoCD:
+  # Automatically discover and patch parent Argo CD Application ignoreDifferences
+  # to prevent Self-Heal drift loops on operator-managed secret revisions.
+  autoPatch: false
+
 # Pod Security Admission (PSA) Restricted compliant security contexts
 podSecurityContext:
   runAsNonRoot: true
