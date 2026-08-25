@@ -57,3 +57,6 @@ kubeconfig*
 # Operating System files
 .DS_Store
 Thumbs.db
+
+# Local test scratch scripts
+test-poc.ps1
