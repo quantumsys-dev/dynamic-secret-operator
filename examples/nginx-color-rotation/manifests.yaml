@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: crypto-tracker-app
+  name: nginx-color-app
   namespace: argocd
   finalizers:
     - resources-finalizer.argocd.argoproj.io
@@ -27,7 +27,7 @@ metadata:
   name: nginx-config
   namespace: default
   labels:
-    app.kubernetes.io/instance: crypto-tracker-app
+    app.kubernetes.io/instance: nginx-color-app
 data:
   nginx.conf: |
     events {}
@@ -47,14 +47,14 @@ data:
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Dynamic Secret Operator – Live Rotation Demo</title>
+        <title>Dynamic Secret Operator – Nginx Color Rotation</title>
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
         <style>
             :root {
                 --bg-color: __BACKGROUND_COLOR__;
-                --card-bg: rgba(0, 0, 0, 0.45);
-                --border-color: rgba(255, 255, 255, 0.12);
+                --card-bg: rgba(0, 0, 0, 0.5);
+                --border-color: rgba(255, 255, 255, 0.15);
                 --text-color: #ffffff;
             }
             * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -88,7 +88,7 @@ data:
     <body>
         <div class="card">
             <h1>Dynamic Secret Operator</h1>
-            <p>Live Injected Secret Value:</p>
+            <p>Live Injected Secret Value (nginx-bg-color):</p>
             <div class="secret-val">__BACKGROUND_COLOR__</div>
             <div class="badge">● Live Zero-Downtime Secret Sync</div>
         </div>
@@ -98,21 +98,21 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nginx-crypto-tracker
+  name: nginx-color-demo
   namespace: default
   labels:
-    app: nginx-crypto-tracker
-    app.kubernetes.io/instance: crypto-tracker-app
+    app: nginx-color-demo
+    app.kubernetes.io/instance: nginx-color-app
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nginx-crypto-tracker
+      app: nginx-color-demo
   template:
     metadata:
       labels:
-        app: nginx-crypto-tracker
-        app.kubernetes.io/instance: crypto-tracker-app
+        app: nginx-color-demo
+        app.kubernetes.io/instance: nginx-color-app
     spec:
       containers:
         - name: nginx
@@ -122,7 +122,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              SECRET_FILE="/mnt/secrets/secret-val/database-password"
+              SECRET_FILE="/mnt/secrets/nginx-bg-color/nginx-bg-color"
               if [ -f "$SECRET_FILE" ]; then
                 COLOR=$(cat "$SECRET_FILE")
               else
@@ -138,7 +138,7 @@ spec:
               mountPath: /usr/share/nginx/html/index.html.template
               subPath: index.html.template
             - name: secret-volume
-              mountPath: /mnt/secrets/secret-val
+              mountPath: /mnt/secrets/nginx-bg-color
               readOnly: true
       volumes:
         - name: config-vol
@@ -146,36 +146,36 @@ spec:
             name: nginx-config
         - name: secret-volume
           secret:
-            secretName: nginx-crypto-tracker-secret
+            secretName: nginx-bg-color-secret
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: nginx-crypto-tracker
+  name: nginx-color-demo
   namespace: default
   labels:
-    app.kubernetes.io/instance: crypto-tracker-app
+    app.kubernetes.io/instance: nginx-color-app
 spec:
   type: ClusterIP
   ports:
     - port: 80
       targetPort: 80
   selector:
-    app: nginx-crypto-tracker
+    app: nginx-color-demo
 ---
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
-  name: nginx-crypto-policy
+  name: nginx-color-policy
   namespace: default
 spec:
   vaultRef:
     keyVaultURI: "https://<YOUR_KEYVAULT_NAME>.vault.azure.net"
-    objectName: "database-password"
+    objectName: "nginx-bg-color"
     objectType: "Secret"
   workloadSelector:
     kind: "Deployment"
-    name: "nginx-crypto-tracker"
+    name: "nginx-color-demo"
   rollbackConfig:
     autoRollback: true
     circuitBreakerThreshold: 3

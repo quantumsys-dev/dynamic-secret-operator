@@ -30,7 +30,7 @@ Edit `examples/nginx-color-rotation/manifests.yaml` and update the `DynamicSecre
 spec:
   vaultRef:
     keyVaultURI: "https://<YOUR_KEYVAULT_NAME>.vault.azure.net"
-    objectName: "database-password"
+    objectName: "nginx-bg-color"
     objectType: "Secret"
 ```
 
@@ -76,7 +76,7 @@ make run
 Port-forward the test service in a separate terminal:
 
 ```bash
-kubectl port-forward svc/nginx-crypto-tracker 8080:80
+kubectl port-forward svc/nginx-color-demo 8080:80
 ```
 Open **http://localhost:8080** in your browser.
 
@@ -86,7 +86,7 @@ Update the secret to a new hex color (e.g., Emerald Green `#10b981` or Crimson `
 ```bash
 az keyvault secret set \
   --vault-name "<YOUR_KEYVAULT_NAME>" \
-  --name "database-password" \
+  --name "nginx-bg-color" \
   --value "#10b981"
 ```
 
@@ -94,7 +94,7 @@ az keyvault secret set \
 - The browser page at `http://localhost:8080` smoothly updates to the new color.
 - Check the Argo CD application diffing rules:
   ```bash
-  kubectl get application crypto-tracker-app -n argocd -o yaml
+  kubectl get application nginx-color-app -n argocd -o yaml
   ```
   Notice that DSO automatically discovered the application and injected `spec.ignoreDifferences` without requiring manual Git changes!
 
