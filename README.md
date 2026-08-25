@@ -181,8 +181,8 @@ DSO exposes Prometheus metrics on `:8080/metrics`:
 
 Explore fully reproducible local kind examples:
 - [**Fullstack Database Rotation**](examples/fullstack-db-rotation/): End-to-end web dashboard demonstrating live PostgreSQL zero-downtime credential rotations.
-- [**TLS Certificate Rotation**](examples/tls-certificate-rotation/): Automated Azure Key Vault certificate rotation with TLS handshake and thumbprint probe validation.
-- [**Sidecar Proxy Reloader**](examples/sidecar-proxy-sync/): Sidecar container pattern for triggering hot-reloads on legacy applications without process restarts.
+- [**TLS Certificate Rotation**](examples/tls-certificate-rotation/): Automated Azure Key Vault certificate rotation with native `kubernetes.io/tls` secret mapping and TLS probe validation.
+- [**Argo Rollouts Blue/Green**](examples/argo-rollouts-blue-green/): Progressive Blue/Green delivery with immutable SecretRevisions and automated preview validation cutover.
 - [**Nginx Color Canary Rollout**](examples/nginx-color-rotation/): Visualizing canary rollout transitions and Argo CD GitOps drift auto-patching.
 
 ---
