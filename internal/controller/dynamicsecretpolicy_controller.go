@@ -444,8 +444,11 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 	for i := range targetDeploy.Spec.Template.Spec.Volumes {
 		vol := &targetDeploy.Spec.Template.Spec.Volumes[i]
 		if vol.Secret != nil {
+			// Replace if already an operator-managed revision secret, OR on first adoption
+			// (CurrentRevision == "") replace any non-managed secret volume so the operator
+			// takes ownership regardless of the initial secret name chosen by the user.
 			if strings.HasPrefix(vol.Secret.SecretName, managedPrefix) ||
-				(policy.Status.CurrentRevision == "" && vol.Name == policy.Spec.VaultRef.ObjectName) {
+				(policy.Status.CurrentRevision == "" && !strings.HasPrefix(vol.Secret.SecretName, managedPrefix)) {
 				vol.Secret.SecretName = newSecretName
 			}
 		}
@@ -472,7 +475,7 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 			envFrom := &container.EnvFrom[efIdx]
 			if envFrom.SecretRef != nil {
 				if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
-					(policy.Status.CurrentRevision == "" && envFrom.SecretRef.Name == policy.Spec.VaultRef.ObjectName) ||
+					(policy.Status.CurrentRevision == "" && !strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix)) ||
 					(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
 					envFrom.SecretRef.Name = newSecretName
 				}
