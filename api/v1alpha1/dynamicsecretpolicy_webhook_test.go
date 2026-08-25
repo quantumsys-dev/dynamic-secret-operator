@@ -188,6 +188,9 @@ func TestDynamicSecretPolicy_ValidateCreate(t *testing.T) {
 			"https://my-prod-vault.vault.azure.net/",
 			"https://my-prod-vault.vault.azure.net/secrets/db-pass",
 			"https://vault-123.vault.azure.net",
+			"https://my-china-vault.vault.azure.cn",
+			"https://my-gov-vault.vault.usgovcloudapi.net",
+			"https://my-gov-vault.vault.usgovcloudapi.net/secrets/test",
 		}
 
 		for _, uri := range validURIs {
