@@ -65,7 +65,7 @@ func TestBuildCanaryDeployment(t *testing.T) {
 									ValueFrom: &corev1.EnvVarSource{
 										SecretKeyRef: &corev1.SecretKeySelector{
 											LocalObjectReference: corev1.LocalObjectReference{
-												Name: "payment-service-rev-old",
+												Name: "payment-service-db-pass-rev-old",
 											},
 											Key: "db-pass",
 										},
@@ -87,7 +87,7 @@ func TestBuildCanaryDeployment(t *testing.T) {
 								{
 									SecretRef: &corev1.SecretEnvSource{
 										LocalObjectReference: corev1.LocalObjectReference{
-											Name: "payment-service-rev-old",
+											Name: "payment-service-db-pass-rev-old",
 										},
 									},
 								},
@@ -99,7 +99,7 @@ func TestBuildCanaryDeployment(t *testing.T) {
 							Name: "managed-vol",
 							VolumeSource: corev1.VolumeSource{
 								Secret: &corev1.SecretVolumeSource{
-									SecretName: "payment-service-rev-old",
+									SecretName: "payment-service-db-pass-rev-old",
 								},
 							},
 						},
@@ -136,7 +136,7 @@ func TestBuildCanaryDeployment(t *testing.T) {
 		},
 	}
 
-	newSecretName := "payment-service-rev-newrev1234"
+	newSecretName := "payment-service-db-pass-rev-newrev1234"
 	canaryDeploy := BuildCanaryDeployment(targetDeploy, policy, newSecretName)
 
 	if canaryDeploy.Name != "payment-service-canary" {
@@ -211,7 +211,7 @@ func TestBuildCanaryFromTemplate_StatefulSetAndDaemonSet(t *testing.T) {
 							ValueFrom: &corev1.EnvVarSource{
 								SecretKeyRef: &corev1.SecretKeySelector{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: "db-primary-rev-old",
+										Name: "db-primary-db-pass-rev-old",
 									},
 									Key: "db-pass",
 								},
@@ -225,7 +225,7 @@ func TestBuildCanaryFromTemplate_StatefulSetAndDaemonSet(t *testing.T) {
 					Name: "db-secret-vol",
 					VolumeSource: corev1.VolumeSource{
 						Secret: &corev1.SecretVolumeSource{
-							SecretName: "db-primary-rev-old",
+							SecretName: "db-primary-db-pass-rev-old",
 						},
 					},
 				},
@@ -253,7 +253,7 @@ func TestBuildCanaryFromTemplate_StatefulSetAndDaemonSet(t *testing.T) {
 		},
 	}
 
-	canaryDeploy := BuildCanaryFromTemplate("db-primary", &podTemplate, policy, "db-primary-rev-newrev999")
+	canaryDeploy := BuildCanaryFromTemplate("db-primary", &podTemplate, policy, "db-primary-db-pass-rev-newrev999")
 
 	if canaryDeploy.Name != "db-primary-canary" {
 		t.Errorf("expected canary name 'db-primary-canary', got %q", canaryDeploy.Name)
@@ -270,12 +270,12 @@ func TestBuildCanaryFromTemplate_StatefulSetAndDaemonSet(t *testing.T) {
 	if _, hasApp := canaryDeploy.Spec.Template.Labels["app"]; hasApp {
 		t.Errorf("canary pod template should not retain production 'app' label")
 	}
-	if canaryDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName != "db-primary-rev-newrev999" {
-		t.Errorf("expected volume secret 'db-primary-rev-newrev999', got %q",
+	if canaryDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName != "db-primary-db-pass-rev-newrev999" {
+		t.Errorf("expected volume secret 'db-primary-db-pass-rev-newrev999', got %q",
 			canaryDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
-	if canaryDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name != "db-primary-rev-newrev999" {
-		t.Errorf("expected env secret 'db-primary-rev-newrev999', got %q",
+	if canaryDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name != "db-primary-db-pass-rev-newrev999" {
+		t.Errorf("expected env secret 'db-primary-db-pass-rev-newrev999', got %q",
 			canaryDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
 	}
 }

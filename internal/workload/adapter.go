@@ -78,48 +78,125 @@ func MutatePodTemplateSpec(
 	policy *secretv1alpha1.DynamicSecretPolicy,
 	newSecretName string,
 ) {
-	managedPrefix := fmt.Sprintf("%s-rev-", targetName)
+	objectName := policy.Spec.VaultRef.ObjectName
+	managedPrefix := fmt.Sprintf("%s-%s-rev-", targetName, objectName)
+	legacyPrefix := fmt.Sprintf("%s-rev-", targetName)
 
 	if tpl.Annotations == nil {
 		tpl.Annotations = make(map[string]string)
 	}
 	tpl.Annotations[canary.LabelRevision] = policy.Status.DesiredRevision
 
-	// Update only volume mounts referencing operator-managed secrets
-	for i := range tpl.Spec.Volumes {
-		vol := &tpl.Spec.Volumes[i]
-		if vol.Secret != nil {
-			if strings.HasPrefix(vol.Secret.SecretName, managedPrefix) ||
-				(policy.Status.CurrentRevision == "" && !strings.HasPrefix(vol.Secret.SecretName, managedPrefix)) ||
-				vol.Secret.SecretName == fmt.Sprintf("%s-secret", targetName) {
+	// Extract explicit TargetRef if configured
+	var targetVolumeName string
+	var targetEnvName string
+	var targetContainerName string
+	if policy.Spec.TargetRef != nil {
+		targetVolumeName = policy.Spec.TargetRef.VolumeName
+		targetEnvName = policy.Spec.TargetRef.EnvName
+		targetContainerName = policy.Spec.TargetRef.ContainerName
+	}
+
+	// 1. Mutate Volumes
+	if targetVolumeName != "" {
+		// Explicit volume target: ONLY mutate the specific volume matching targetVolumeName
+		for i := range tpl.Spec.Volumes {
+			vol := &tpl.Spec.Volumes[i]
+			if vol.Name == targetVolumeName {
+				if vol.Secret == nil {
+					vol.Secret = &corev1.SecretVolumeSource{}
+				}
 				vol.Secret.SecretName = newSecretName
+			}
+		}
+	} else if targetEnvName == "" {
+		// Implicit volume matching (only when no explicit targetEnvName is specified):
+		// strictly matches volumes referencing this specific secret / policy, preserving unmanaged/TLS volumes.
+		for i := range tpl.Spec.Volumes {
+			vol := &tpl.Spec.Volumes[i]
+			if vol.Secret != nil {
+				sName := vol.Secret.SecretName
+				if strings.HasPrefix(sName, managedPrefix) ||
+					sName == objectName ||
+					sName == fmt.Sprintf("%s-%s", targetName, objectName) ||
+					sName == fmt.Sprintf("%s-%s-secret", targetName, objectName) ||
+					sName == fmt.Sprintf("%s-secret", targetName) ||
+					vol.Name == objectName ||
+					vol.Name == fmt.Sprintf("%s-volume", objectName) ||
+					(strings.HasPrefix(sName, legacyPrefix) && (policy.Spec.TargetRef == nil || policy.Spec.TargetRef.VolumeName == "")) {
+					vol.Secret.SecretName = newSecretName
+				}
 			}
 		}
 	}
 
+	// 2. Mutate Environment Variables
 	mutateContainers := func(containers []corev1.Container) {
 		for cIdx := range containers {
 			container := &containers[cIdx]
 
-			for eIdx := range container.Env {
-				envVar := &container.Env[eIdx]
-				if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
-					ref := envVar.ValueFrom.SecretKeyRef
-					if strings.HasPrefix(ref.Name, managedPrefix) ||
-						ref.Key == policy.Spec.VaultRef.ObjectName ||
-						(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
-						ref.Name = newSecretName
-					}
-				}
+			if targetContainerName != "" && container.Name != targetContainerName {
+				continue
 			}
 
-			for efIdx := range container.EnvFrom {
-				envFrom := &container.EnvFrom[efIdx]
-				if envFrom.SecretRef != nil {
-					if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
-						(policy.Status.CurrentRevision == "" && !strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix)) ||
-						(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
-						envFrom.SecretRef.Name = newSecretName
+			if targetEnvName != "" {
+				// Explicit env target: find and update or append targetEnvName
+				found := false
+				for eIdx := range container.Env {
+					envVar := &container.Env[eIdx]
+					if envVar.Name == targetEnvName {
+						found = true
+						envVar.Value = ""
+						envVar.ValueFrom = &corev1.EnvVarSource{
+							SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: newSecretName,
+								},
+								Key: objectName,
+							},
+						}
+					}
+				}
+				if !found && (targetContainerName == "" || container.Name == targetContainerName) {
+					container.Env = append(container.Env, corev1.EnvVar{
+						Name: targetEnvName,
+						ValueFrom: &corev1.EnvVarSource{
+							SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: newSecretName,
+								},
+								Key: objectName,
+							},
+						},
+					})
+				}
+			} else {
+				// Implicit env matching: only mutate envs matching this policy/secret
+				for eIdx := range container.Env {
+					envVar := &container.Env[eIdx]
+					if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+						ref := envVar.ValueFrom.SecretKeyRef
+						if strings.HasPrefix(ref.Name, managedPrefix) ||
+							ref.Key == objectName ||
+							ref.Name == objectName ||
+							ref.Name == fmt.Sprintf("%s-%s", targetName, objectName) ||
+							(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-%s-rev-%s", targetName, objectName, policy.Status.CurrentRevision)) ||
+							(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
+							ref.Name = newSecretName
+						}
+					}
+				}
+
+				for efIdx := range container.EnvFrom {
+					envFrom := &container.EnvFrom[efIdx]
+					if envFrom.SecretRef != nil {
+						if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
+							envFrom.SecretRef.Name == objectName ||
+							envFrom.SecretRef.Name == fmt.Sprintf("%s-%s", targetName, objectName) ||
+							(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-%s-rev-%s", targetName, objectName, policy.Status.CurrentRevision)) ||
+							(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
+							envFrom.SecretRef.Name = newSecretName
+						}
 					}
 				}
 			}

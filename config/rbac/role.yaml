@@ -19,7 +19,22 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - daemonsets
   - deployments
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - applications
+  - rollouts
   verbs:
   - create
   - delete

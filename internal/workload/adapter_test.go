@@ -99,8 +99,7 @@ func TestNewAdapter(t *testing.T) {
 		{kind: "StatefulSet", expectKind: KindStatefulSet, expectError: false},
 		{kind: "DaemonSet", expectKind: KindDaemonSet, expectError: false},
 		{kind: "Rollout", expectKind: KindRollout, expectError: false},
-		{kind: "Job", expectError: true},
-		{kind: "CronJob", expectError: true},
+		{kind: "CronJob", expectKind: "", expectError: true},
 	}
 
 	for _, tt := range tests {
@@ -120,9 +119,10 @@ func TestNewAdapter(t *testing.T) {
 	}
 }
 
-func TestDeploymentAdapter(t *testing.T) {
+func TestDeploymentAdapter_Lifecycle(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
+
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "web-app",
@@ -140,6 +140,9 @@ func TestDeploymentAdapter(t *testing.T) {
 	if err := adapter.Fetch(ctx, client, types.NamespacedName{Name: "web-app", Namespace: "default"}); err != nil {
 		t.Fatalf("Fetch failed: %v", err)
 	}
+	if adapter.Kind() != KindDeployment {
+		t.Errorf("expected kind Deployment, got %s", adapter.Kind())
+	}
 
 	policy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "web-policy", Namespace: "default"},
@@ -152,17 +155,17 @@ func TestDeploymentAdapter(t *testing.T) {
 	}
 
 	// BuildCanary
-	canary := adapter.BuildCanary(policy, "web-app-rev-rev123")
+	canary := adapter.BuildCanary(policy, "web-app-database-password-rev-rev123")
 	if canary.Name != "web-app-canary" {
 		t.Errorf("expected canary name 'web-app-canary', got %q", canary.Name)
 	}
-	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "web-app-rev-rev123" {
-		t.Errorf("expected canary volume secret 'web-app-rev-rev123', got %q",
+	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "web-app-database-password-rev-rev123" {
+		t.Errorf("expected canary volume secret 'web-app-database-password-rev-rev123', got %q",
 			canary.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 
 	// Promote
-	if err := adapter.Promote(ctx, client, policy, "web-app-rev-rev123"); err != nil {
+	if err := adapter.Promote(ctx, client, policy, "web-app-database-password-rev-rev123"); err != nil {
 		t.Fatalf("Promote failed: %v", err)
 	}
 
@@ -170,15 +173,16 @@ func TestDeploymentAdapter(t *testing.T) {
 	if err := client.Get(ctx, types.NamespacedName{Name: "web-app", Namespace: "default"}, updated); err != nil {
 		t.Fatalf("failed to get updated deployment: %v", err)
 	}
-	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "web-app-rev-rev123" {
-		t.Errorf("expected promoted volume secret 'web-app-rev-rev123', got %q",
+	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "web-app-database-password-rev-rev123" {
+		t.Errorf("expected promoted volume secret 'web-app-database-password-rev-rev123', got %q",
 			updated.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 }
 
-func TestStatefulSetAdapter(t *testing.T) {
+func TestStatefulSetAdapter_Lifecycle(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "db-cluster",
@@ -210,18 +214,18 @@ func TestStatefulSetAdapter(t *testing.T) {
 		},
 	}
 
-	// BuildCanary produces an isolated 1-replica Deployment derived from StatefulSet template
-	canary := adapter.BuildCanary(policy, "db-cluster-rev-rev999")
+	// BuildCanary produces an ephemeral 1-replica Deployment without PVCs
+	canary := adapter.BuildCanary(policy, "db-cluster-database-password-rev-rev999")
 	if canary.Name != "db-cluster-canary" {
 		t.Errorf("expected canary name 'db-cluster-canary', got %q", canary.Name)
 	}
-	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "db-cluster-rev-rev999" {
-		t.Errorf("expected canary volume secret 'db-cluster-rev-rev999', got %q",
+	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "db-cluster-database-password-rev-rev999" {
+		t.Errorf("expected canary volume secret 'db-cluster-database-password-rev-rev999', got %q",
 			canary.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 
 	// Promote
-	if err := adapter.Promote(ctx, client, policy, "db-cluster-rev-rev999"); err != nil {
+	if err := adapter.Promote(ctx, client, policy, "db-cluster-database-password-rev-rev999"); err != nil {
 		t.Fatalf("Promote failed: %v", err)
 	}
 
@@ -229,15 +233,16 @@ func TestStatefulSetAdapter(t *testing.T) {
 	if err := client.Get(ctx, types.NamespacedName{Name: "db-cluster", Namespace: "default"}, updated); err != nil {
 		t.Fatalf("failed to get updated statefulset: %v", err)
 	}
-	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "db-cluster-rev-rev999" {
-		t.Errorf("expected promoted volume secret 'db-cluster-rev-rev999', got %q",
+	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "db-cluster-database-password-rev-rev999" {
+		t.Errorf("expected promoted volume secret 'db-cluster-database-password-rev-rev999', got %q",
 			updated.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 }
 
-func TestDaemonSetAdapter(t *testing.T) {
+func TestDaemonSetAdapter_Lifecycle(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
+
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "node-agent",
@@ -269,18 +274,18 @@ func TestDaemonSetAdapter(t *testing.T) {
 		},
 	}
 
-	// BuildCanary produces an isolated 1-replica Deployment derived from DaemonSet template
-	canary := adapter.BuildCanary(policy, "node-agent-rev-rev555")
+	// BuildCanary produces an isolated 1-replica Deployment
+	canary := adapter.BuildCanary(policy, "node-agent-database-password-rev-rev555")
 	if canary.Name != "node-agent-canary" {
 		t.Errorf("expected canary name 'node-agent-canary', got %q", canary.Name)
 	}
-	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "node-agent-rev-rev555" {
-		t.Errorf("expected canary volume secret 'node-agent-rev-rev555', got %q",
+	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "node-agent-database-password-rev-rev555" {
+		t.Errorf("expected canary volume secret 'node-agent-database-password-rev-rev555', got %q",
 			canary.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 
 	// Promote
-	if err := adapter.Promote(ctx, client, policy, "node-agent-rev-rev555"); err != nil {
+	if err := adapter.Promote(ctx, client, policy, "node-agent-database-password-rev-rev555"); err != nil {
 		t.Fatalf("Promote failed: %v", err)
 	}
 
@@ -288,15 +293,16 @@ func TestDaemonSetAdapter(t *testing.T) {
 	if err := client.Get(ctx, types.NamespacedName{Name: "node-agent", Namespace: "default"}, updated); err != nil {
 		t.Fatalf("failed to get updated daemonset: %v", err)
 	}
-	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "node-agent-rev-rev555" {
-		t.Errorf("expected promoted volume secret 'node-agent-rev-rev555', got %q",
+	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "node-agent-database-password-rev-rev555" {
+		t.Errorf("expected promoted volume secret 'node-agent-database-password-rev-rev555', got %q",
 			updated.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 }
 
-func TestRolloutAdapter(t *testing.T) {
+func TestRolloutAdapter_Lifecycle(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
+
 	rollout := &argorolloutsv1alpha1.Rollout{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "canary-service",
@@ -329,17 +335,17 @@ func TestRolloutAdapter(t *testing.T) {
 	}
 
 	// BuildCanary produces an isolated 1-replica Deployment derived from Rollout template
-	canary := adapter.BuildCanary(policy, "canary-service-rev-rev777")
+	canary := adapter.BuildCanary(policy, "canary-service-database-password-rev-rev777")
 	if canary.Name != "canary-service-canary" {
 		t.Errorf("expected canary name 'canary-service-canary', got %q", canary.Name)
 	}
-	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "canary-service-rev-rev777" {
-		t.Errorf("expected canary volume secret 'canary-service-rev-rev777', got %q",
+	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "canary-service-database-password-rev-rev777" {
+		t.Errorf("expected canary volume secret 'canary-service-database-password-rev-rev777', got %q",
 			canary.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 
 	// Promote
-	if err := adapter.Promote(ctx, client, policy, "canary-service-rev-rev777"); err != nil {
+	if err := adapter.Promote(ctx, client, policy, "canary-service-database-password-rev-rev777"); err != nil {
 		t.Fatalf("Promote failed: %v", err)
 	}
 
@@ -347,8 +353,122 @@ func TestRolloutAdapter(t *testing.T) {
 	if err := client.Get(ctx, types.NamespacedName{Name: "canary-service", Namespace: "default"}, updated); err != nil {
 		t.Fatalf("failed to get updated rollout: %v", err)
 	}
-	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "canary-service-rev-rev777" {
-		t.Errorf("expected promoted volume secret 'canary-service-rev-rev777', got %q",
+	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "canary-service-database-password-rev-rev777" {
+		t.Errorf("expected promoted volume secret 'canary-service-database-password-rev-rev777', got %q",
 			updated.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+	}
+}
+
+func TestMutatePodTemplateSpec_MultiSecretAndExplicitTargetRef(t *testing.T) {
+	// Pod with 3 secrets: DB password, Redis token, and unmanaged TLS certificate
+	tpl := &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "app",
+					Env: []corev1.EnvVar{
+						{Name: "EXISTING_VAR", Value: "plain"},
+						{Name: "REDIS_TOKEN", Value: "initial-token"},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: "tls-volume",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: "my-tls-cert-secret",
+						},
+					},
+				},
+				{
+					Name: "db-volume",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: "initial-db-secret",
+						},
+					},
+				},
+				{
+					Name: "redis-volume",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: "initial-redis-secret",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// 1. Policy for Database Password with explicit VolumeName: "db-volume"
+	dbPolicy := &secretv1alpha1.DynamicSecretPolicy{
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				ObjectName: "database-password",
+			},
+			TargetRef: &secretv1alpha1.TargetRef{
+				VolumeName: "db-volume",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "dbrev1",
+		},
+	}
+
+	MutatePodTemplateSpec(tpl, "order-service", dbPolicy, "order-service-database-password-rev-dbrev1")
+
+	// Verify db-volume was mutated
+	if tpl.Spec.Volumes[1].Secret.SecretName != "order-service-database-password-rev-dbrev1" {
+		t.Errorf("expected db-volume mutated to 'order-service-database-password-rev-dbrev1', got %q",
+			tpl.Spec.Volumes[1].Secret.SecretName)
+	}
+	// Verify TLS and Redis volumes were completely untouched!
+	if tpl.Spec.Volumes[0].Secret.SecretName != "my-tls-cert-secret" {
+		t.Errorf("expected tls-volume untouched, got %q", tpl.Spec.Volumes[0].Secret.SecretName)
+	}
+	if tpl.Spec.Volumes[2].Secret.SecretName != "initial-redis-secret" {
+		t.Errorf("expected redis-volume untouched, got %q", tpl.Spec.Volumes[2].Secret.SecretName)
+	}
+
+	// 2. Policy for Redis Token with explicit EnvName: "REDIS_TOKEN"
+	redisPolicy := &secretv1alpha1.DynamicSecretPolicy{
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				ObjectName: "redis-token",
+			},
+			TargetRef: &secretv1alpha1.TargetRef{
+				EnvName: "REDIS_TOKEN",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "redisrev2",
+		},
+	}
+
+	MutatePodTemplateSpec(tpl, "order-service", redisPolicy, "order-service-redis-token-rev-redisrev2")
+
+	// Verify REDIS_TOKEN was updated to SecretKeyRef
+	appContainer := tpl.Spec.Containers[0]
+	var redisEnv *corev1.EnvVar
+	for i := range appContainer.Env {
+		if appContainer.Env[i].Name == "REDIS_TOKEN" {
+			redisEnv = &appContainer.Env[i]
+		}
+	}
+	if redisEnv == nil || redisEnv.ValueFrom == nil || redisEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("expected REDIS_TOKEN to have SecretKeyRef, got %v", redisEnv)
+	}
+	if redisEnv.ValueFrom.SecretKeyRef.Name != "order-service-redis-token-rev-redisrev2" {
+		t.Errorf("expected REDIS_TOKEN secret name 'order-service-redis-token-rev-redisrev2', got %q",
+			redisEnv.ValueFrom.SecretKeyRef.Name)
+	}
+	if redisEnv.ValueFrom.SecretKeyRef.Key != "redis-token" {
+		t.Errorf("expected secret key 'redis-token', got %q", redisEnv.ValueFrom.SecretKeyRef.Key)
+	}
+
+	// Verify EXISTING_VAR untouched
+	if appContainer.Env[0].Value != "plain" {
+		t.Errorf("expected EXISTING_VAR untouched, got %q", appContainer.Env[0].Value)
 	}
 }

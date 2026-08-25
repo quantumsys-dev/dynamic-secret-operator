@@ -230,7 +230,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 
-		secretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+		secretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.VaultRef.ObjectName, policy.Status.DesiredRevision)
 
 		// 1. Provision Canary Deployment derived polymorphically from target workload
 		canaryDeploy := adapter.BuildCanary(policy, secretName)
@@ -385,7 +385,7 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 	}
 
 	targetName := policy.Spec.WorkloadSelector.Name
-	secretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+	secretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.VaultRef.ObjectName, policy.Status.DesiredRevision)
 
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, secret); err != nil {
@@ -460,7 +460,7 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 		logger.Error(err, "failed to reconcile Argo CD ignoreDifferences; continuing with workload promotion", "targetWorkload", targetName)
 	}
 
-	newSecretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
+	newSecretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.VaultRef.ObjectName, policy.Status.DesiredRevision)
 	if err := adapter.Promote(ctx, r.Client, policy, newSecretName); err != nil {
 		return fmt.Errorf("failed to promote target %s %q: %w", targetKind, targetName, err)
 	}
@@ -505,7 +505,7 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 		hasher.Write([]byte(payload.Version))
 	}
 	revisionHash := fmt.Sprintf("%x", hasher.Sum(nil))[:12]
-	secretName := fmt.Sprintf("%s-rev-%s", policy.Spec.WorkloadSelector.Name, revisionHash)
+	secretName := fmt.Sprintf("%s-%s-rev-%s", policy.Spec.WorkloadSelector.Name, policy.Spec.VaultRef.ObjectName, revisionHash)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
