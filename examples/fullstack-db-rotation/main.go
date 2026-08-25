@@ -27,9 +27,10 @@ type StatusResponse struct {
 }
 
 var (
-	db     *sql.DB
-	dbMu   sync.RWMutex
-	lastPw string
+	db      *sql.DB
+	dbMu    sync.RWMutex
+	lastPw  string
+	lastErr error
 )
 
 func getEnv(key, fallback string) string {
@@ -39,7 +40,7 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-func readPassword() (string, error) {
+func readPasswordFromDisk() (string, error) {
 	pwFile := getEnv("DB_PASSWORD_FILE", "/mnt/secrets/db-password/db-password")
 	data, err := os.ReadFile(pwFile)
 	if err != nil {
@@ -51,44 +52,82 @@ func readPassword() (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-func getDB() (*sql.DB, string, error) {
-	pw, err := readPassword()
+func updateDBConnection(pw string) error {
+	host := getEnv("DB_HOST", "postgres")
+	port := getEnv("DB_PORT", "5432")
+	user := getEnv("DB_USER", "postgres")
+	dbname := getEnv("DB_NAME", "appdb")
+	sslmode := getEnv("DB_SSLMODE", "disable")
+
+	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s connect_timeout=3",
+		host, port, user, pw, dbname, sslmode)
+
+	newDB, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, "", err
+		return fmt.Errorf("sql.Open failed: %w", err)
 	}
+	newDB.SetMaxOpenConns(5)
+	newDB.SetMaxIdleConns(2)
+	newDB.SetConnMaxLifetime(1 * time.Minute)
 
 	dbMu.Lock()
 	defer dbMu.Unlock()
 
-	// If password changed or db is nil, reconnect
-	if db == nil || pw != lastPw {
-		if db != nil {
-			_ = db.Close()
+	if db != nil {
+		_ = db.Close()
+	}
+	db = newDB
+	lastPw = pw
+	lastErr = nil
+	log.Printf("Updated in-memory database connection pool (target: %s:%s/%s, user: %s)", host, port, dbname, user)
+	return nil
+}
+
+// startSecretWatcher periodically checks the mounted secret file in the background (asynchronously),
+// eliminating per-request disk I/O bottlenecks while reacting to rotations.
+func startSecretWatcher(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			pw, err := readPasswordFromDisk()
+			if err != nil {
+				dbMu.Lock()
+				lastErr = err
+				dbMu.Unlock()
+				continue
+			}
+
+			dbMu.RLock()
+			currentPw := lastPw
+			dbMu.RUnlock()
+
+			if pw != currentPw {
+				log.Printf("Detected secret rotation in mounted volume; reloading database connection pool")
+				if err := updateDBConnection(pw); err != nil {
+					log.Printf("Failed to update connection pool on rotation: %v", err)
+					dbMu.Lock()
+					lastErr = err
+					dbMu.Unlock()
+				}
+			}
 		}
+	}()
+}
 
-		host := getEnv("DB_HOST", "postgres")
-		port := getEnv("DB_PORT", "5432")
-		user := getEnv("DB_USER", "postgres")
-		dbname := getEnv("DB_NAME", "appdb")
-		sslmode := getEnv("DB_SSLMODE", "disable")
+func getDB() (*sql.DB, string, error) {
+	dbMu.RLock()
+	defer dbMu.RUnlock()
 
-		dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s connect_timeout=3",
-			host, port, user, pw, dbname, sslmode)
-
-		newDB, err := sql.Open("postgres", dsn)
-		if err != nil {
-			return nil, pw, fmt.Errorf("sql.Open failed: %w", err)
+	if db == nil {
+		if lastErr != nil {
+			return nil, "", lastErr
 		}
-		newDB.SetMaxOpenConns(5)
-		newDB.SetMaxIdleConns(2)
-		newDB.SetConnMaxLifetime(1 * time.Minute)
-
-		db = newDB
-		lastPw = pw
-		log.Printf("Initialized new database connection pool (target: %s:%s/%s, user: %s)", host, port, dbname, user)
+		return nil, "", fmt.Errorf("database connection pool not initialized")
 	}
 
-	return db, pw, nil
+	return db, lastPw, nil
 }
 
 func maskPassword(pw string) string {
@@ -479,6 +518,19 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	port := getEnv("PORT", "8080")
+
+	// Load initial secret into memory at startup
+	if initialPw, err := readPasswordFromDisk(); err == nil {
+		if err := updateDBConnection(initialPw); err != nil {
+			log.Printf("Warning: initial DB connection setup failed: %v", err)
+		}
+	} else {
+		log.Printf("Warning: initial password read failed: %v", err)
+	}
+
+	// Start asynchronous background secret watcher (polling every 1 second)
+	startSecretWatcher(1 * time.Second)
+
 	http.HandleFunc("/api/status", statusHandler)
 	http.HandleFunc("/", rootHandler)
 
