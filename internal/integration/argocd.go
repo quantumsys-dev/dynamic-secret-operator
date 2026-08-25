@@ -24,6 +24,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -53,7 +54,7 @@ func IsAutoPatchEnabled() bool {
 
 // ReconcileArgoCDIgnoreDifferences discovers the parent Argo CD Application for the given
 // workload and ensures that DSO mutations (revision annotation and volume secret changes)
-// are listed in spec.ignoreDifferences.
+// are listed in spec.ignoreDifferences, retrying with exponential backoff on 409 conflict storms.
 func ReconcileArgoCDIgnoreDifferences(
 	ctx context.Context,
 	c client.Client,
@@ -82,27 +83,31 @@ func ReconcileArgoCDIgnoreDifferences(
 		targetGroup = "argoproj.io"
 	}
 
-	app, err := fetchArgoCDApplication(ctx, c, appName, targetObj.GetNamespace())
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latestApp, fetchErr := fetchArgoCDApplication(ctx, c, appName, targetObj.GetNamespace())
+		if fetchErr != nil {
+			return fetchErr
+		}
+		if !ensureIgnoreDifferences(latestApp, targetGroup, kind) {
+			return nil // already has required ignoreDifferences
+		}
+		return c.Update(ctx, latestApp)
+	})
+
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			logger.V(1).Info("parent Argo CD Application not found in cluster; skipping auto-patch", "application", appName)
 			return nil
 		}
-		return fmt.Errorf("failed to fetch Argo CD Application %q: %w", appName, err)
+		logger.Error(err, "failed to update Argo CD Application ignoreDifferences", "application", appName)
+		return fmt.Errorf("failed to update Argo CD Application %q: %w", appName, err)
 	}
 
-	if ensureIgnoreDifferences(app, targetGroup, kind) {
-		// Use standard Update since we are doing a safe read-modify-write pattern
-		if err := c.Update(ctx, app); err != nil {
-			logger.Error(err, "failed to update Argo CD Application ignoreDifferences", "application", app.Name)
-			return fmt.Errorf("failed to update Argo CD Application %q: %w", app.Name, err)
-		}
-		logger.Info("successfully updated Argo CD Application ignoreDifferences for DSO",
-			"application", app.Name,
-			"group", targetGroup,
-			"kind", kind,
-		)
-	}
+	logger.Info("successfully updated Argo CD Application ignoreDifferences for DSO",
+		"application", appName,
+		"group", targetGroup,
+		"kind", kind,
+	)
 
 	return nil
 }
