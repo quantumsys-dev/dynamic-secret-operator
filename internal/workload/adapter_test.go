@@ -472,3 +472,88 @@ func TestMutatePodTemplateSpec_MultiSecretAndExplicitTargetRef(t *testing.T) {
 		t.Errorf("expected EXISTING_VAR untouched, got %q", appContainer.Env[0].Value)
 	}
 }
+
+func TestMutatePodTemplateSpec_ImplicitEnv_PreservesUnrelatedSecretsWithSameKey(t *testing.T) {
+	tpl := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{"app": "order-service"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "nginx:alpine",
+					Env: []corev1.EnvVar{
+						{
+							// Target secret managed by operator
+							Name: "DB_PASSWORD",
+							ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "order-service-password",
+									},
+									Key: "password",
+								},
+							},
+						},
+						{
+							// Unrelated third-party secret that also happens to have Key: "password"
+							Name: "REDIS_PASSWORD",
+							ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "third-party-redis-credentials",
+									},
+									Key: "password",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				ObjectName: "password",
+			},
+			// No explicit TargetRef -> uses implicit matching
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "rev99",
+		},
+	}
+
+	MutatePodTemplateSpec(tpl, "order-service", policy, "order-service-password-rev-rev99")
+
+	appContainer := tpl.Spec.Containers[0]
+	var dbEnv, redisEnv *corev1.EnvVar
+	for i := range appContainer.Env {
+		if appContainer.Env[i].Name == "DB_PASSWORD" {
+			dbEnv = &appContainer.Env[i]
+		}
+		if appContainer.Env[i].Name == "REDIS_PASSWORD" {
+			redisEnv = &appContainer.Env[i]
+		}
+	}
+
+	if dbEnv == nil || dbEnv.ValueFrom == nil || dbEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("expected DB_PASSWORD to have SecretKeyRef, got %v", dbEnv)
+	}
+	if dbEnv.ValueFrom.SecretKeyRef.Name != "order-service-password-rev-rev99" {
+		t.Errorf("expected DB_PASSWORD secret name 'order-service-password-rev-rev99', got %q",
+			dbEnv.ValueFrom.SecretKeyRef.Name)
+	}
+
+	if redisEnv == nil || redisEnv.ValueFrom == nil || redisEnv.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("expected REDIS_PASSWORD to have SecretKeyRef, got %v", redisEnv)
+	}
+	// Crucial check: REDIS_PASSWORD must remain pointed at third-party-redis-credentials, NOT overwritten!
+	if redisEnv.ValueFrom.SecretKeyRef.Name != "third-party-redis-credentials" {
+		t.Errorf("CRITICAL: Unrelated third-party secret was overwritten! Expected 'third-party-redis-credentials', got %q",
+			redisEnv.ValueFrom.SecretKeyRef.Name)
+	}
+}
+
