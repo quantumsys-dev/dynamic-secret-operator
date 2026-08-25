@@ -72,7 +72,7 @@ func BuildCanaryDeployment(targetDeploy *appsv1.Deployment, policy *secretv1alph
 		vol := &canaryDeploy.Spec.Template.Spec.Volumes[i]
 		if vol.Secret != nil {
 			if strings.HasPrefix(vol.Secret.SecretName, managedPrefix) ||
-				(policy.Status.CurrentRevision == "" && vol.Name == policy.Spec.VaultRef.ObjectName) {
+				(policy.Status.CurrentRevision == "" && !strings.HasPrefix(vol.Secret.SecretName, managedPrefix)) {
 				vol.Secret.SecretName = newSecretName
 			}
 		}

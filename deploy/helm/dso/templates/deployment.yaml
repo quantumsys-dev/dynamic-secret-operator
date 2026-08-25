@@ -54,6 +54,14 @@ spec:
             - name: AZURE_TENANT_ID
               value: {{ .Values.azure.workloadIdentity.tenantId | quote }}
             {{- end }}
+            {{- if .Values.azure.serviceBus.namespace }}
+            - name: SERVICEBUS_NAMESPACE
+              value: {{ .Values.azure.serviceBus.namespace | quote }}
+            {{- end }}
+            {{- if .Values.azure.serviceBus.queueName }}
+            - name: SERVICEBUS_QUEUE_NAME
+              value: {{ .Values.azure.serviceBus.queueName | quote }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
