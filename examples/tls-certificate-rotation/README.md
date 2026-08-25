@@ -1,13 +1,14 @@
-# Enterprise Example: Automated TLS Certificate Rotation & Ingress / Sidecar Binding
+# Enterprise Example: Automated TLS Certificate Rotation for Kubernetes Ingress & Gateways
 
-This enterprise example demonstrates end-to-end automated **TLS Certificate Rotation** using the **Dynamic Secret Operator (DSO)**.
+This enterprise example demonstrates end-to-end automated **TLS Certificate Rotation** using the **Dynamic Secret Operator (DSO)** with **Native Kubernetes TLS Secret (`kubernetes.io/tls`) Mapping**.
 
-When SSL/TLS certificates rotate in **Azure Key Vault** (either as PKCS#12 or PEM certificates/keys), DSO:
-1. **Pulls & Materializes:** Extracts the new certificate chain and private key, generating an immutable, versioned Kubernetes Secret (`tls-ingress-cert-rev-<hash>`).
-2. **Provisions Canary:** Deploys an isolated 1-replica canary workload running an Nginx TLS server with strict `NetworkPolicy` ingress.
-3. **Executes TLS Probes:** Validates the TLS handshake, verifies certificate validity period (ensuring not expired and currently valid), and matches certificate thumbprint against the materialized secret data.
-4. **Zero-Downtime Rollout:** Promotes the production Nginx/Ingress workload with the new secret revision without certificate mismatches or invalid handshake errors.
-5. **GitOps Harmony:** Integrates with Argo CD diff ignoring to prevent drift conflicts.
+When SSL/TLS certificates rotate in **Azure Key Vault** (as PKCS#12 or PEM certificates/keys), DSO:
+1. **Pulls & Auto-Parses:** Extracts the PEM certificate chain and private key, automatically partitioning them into `tls.crt` and `tls.key`.
+2. **Materializes `kubernetes.io/tls` Secret:** Creates an immutable, versioned Secret (`tls-gateway-ingress-tls-cert-rev-<hash>`) with `Type: kubernetes.io/tls`. This makes the secret natively compatible with Kubernetes Ingress controllers (Nginx Ingress, Traefik, Contour) and Gateway API without manual scripting.
+3. **Provisions Isolated Canary:** Deploys an isolated 1-replica canary workload running an Nginx TLS server with strict `NetworkPolicy` ingress.
+4. **Executes Synthetic TLS Probes:** Connects via TLS to validate handshakes, verify validity periods (not expired and valid), and verify leaf certificate thumbprints against the materialized secret.
+5. **Zero-Downtime Promotion:** Safely updates production Ingress / Gateway workloads with the validated certificate revision.
+6. **GitOps Harmony:** Automatically coordinates with Argo CD to prevent self-heal drift loops.
 
 ---
 
@@ -21,15 +22,15 @@ flowchart LR
 
     subgraph K8s ["☸️ Kubernetes Cluster"]
         DSO["⚙️ Dynamic Secret Operator"]
-        SEC["🔒 Secret: tls-ingress-cert-rev-a1b2c3<br/>tls.crt | tls.key"]
+        SEC["🔒 Secret: tls-gateway-ingress-tls-cert-rev-a1b2c3<br/>Type: kubernetes.io/tls<br/>├── tls.crt<br/>└── tls.key"]
         CANARY["🐤 Canary Pod<br/>(Port 8443 SSL)"]
         PROBE["🩺 TLS Validation Probe<br/>(Handshake & Thumbprint)"]
-        PROD["🚀 Production Ingress / Workload<br/>(Zero-Downtime Rollover)"]
+        PROD["🚀 Production Ingress / Gateway<br/>(Zero-Downtime Cutover)"]
     end
 
     AKV -->|"Event Notification"| DSO
-    DSO -->|"Materialize"| SEC
-    DSO -->|"Deploy"| CANARY
+    DSO -->|"Auto-Parse PEM"| SEC
+    DSO -->|"Deploy Canary"| CANARY
     CANARY -->|"Mounts"| SEC
     DSO -->|"Execute Probe"| PROBE
     PROBE -->|"Verify SSL"| CANARY
@@ -57,7 +58,7 @@ chmod +x setup-kind.sh
 ```
 
 ### Step 2: Inspect the DynamicSecretPolicy Manifest
-The policy defines a `type: TLS` validation probe targeting the canary port `8443`:
+The policy defines `objectType: Certificate` and a `type: TLS` validation probe targeting the canary port `8443`:
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
