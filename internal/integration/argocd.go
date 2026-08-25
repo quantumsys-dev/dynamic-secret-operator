@@ -92,13 +92,12 @@ func ReconcileArgoCDIgnoreDifferences(
 	}
 
 	if ensureIgnoreDifferences(app, targetGroup, kind) {
-		originalApp := app.DeepCopy()
-		originalApp.Spec.IgnoreDifferences = nil // force patch calculation
-		if err := c.Patch(ctx, app, client.MergeFrom(originalApp)); err != nil {
-			logger.Error(err, "failed to patch Argo CD Application ignoreDifferences", "application", app.Name)
-			return fmt.Errorf("failed to patch Argo CD Application %q: %w", app.Name, err)
+		// Use standard Update since we are doing a safe read-modify-write pattern
+		if err := c.Update(ctx, app); err != nil {
+			logger.Error(err, "failed to update Argo CD Application ignoreDifferences", "application", app.Name)
+			return fmt.Errorf("failed to update Argo CD Application %q: %w", app.Name, err)
 		}
-		logger.Info("successfully patched Argo CD Application ignoreDifferences for DSO",
+		logger.Info("successfully updated Argo CD Application ignoreDifferences for DSO",
 			"application", app.Name,
 			"group", targetGroup,
 			"kind", kind,
