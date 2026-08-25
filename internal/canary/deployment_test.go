@@ -191,3 +191,91 @@ func TestBuildCanaryDeployment(t *testing.T) {
 		t.Errorf("expected unmanaged TLS volume secret to remain 'tls-secret', got %q", vols[1].Secret.SecretName)
 	}
 }
+
+func TestBuildCanaryFromTemplate_StatefulSetAndDaemonSet(t *testing.T) {
+	podTemplate := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"app":  "db-primary",
+				"role": "master",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "database",
+					Image: "postgres:16",
+					Env: []corev1.EnvVar{
+						{
+							Name: "POSTGRES_PASSWORD",
+							ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "db-primary-rev-old",
+									},
+									Key: "db-pass",
+								},
+							},
+						},
+					},
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: "db-secret-vol",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: "db-primary-rev-old",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "db-policy",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				ObjectName: "db-pass",
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "StatefulSet",
+				Name: "db-primary",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "newrev999",
+			CurrentRevision: "old",
+		},
+	}
+
+	canaryDeploy := BuildCanaryFromTemplate("db-primary", &podTemplate, policy, "db-primary-rev-newrev999")
+
+	if canaryDeploy.Name != "db-primary-canary" {
+		t.Errorf("expected canary name 'db-primary-canary', got %q", canaryDeploy.Name)
+	}
+	if canaryDeploy.Namespace != "production" {
+		t.Errorf("expected canary namespace 'production', got %q", canaryDeploy.Namespace)
+	}
+	if *canaryDeploy.Spec.Replicas != 1 {
+		t.Errorf("expected canary replicas to be 1, got %d", *canaryDeploy.Spec.Replicas)
+	}
+	if canaryDeploy.Labels[LabelCanary] != "true" || canaryDeploy.Labels[LabelTargetWorkload] != "db-primary" {
+		t.Errorf("expected canary labels on deployment, got %v", canaryDeploy.Labels)
+	}
+	if _, hasApp := canaryDeploy.Spec.Template.Labels["app"]; hasApp {
+		t.Errorf("canary pod template should not retain production 'app' label")
+	}
+	if canaryDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName != "db-primary-rev-newrev999" {
+		t.Errorf("expected volume secret 'db-primary-rev-newrev999', got %q",
+			canaryDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+	}
+	if canaryDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name != "db-primary-rev-newrev999" {
+		t.Errorf("expected env secret 'db-primary-rev-newrev999', got %q",
+			canaryDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
+	}
+}

@@ -22,6 +22,8 @@ rules:
       - apps
     resources:
       - deployments
+      - statefulsets
+      - daemonsets
     verbs:
       - create
       - delete
