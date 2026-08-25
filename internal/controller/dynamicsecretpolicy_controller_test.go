@@ -451,7 +451,7 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "order-service", Namespace: "default"}, patchedDeploy); err != nil {
 		t.Fatalf("failed to get patched target deployment: %v", err)
 	}
-	expectedSecretName := fmt.Sprintf("order-service-rev-%s", desiredRevision)
+	expectedSecretName := fmt.Sprintf("order-service-db-pass-rev-%s", desiredRevision)
 	if patchedDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName != expectedSecretName {
 		t.Errorf("expected volume secretName %q, got %q", expectedSecretName, patchedDeploy.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
@@ -861,6 +861,10 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 				Namespace: "default",
 			},
 			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				VaultRef: secretv1alpha1.VaultReference{
+					ObjectName: "db-password",
+					ObjectType: secretv1alpha1.VaultObjectTypeSecret,
+				},
 				WorkloadSelector: secretv1alpha1.WorkloadSelector{
 					Name: "auth-service",
 				},
@@ -877,7 +881,7 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 		}
 		secretObj := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "auth-service-rev-rev-abc-456",
+				Name:      "auth-service-db-password-rev-rev-abc-456",
 				Namespace: "default",
 			},
 			Data: map[string][]byte{
@@ -1342,7 +1346,7 @@ func TestDynamicSecretPolicyReconciler_PreservesUnrelatedSecretsDuringPromotion(
 		t.Fatalf("failed to get updated deployment: %v", err)
 	}
 
-	expectedManagedSecret := "order-service-rev-newrev9988"
+	expectedManagedSecret := "order-service-db-pass-rev-newrev9988"
 
 	// 1. Assert managed env var was updated
 	c := updatedDeploy.Spec.Template.Spec.Containers[0]
@@ -1560,7 +1564,7 @@ func TestDynamicSecretPolicyReconciler_MultipleSequentialRotations(t *testing.T)
 	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "user-service", Namespace: "default"}, finalDeploy); err != nil {
 		t.Fatalf("failed to get target deployment: %v", err)
 	}
-	expectedV2Secret := fmt.Sprintf("user-service-rev-%s", secondRevision)
+	expectedV2Secret := fmt.Sprintf("user-service-db-pass-rev-%s", secondRevision)
 	if finalDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name != expectedV2Secret {
 		t.Errorf("expected target deployment to reference v2 secret %q, got %q", expectedV2Secret, finalDeploy.Spec.Template.Spec.Containers[0].Env[0].ValueFrom.SecretKeyRef.Name)
 	}

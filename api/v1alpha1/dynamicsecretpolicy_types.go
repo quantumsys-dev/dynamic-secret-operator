@@ -110,6 +110,24 @@ type RollbackConfig struct {
 	CircuitBreakerThreshold int32 `json:"circuitBreakerThreshold,omitempty"`
 }
 
+// TargetRef specifies explicit binding targets inside the workload pod template to avoid ambiguous mutations.
+type TargetRef struct {
+	// VolumeName explicitly matches the Pod volume name (spec.template.spec.volumes[].name)
+	// to replace its secretName with the materialized revision secret.
+	// +kubebuilder:validation:Optional
+	VolumeName string `json:"volumeName,omitempty"`
+
+	// EnvName explicitly matches the container environment variable name (spec.template.spec.containers[].env[].name)
+	// to bind valueFrom.secretKeyRef.name to the materialized revision secret.
+	// +kubebuilder:validation:Optional
+	EnvName string `json:"envName,omitempty"`
+
+	// ContainerName specifies the target container name when envName is used.
+	// If empty, matches across all containers and initContainers.
+	// +kubebuilder:validation:Optional
+	ContainerName string `json:"containerName,omitempty"`
+}
+
 // DynamicSecretPolicySpec defines the desired state of DynamicSecretPolicy.
 type DynamicSecretPolicySpec struct {
 	// VaultRef references the external secret store and secret identity.
@@ -131,6 +149,10 @@ type DynamicSecretPolicySpec struct {
 	// RollbackConfig sets failure thresholds and rollback automation behavior.
 	// +kubebuilder:validation:Optional
 	RollbackConfig *RollbackConfig `json:"rollbackConfig,omitempty"`
+
+	// TargetRef explicitly binds the secret to a specific volume name or environment variable.
+	// +kubebuilder:validation:Optional
+	TargetRef *TargetRef `json:"targetRef,omitempty"`
 }
 
 // DynamicSecretPolicyStatus defines the observed state of DynamicSecretPolicy.

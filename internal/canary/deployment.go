@@ -40,8 +40,9 @@ func BuildCanaryFromTemplate(
 	newSecretName string,
 ) *appsv1.Deployment {
 	canaryName := fmt.Sprintf("%s-canary", targetName)
-	managedPrefix := fmt.Sprintf("%s-rev-", targetName)
-
+	objectName := policy.Spec.VaultRef.ObjectName
+	managedPrefix := fmt.Sprintf("%s-%s-rev-", targetName, objectName)
+	legacyPrefix := fmt.Sprintf("%s-rev-", targetName)
 	canaryTemplate := podTemplate.DeepCopy()
 
 	// 1. Force single canary replica for ephemeral testing
@@ -64,14 +65,41 @@ func BuildCanaryFromTemplate(
 	}
 	canaryTemplate.Annotations[LabelRevision] = policy.Status.DesiredRevision
 
+	var targetVolumeName string
+	var targetEnvName string
+	var targetContainerName string
+	if policy.Spec.TargetRef != nil {
+		targetVolumeName = policy.Spec.TargetRef.VolumeName
+		targetEnvName = policy.Spec.TargetRef.EnvName
+		targetContainerName = policy.Spec.TargetRef.ContainerName
+	}
+
 	// 3. Update volume mounts referencing operator-managed secrets
-	for i := range canaryTemplate.Spec.Volumes {
-		vol := &canaryTemplate.Spec.Volumes[i]
-		if vol.Secret != nil {
-			if strings.HasPrefix(vol.Secret.SecretName, managedPrefix) ||
-				(policy.Status.CurrentRevision == "" && !strings.HasPrefix(vol.Secret.SecretName, managedPrefix)) ||
-				vol.Secret.SecretName == fmt.Sprintf("%s-secret", targetName) {
+	if targetVolumeName != "" {
+		for i := range canaryTemplate.Spec.Volumes {
+			vol := &canaryTemplate.Spec.Volumes[i]
+			if vol.Name == targetVolumeName {
+				if vol.Secret == nil {
+					vol.Secret = &corev1.SecretVolumeSource{}
+				}
 				vol.Secret.SecretName = newSecretName
+			}
+		}
+	} else if targetEnvName == "" {
+		for i := range canaryTemplate.Spec.Volumes {
+			vol := &canaryTemplate.Spec.Volumes[i]
+			if vol.Secret != nil {
+				sName := vol.Secret.SecretName
+				if strings.HasPrefix(sName, managedPrefix) ||
+					sName == objectName ||
+					sName == fmt.Sprintf("%s-%s", targetName, objectName) ||
+					sName == fmt.Sprintf("%s-%s-secret", targetName, objectName) ||
+					sName == fmt.Sprintf("%s-secret", targetName) ||
+					vol.Name == objectName ||
+					vol.Name == fmt.Sprintf("%s-volume", objectName) ||
+					(strings.HasPrefix(sName, legacyPrefix) && (policy.Spec.TargetRef == nil || policy.Spec.TargetRef.VolumeName == "")) {
+					vol.Secret.SecretName = newSecretName
+				}
 			}
 		}
 	}
@@ -81,25 +109,66 @@ func BuildCanaryFromTemplate(
 		for cIdx := range containers {
 			container := &containers[cIdx]
 
-			for eIdx := range container.Env {
-				envVar := &container.Env[eIdx]
-				if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
-					ref := envVar.ValueFrom.SecretKeyRef
-					if strings.HasPrefix(ref.Name, managedPrefix) ||
-						ref.Key == policy.Spec.VaultRef.ObjectName ||
-						(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
-						ref.Name = newSecretName
-					}
-				}
+			if targetContainerName != "" && container.Name != targetContainerName {
+				continue
 			}
 
-			for efIdx := range container.EnvFrom {
-				envFrom := &container.EnvFrom[efIdx]
-				if envFrom.SecretRef != nil {
-					if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
-						(policy.Status.CurrentRevision == "" && !strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix)) ||
-						(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
-						envFrom.SecretRef.Name = newSecretName
+			if targetEnvName != "" {
+				found := false
+				for eIdx := range container.Env {
+					envVar := &container.Env[eIdx]
+					if envVar.Name == targetEnvName {
+						found = true
+						envVar.Value = ""
+						envVar.ValueFrom = &corev1.EnvVarSource{
+							SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: newSecretName,
+								},
+								Key: objectName,
+							},
+						}
+					}
+				}
+				if !found && (targetContainerName == "" || container.Name == targetContainerName) {
+					container.Env = append(container.Env, corev1.EnvVar{
+						Name: targetEnvName,
+						ValueFrom: &corev1.EnvVarSource{
+							SecretKeyRef: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: newSecretName,
+								},
+								Key: objectName,
+							},
+						},
+					})
+				}
+			} else {
+				for eIdx := range container.Env {
+					envVar := &container.Env[eIdx]
+					if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+						ref := envVar.ValueFrom.SecretKeyRef
+						if strings.HasPrefix(ref.Name, managedPrefix) ||
+							ref.Key == objectName ||
+							ref.Name == objectName ||
+							ref.Name == fmt.Sprintf("%s-%s", targetName, objectName) ||
+							(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-%s-rev-%s", targetName, objectName, policy.Status.CurrentRevision)) ||
+							(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
+							ref.Name = newSecretName
+						}
+					}
+				}
+
+				for efIdx := range container.EnvFrom {
+					envFrom := &container.EnvFrom[efIdx]
+					if envFrom.SecretRef != nil {
+						if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
+							envFrom.SecretRef.Name == objectName ||
+							envFrom.SecretRef.Name == fmt.Sprintf("%s-%s", targetName, objectName) ||
+							(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-%s-rev-%s", targetName, objectName, policy.Status.CurrentRevision)) ||
+							(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
+							envFrom.SecretRef.Name = newSecretName
+						}
 					}
 				}
 			}
