@@ -29,7 +29,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
-	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
@@ -40,7 +39,7 @@ type MySQLProbe struct {
 }
 
 // Execute parses rotated credentials, opens a connection to MySQL, executes a lightweight "SELECT 1"
-// query, wipes in-memory secrets, and strictly sanitizes any returned errors.
+// query, and strictly sanitizes any returned errors.
 func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
 	ctx, span := telemetry.Tracer.Start(ctx, "ExecuteMySQLProbe",
 		trace.WithAttributes(
@@ -63,18 +62,15 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 
 	// Extract database credentials from secretData
 	username := extractSecretValue(secretData, "username", "user", "MYSQL_USER", "mysql_user")
-	passwordBytes := extractSecretBytes(secretData, "password", "pass", "MYSQL_PASSWORD", "mysql_password")
+	password := extractSecretValue(secretData, "password", "pass", "MYSQL_PASSWORD", "mysql_password")
 	dbname := extractSecretValue(secretData, "dbname", "database", "MYSQL_DATABASE", "db")
 	if username == "" {
 		username = "root"
 	}
 
-	password := string(passwordBytes)
-	// Ensure sensitive password memory is wiped after building the DSN
-	defer func() {
-		azure.ZeroBytes(passwordBytes)
-		password = ""
-	}()
+	// Note: database/sql and DSN formatting require string parameters. In Go, string conversions
+	// allocate immutable memory on the heap that cannot be zeroed via byte-wiping.
+	// Raw byte zeroing is maintained in materializeSecretRevision for secret payloads.
 
 	host, port, err := splitHostPort(config.Endpoint, "3306")
 	if err != nil {

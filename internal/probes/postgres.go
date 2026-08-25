@@ -31,7 +31,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
-	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
@@ -42,7 +41,7 @@ type PostgresProbe struct {
 }
 
 // Execute parses rotated credentials, opens a connection to PostgreSQL, executes a lightweight "SELECT 1"
-// query, wipes in-memory secrets, and strictly sanitizes any returned errors.
+// query, and strictly sanitizes any returned errors.
 func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.ValidationProbe, secretData map[string][]byte) error {
 	ctx, span := telemetry.Tracer.Start(ctx, "ExecutePostgresProbe",
 		trace.WithAttributes(
@@ -65,7 +64,7 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 
 	// Extract database credentials from secretData
 	username := extractSecretValue(secretData, "username", "user", "POSTGRES_USER", "pguser")
-	passwordBytes := extractSecretBytes(secretData, "password", "pass", "POSTGRES_PASSWORD", "pgpassword")
+	password := extractSecretValue(secretData, "password", "pass", "POSTGRES_PASSWORD", "pgpassword")
 	dbname := extractSecretValue(secretData, "dbname", "database", "POSTGRES_DB", "db")
 	if dbname == "" {
 		dbname = "postgres"
@@ -74,12 +73,9 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 		username = "postgres"
 	}
 
-	password := string(passwordBytes)
-	// Ensure sensitive password memory is wiped after building the DSN
-	defer func() {
-		azure.ZeroBytes(passwordBytes)
-		password = ""
-	}()
+	// Note: database/sql and URL formatting require string DSNs. In Go, string conversions
+	// allocate immutable memory on the heap that cannot be zeroed via byte-wiping.
+	// Raw byte zeroing is maintained in materializeSecretRevision for secret payloads.
 
 	host, port, err := splitHostPort(config.Endpoint, "5432")
 	if err != nil {
@@ -143,27 +139,6 @@ func extractSecretValue(data map[string][]byte, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-func extractSecretBytes(data map[string][]byte, keys ...string) []byte {
-	if data == nil {
-		return nil
-	}
-	for _, k := range keys {
-		if val, ok := data[k]; ok && len(val) > 0 {
-			buf := make([]byte, len(val))
-			copy(buf, val)
-			return buf
-		}
-		for dataKey, val := range data {
-			if strings.EqualFold(dataKey, k) && len(val) > 0 {
-				buf := make([]byte, len(val))
-				copy(buf, val)
-				return buf
-			}
-		}
-	}
-	return nil
 }
 
 func splitHostPort(endpoint, defaultPort string) (string, string, error) {
