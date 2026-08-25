@@ -8,6 +8,19 @@ This guide explains how to configure `ignoreDifferences` in your Argo CD `Applic
 
 ---
 
+## ⚙️ Automatic vs Manual Drift Management
+
+DSO provides two methods to manage Argo CD diffing:
+
+1. **Automatic In-Cluster Patching (`ARGOCD_AUTOPATCH_ENABLED="true"`):**
+   When enabled in DSO, the operator discovers the parent Argo CD `Application` via tracking labels (`app.kubernetes.io/instance` or `argocd.argoproj.io/tracking-id`) and automatically injects standard JSON Pointers (`/spec/template/metadata/annotations/dso.quantumsys.dev~1revision` and `/spec/template/spec/volumes`) into the Application's `spec.ignoreDifferences`.
+   > ⚠️ **Scope Notice:** Automatic patching ignores the `/spec/template/spec/volumes` array as a whole. If your application relies on GitOps diff enforcement for non-DSO volumes (e.g. ConfigMaps or PVCs) on the same Pod, we recommend disabling auto-patching and defining fine-grained `jqPathExpressions` manually.
+
+2. **Declarative GitOps Manifests (Manual Configuration):**
+   Explicitly declare `ignoreDifferences` or fine-grained `jqPathExpressions` in your Git repository's `Application` manifest as detailed below.
+
+---
+
 ## The Solution: `ignoreDifferences` Configuration
 
 Argo CD provides the [`ignoreDifferences`](https://argo-cd.readthedocs.io/en/stable/user-guide/diffing/) feature to instruct the diffing engine to ignore specific fields mutated by in-cluster controllers.

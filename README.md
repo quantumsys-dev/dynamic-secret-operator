@@ -169,6 +169,24 @@ DSO exposes Prometheus metrics on `:8080/metrics`:
 
 ---
 
+## 📖 Documentation & Guides
+
+- [**API Reference (`DynamicSecretPolicy`)**](docs/api-reference.md): Complete field-by-field schema breakdown, defaults, and Kyverno policy-as-code templates.
+- [**Troubleshooting & Runbooks**](docs/troubleshooting.md): Operational guide for Service Bus DLQ handling, circuit breaker recovery, probe failures, and metrics.
+- [**GitOps & Argo CD Integration**](docs/gitops-argo-cd.md): Preventing drift reconciliation conflicts with `ignoreDifferences` and `ARGOCD_AUTOPATCH_ENABLED`.
+
+---
+
+## 💡 Production & Enterprise Examples
+
+Explore fully reproducible local kind examples:
+- [**Fullstack Database Rotation**](examples/fullstack-db-rotation/): End-to-end web dashboard demonstrating live PostgreSQL zero-downtime credential rotations.
+- [**TLS Certificate Rotation**](examples/tls-certificate-rotation/): Automated Azure Key Vault certificate rotation with TLS handshake and thumbprint probe validation.
+- [**Sidecar Proxy Reloader**](examples/sidecar-proxy-sync/): Sidecar container pattern for triggering hot-reloads on legacy applications without process restarts.
+- [**Nginx Color Canary Rollout**](examples/nginx-color-rotation/): Visualizing canary rollout transitions and Argo CD GitOps drift auto-patching.
+
+---
+
 ## 📚 Architecture Decision Records (ADRs)
 
 Deep-dive design rationale is documented in our ADR repository:
