@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -230,12 +231,17 @@ func main() {
 			for i := range policyList.Items {
 				p := &policyList.Items[i]
 				if targetObjectName == "" || p.Spec.VaultRef.ObjectName == targetObjectName || p.Name == eventData.PolicyName {
+					timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Second)
 					select {
 					case eventsChannel <- event.GenericEvent{Object: p}:
 						matchedCount++
+					case <-timeoutCtx.Done():
+						handlerLog.Error(nil, "event channel full; dropping event to preserve peek-lock listener health")
 					case <-ctx.Done():
+						timeoutCancel()
 						return ctx.Err()
 					}
+					timeoutCancel()
 				}
 			}
 
