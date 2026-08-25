@@ -171,17 +171,15 @@ func MutatePodTemplateSpec(
 					})
 				}
 			} else {
-				// Implicit env matching: only mutate envs matching this policy/secret
+				// Implicit env matching: strictly mutate only envs referencing managed secrets
 				for eIdx := range container.Env {
 					envVar := &container.Env[eIdx]
 					if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
 						ref := envVar.ValueFrom.SecretKeyRef
 						if strings.HasPrefix(ref.Name, managedPrefix) ||
-							ref.Key == objectName ||
+							strings.HasPrefix(ref.Name, legacyPrefix) ||
 							ref.Name == objectName ||
-							ref.Name == fmt.Sprintf("%s-%s", targetName, objectName) ||
-							(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-%s-rev-%s", targetName, objectName, policy.Status.CurrentRevision)) ||
-							(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
+							ref.Name == fmt.Sprintf("%s-%s", targetName, objectName) {
 							ref.Name = newSecretName
 						}
 					}
