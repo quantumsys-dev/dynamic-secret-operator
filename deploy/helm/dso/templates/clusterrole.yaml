@@ -22,6 +22,8 @@ rules:
       - apps
     resources:
       - deployments
+      - statefulsets
+      - daemonsets
     verbs:
       - create
       - delete
@@ -30,6 +32,29 @@ rules:
       - patch
       - update
       - watch
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - rollouts
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  {{- if .Values.argoCD.autoPatch }}
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - applications
+    verbs:
+      - get
+      - list
+      - patch
+      - update
+  {{- end }}
   - apiGroups:
       - networking.k8s.io
     resources:

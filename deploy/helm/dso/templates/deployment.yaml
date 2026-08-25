@@ -62,6 +62,10 @@ spec:
             - name: SERVICEBUS_QUEUE_NAME
               value: {{ .Values.azure.serviceBus.queueName | quote }}
             {{- end }}
+            {{- if .Values.argoCD.autoPatch }}
+            - name: ARGOCD_AUTOPATCH_ENABLED
+              value: "true"
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}

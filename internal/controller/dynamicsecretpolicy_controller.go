@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -42,10 +41,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	argorolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/canary"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/integration"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/probes"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/workload"
 	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
@@ -91,7 +93,8 @@ type DynamicSecretPolicyReconciler struct {
 // +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=argoproj.io,resources=rollouts;applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -208,18 +211,29 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 
 	case ConditionTypeRevisionPrepared:
+		targetKind := policy.Spec.WorkloadSelector.Kind
+		if targetKind == "" {
+			targetKind = workload.KindDeployment
+		}
 		targetName := policy.Spec.WorkloadSelector.Name
-		targetDeploy := &appsv1.Deployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: policy.Namespace}, targetDeploy); err != nil {
-			logger.Error(err, "failed to fetch target deployment for canary provisioning", "targetDeployment", targetName)
+
+		adapter, err := workload.NewAdapter(targetKind)
+		if err != nil {
+			logger.Error(err, "unsupported workload kind specified in policy", "kind", targetKind)
+			span.RecordError(err)
+			return ctrl.Result{}, err
+		}
+
+		if err := adapter.Fetch(ctx, r.Client, types.NamespacedName{Name: targetName, Namespace: policy.Namespace}); err != nil {
+			logger.Error(err, "failed to fetch target workload for canary provisioning", "kind", targetKind, "targetWorkload", targetName)
 			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
 
 		secretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
 
-		// 1. Provision Canary Deployment
-		canaryDeploy := canary.BuildCanaryDeployment(targetDeploy, policy, secretName)
+		// 1. Provision Canary Deployment derived polymorphically from target workload
+		canaryDeploy := adapter.BuildCanary(policy, secretName)
 		if err := controllerutil.SetControllerReference(policy, canaryDeploy, r.Scheme); err != nil {
 			logger.Error(err, "failed to set controller reference on canary deployment")
 			span.RecordError(err)
@@ -231,7 +245,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			span.RecordError(err)
 			return ctrl.Result{}, err
 		}
-		logger.Info("provisioned canary deployment", "canaryDeployment", canaryDeploy.Name)
+		logger.Info("provisioned canary deployment", "canaryDeployment", canaryDeploy.Name, "targetKind", targetKind)
 
 		// 2. Provision Canary NetworkPolicy
 		netpol := canary.BuildNetworkPolicy(policy)
@@ -414,81 +428,46 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 	return nil
 }
 
-// promoteTargetWorkload patches the production target Deployment with the new Secret revision.
+// promoteTargetWorkload patches the production target workload (Deployment, StatefulSet, DaemonSet)
+// with the new Secret revision via its resolved polymorphic WorkloadAdapter.
 // It strictly replaces only operator-managed secret references (<targetWorkload.Name>-rev-<hash>
 // or matching the Key Vault object key), preserving all third-party secrets, TLS certificates,
 // and unmanaged environment configurations.
 func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) error {
 	logger := log.FromContext(ctx)
+	targetKind := policy.Spec.WorkloadSelector.Kind
+	if targetKind == "" {
+		targetKind = workload.KindDeployment
+	}
 	targetName := policy.Spec.WorkloadSelector.Name
+
+	adapter, err := workload.NewAdapter(targetKind)
+	if err != nil {
+		return fmt.Errorf("unsupported workload kind %q: %w", targetKind, err)
+	}
+
 	targetKey := types.NamespacedName{
 		Name:      targetName,
 		Namespace: policy.Namespace,
 	}
 
-	targetDeploy := &appsv1.Deployment{}
-	if err := r.Get(ctx, targetKey, targetDeploy); err != nil {
-		return fmt.Errorf("failed to fetch target deployment %q: %w", targetName, err)
+	if err := adapter.Fetch(ctx, r.Client, targetKey); err != nil {
+		return fmt.Errorf("failed to fetch target %s %q: %w", targetKind, targetName, err)
 	}
 
-	originalDeploy := targetDeploy.DeepCopy()
+	// Reconcile Argo CD ignoreDifferences if auto-patching is enabled
+	if err := integration.ReconcileArgoCDIgnoreDifferences(ctx, r.Client, adapter.TargetObject(), targetKind); err != nil {
+		logger.Error(err, "failed to reconcile Argo CD ignoreDifferences; continuing with workload promotion", "targetWorkload", targetName)
+	}
+
 	newSecretName := fmt.Sprintf("%s-rev-%s", targetName, policy.Status.DesiredRevision)
-	managedPrefix := fmt.Sprintf("%s-rev-", targetName)
-
-	if targetDeploy.Spec.Template.Annotations == nil {
-		targetDeploy.Spec.Template.Annotations = make(map[string]string)
-	}
-	targetDeploy.Spec.Template.Annotations[LabelRevision] = policy.Status.DesiredRevision
-
-	// Update only volume mounts referencing operator-managed secrets
-	for i := range targetDeploy.Spec.Template.Spec.Volumes {
-		vol := &targetDeploy.Spec.Template.Spec.Volumes[i]
-		if vol.Secret != nil {
-			// Replace if already an operator-managed revision secret, OR on first adoption
-			// (CurrentRevision == "") replace any non-managed secret volume so the operator
-			// takes ownership regardless of the initial secret name chosen by the user.
-			if strings.HasPrefix(vol.Secret.SecretName, managedPrefix) ||
-				(policy.Status.CurrentRevision == "" && !strings.HasPrefix(vol.Secret.SecretName, managedPrefix)) {
-				vol.Secret.SecretName = newSecretName
-			}
-		}
+	if err := adapter.Promote(ctx, r.Client, policy, newSecretName); err != nil {
+		return fmt.Errorf("failed to promote target %s %q: %w", targetKind, targetName, err)
 	}
 
-	// Update container environment secret references (targeted replacement)
-	for cIdx := range targetDeploy.Spec.Template.Spec.Containers {
-		container := &targetDeploy.Spec.Template.Spec.Containers[cIdx]
-
-		for eIdx := range container.Env {
-			envVar := &container.Env[eIdx]
-			if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
-				ref := envVar.ValueFrom.SecretKeyRef
-				// Only update if it's already an operator-managed revision or matches the Key Vault secret key
-				if strings.HasPrefix(ref.Name, managedPrefix) ||
-					ref.Key == policy.Spec.VaultRef.ObjectName ||
-					(policy.Status.CurrentRevision != "" && ref.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
-					ref.Name = newSecretName
-				}
-			}
-		}
-
-		for efIdx := range container.EnvFrom {
-			envFrom := &container.EnvFrom[efIdx]
-			if envFrom.SecretRef != nil {
-				if strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix) ||
-					(policy.Status.CurrentRevision == "" && !strings.HasPrefix(envFrom.SecretRef.Name, managedPrefix)) ||
-					(policy.Status.CurrentRevision != "" && envFrom.SecretRef.Name == fmt.Sprintf("%s-rev-%s", targetName, policy.Status.CurrentRevision)) {
-					envFrom.SecretRef.Name = newSecretName
-				}
-			}
-		}
-	}
-
-	if err := r.Patch(ctx, targetDeploy, client.MergeFrom(originalDeploy)); err != nil {
-		return fmt.Errorf("failed to patch target deployment %q: %w", targetName, err)
-	}
-
-	logger.Info("successfully patched target deployment with new secret revision",
-		"targetDeployment", targetName,
+	logger.Info("successfully patched target workload with new secret revision",
+		"targetKind", targetKind,
+		"targetWorkload", targetName,
 		"secretRevision", policy.Status.DesiredRevision,
 	)
 	return nil
@@ -623,7 +602,10 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 		For(&secretv1alpha1.DynamicSecretPolicy{}).
 		Owns(&corev1.Secret{}).
 		Owns(&networkingv1.NetworkPolicy{}).
-		Owns(&appsv1.Deployment{})
+		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&appsv1.DaemonSet{}).
+		Owns(&argorolloutsv1alpha1.Rollout{})
 
 	if r.EventsChannel != nil {
 		builder = builder.WatchesRawSource(source.Channel(r.EventsChannel, &handler.EnqueueRequestForObject{}))
