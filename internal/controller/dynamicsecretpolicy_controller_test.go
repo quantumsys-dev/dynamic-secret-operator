@@ -949,7 +949,7 @@ func TestDynamicSecretPolicyReconciler_CircuitBreakerTripsOnConsecutiveFailures(
 			},
 		},
 		Status: secretv1alpha1.DynamicSecretPolicyStatus{
-			DesiredRevision: "badrevision12",
+			DesiredRevision: "000000000000",
 			Conditions: []metav1.Condition{
 				{
 					Type:   ConditionTypeValidating,
@@ -960,9 +960,15 @@ func TestDynamicSecretPolicyReconciler_CircuitBreakerTripsOnConsecutiveFailures(
 		},
 	}
 
+	hasher := sha256.New()
+	hasher.Write([]byte("test-db-password-super-secret"))
+	hasher.Write([]byte("v100"))
+	failingRevision := fmt.Sprintf("%x", hasher.Sum(nil))[:12]
+	policy.Status.DesiredRevision = failingRevision
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "payment-api-rev-badrevision12",
+			Name:      fmt.Sprintf("payment-api-rev-%s", failingRevision),
 			Namespace: "default",
 		},
 		Data: map[string][]byte{
@@ -1064,6 +1070,7 @@ func TestDynamicSecretPolicyReconciler_CircuitBreakerResetOnNewRevision(t *testi
 			},
 		},
 		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision:     "oldbrokenrev12",
 			ConsecutiveFailures: 5,
 			Conditions: []metav1.Condition{
 				{
@@ -1074,9 +1081,6 @@ func TestDynamicSecretPolicyReconciler_CircuitBreakerResetOnNewRevision(t *testi
 			},
 		},
 	}
-
-	// Clear conditions to simulate a newly triggered revision from state ""
-	policy.Status.Conditions = nil
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -1109,6 +1113,9 @@ func TestDynamicSecretPolicyReconciler_CircuitBreakerResetOnNewRevision(t *testi
 	_ = fakeClient.Get(context.Background(), req.NamespacedName, updated)
 	if updated.Status.ConsecutiveFailures != 0 {
 		t.Errorf("expected ConsecutiveFailures to reset to 0, got %d", updated.Status.ConsecutiveFailures)
+	}
+	if meta.IsStatusConditionTrue(updated.Status.Conditions, ConditionTypeCircuitBreakerTripped) {
+		t.Errorf("expected CircuitBreakerTripped condition to be removed")
 	}
 }
 

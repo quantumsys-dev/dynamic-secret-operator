@@ -135,8 +135,32 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	)
 	span.SetAttributes(attribute.String("policy.state", currentState))
 
-	// If Circuit Breaker is tripped during an active rollout, halt reconciliation
-	if currentState != "" && policy.Status.ConsecutiveFailures >= threshold {
+	var revisionHash string
+	if currentState == "" || policy.Status.ConsecutiveFailures >= threshold || meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCircuitBreakerTripped) {
+		var err error
+		revisionHash, err = r.materializeSecretRevision(ctx, policy)
+		if err != nil {
+			logger.Error(err, "failed to materialize secret revision from Key Vault")
+			span.RecordError(err)
+			return ctrl.Result{}, err
+		}
+
+		// If the upstream secret has changed, reset the circuit breaker and state
+		if policy.Status.CurrentRevision != revisionHash && policy.Status.DesiredRevision != revisionHash {
+			logger.Info("upstream secret drift detected; resetting circuit breaker",
+				"newRevision", revisionHash,
+				"currentRevision", policy.Status.CurrentRevision,
+				"desiredRevision", policy.Status.DesiredRevision,
+			)
+			policy.Status.ConsecutiveFailures = 0
+			policy.Status.DesiredRevision = revisionHash
+			meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeCircuitBreakerTripped)
+			currentState = "" // Force restart of the state machine
+		}
+	}
+
+	// If Circuit Breaker is tripped during an active rollout (and no upstream drift detected), halt reconciliation
+	if currentState != "" && (policy.Status.ConsecutiveFailures >= threshold || meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCircuitBreakerTripped)) {
 		logger.Error(nil, "circuit breaker tripped; halting reconciliation loop",
 			"consecutiveFailures", policy.Status.ConsecutiveFailures,
 			"threshold", threshold,
@@ -160,14 +184,6 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	switch currentState {
 	case "":
-		// Check for Version Drift: Materialize upstream secret revision from Key Vault
-		revisionHash, err := r.materializeSecretRevision(ctx, policy)
-		if err != nil {
-			logger.Error(err, "failed to materialize secret revision from Key Vault")
-			span.RecordError(err)
-			return ctrl.Result{}, err
-		}
-
 		// In-Sync Check: If the upstream secret hash equals active CurrentRevision, workload is already up-to-date
 		if policy.Status.CurrentRevision != "" && revisionHash == policy.Status.CurrentRevision {
 			logger.Info("workload in sync with current secret revision",
