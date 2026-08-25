@@ -83,7 +83,7 @@ func ReconcileArgoCDIgnoreDifferences(
 		targetGroup = "argoproj.io"
 	}
 
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latestApp, fetchErr := fetchArgoCDApplication(ctx, c, appName, targetObj.GetNamespace())
 		if fetchErr != nil {
 			return fetchErr

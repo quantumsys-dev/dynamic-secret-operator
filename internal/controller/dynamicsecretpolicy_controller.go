@@ -545,7 +545,7 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 	// For TLS certificates, split and map PEM blocks into standard kubernetes.io/tls keys
 	if policy.Spec.VaultRef.ObjectType == secretv1alpha1.VaultObjectTypeCertificate ||
 		strings.Contains(string(payload.Value), "-----BEGIN ") {
-		certData, keyData := parsePEMCertAndKey(payload.Value)
+		certData, keyData := extractPEMCertAndKey(payload.Value)
 		if len(certData) > 0 {
 			secretData[corev1.TLSCertKey] = certData
 			if len(keyData) > 0 {
@@ -587,18 +587,16 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 	// Idempotency: If secret already exists, treat materialization as successful
 	if createErr != nil {
 		if apierrors.IsAlreadyExists(createErr) {
-			logger.Info("secret revision already exists; proceeding idempotently",
-				"secretName", secretName,
-				"revision", revisionHash,
-			)
+			logger.V(1).Info("secret revision already exists; continuing", "secret", secretName)
 			return revisionHash, nil
 		}
-		return "", fmt.Errorf("failed to create immutable secret %q: %w", secretName, createErr)
+		return "", fmt.Errorf("failed to create secret revision %q: %w", secretName, createErr)
 	}
 
-	logger.Info("materialized new immutable secret revision",
-		"secretName", secretName,
+	logger.Info("materialized immutable secret revision",
+		"secret", secretName,
 		"revision", revisionHash,
+		"workload", policy.Spec.WorkloadSelector.Name,
 	)
 
 	return revisionHash, nil
@@ -661,9 +659,9 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 	return builder.Complete(r)
 }
 
-// parsePEMCertAndKey decodes raw PEM-encoded payload bytes and partitions them into
+// extractPEMCertAndKey decodes raw PEM-encoded payload bytes and partitions them into
 // certificate blocks (tls.crt) and private key blocks (tls.key).
-func parsePEMCertAndKey(data []byte) ([]byte, []byte) {
+func extractPEMCertAndKey(data []byte) ([]byte, []byte) {
 	var certBlocks []byte
 	var keyBlocks []byte
 

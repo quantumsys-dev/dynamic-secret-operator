@@ -236,12 +236,9 @@ func main() {
 					case eventsChannel <- event.GenericEvent{Object: p}:
 						matchedCount++
 					case <-timeoutCtx.Done():
-						handlerLog.Error(nil, "event channel full; failing push to preserve message in Service Bus for retry",
-							"policy", p.Name,
-							"objectName", targetObjectName,
-						)
 						timeoutCancel()
-						return fmt.Errorf("event channel full: timeout pushing event for policy %q", p.Name)
+						handlerLog.Error(nil, "event channel full; rate limiting ingestion, NACKing message")
+						return fmt.Errorf("controller event channel at capacity")
 					case <-ctx.Done():
 						timeoutCancel()
 						return ctx.Err()
