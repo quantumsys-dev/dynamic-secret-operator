@@ -481,6 +481,18 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 		return fmt.Errorf("failed to promote target %s %q: %w", targetKind, targetName, err)
 	}
 
+	// Garbage Collect old revisions, keeping only the Current and Desired
+	secrets := &corev1.SecretList{}
+	labelSelector := client.MatchingLabels{canary.LabelTargetWorkload: targetName}
+	if err := r.List(ctx, secrets, client.InNamespace(policy.Namespace), labelSelector); err == nil {
+		for _, s := range secrets.Items {
+			rev := s.Labels[LabelRevision]
+			if rev != policy.Status.DesiredRevision && rev != policy.Status.CurrentRevision {
+				_ = r.Delete(ctx, &s)
+			}
+		}
+	}
+
 	logger.Info("successfully patched target workload with new secret revision",
 		"targetKind", targetKind,
 		"targetWorkload", targetName,
@@ -528,7 +540,8 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 			Name:      secretName,
 			Namespace: policy.Namespace,
 			Labels: map[string]string{
-				LabelRevision: revisionHash,
+				LabelRevision:              revisionHash,
+				canary.LabelTargetWorkload: policy.Spec.WorkloadSelector.Name,
 			},
 		},
 		Type: corev1.SecretTypeOpaque,

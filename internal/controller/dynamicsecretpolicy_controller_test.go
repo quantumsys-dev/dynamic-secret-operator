@@ -42,6 +42,7 @@ import (
 
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/canary"
 )
 
 type mockSecretFetcher struct {
@@ -1582,3 +1583,159 @@ func TestDynamicSecretPolicyReconciler_MultipleSequentialRotations(t *testing.T)
 		t.Fatalf("expected idle reconcile after rotation 2: %v", err)
 	}
 }
+
+func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *testing.T) {
+	scheme := setupTestScheme(t)
+	ctx := context.Background()
+
+	targetDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "orders-api",
+			Namespace: "default",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "app",
+							Image: "nginx:alpine",
+							Env: []corev1.EnvVar{
+								{
+									Name: "DB_PASS",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "orders-api-db-pass-rev-oldcurrent",
+											},
+											Key: "db-pass",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "orders-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://my-vault.vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "orders-api",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			CurrentRevision: "oldcurrent",
+			DesiredRevision: "newdesired",
+		},
+	}
+
+	// Create 3 secrets: oldcurrent (active current), newdesired (active desired), and obsolete1, obsolete2 (orphans)
+	secretCurrent := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "orders-api-db-pass-rev-oldcurrent",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelRevision:              "oldcurrent",
+				canary.LabelTargetWorkload: "orders-api",
+			},
+		},
+	}
+	secretDesired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "orders-api-db-pass-rev-newdesired",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelRevision:              "newdesired",
+				canary.LabelTargetWorkload: "orders-api",
+			},
+		},
+	}
+	secretObsolete1 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "orders-api-db-pass-rev-obsolete1",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelRevision:              "obsolete1",
+				canary.LabelTargetWorkload: "orders-api",
+			},
+		},
+	}
+	secretObsolete2 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "orders-api-db-pass-rev-obsolete2",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelRevision:              "obsolete2",
+				canary.LabelTargetWorkload: "orders-api",
+			},
+		},
+	}
+	// Unrelated secret belonging to another workload - must NEVER be deleted
+	unrelatedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "other-workload-rev-obsolete1",
+			Namespace: "default",
+			Labels: map[string]string{
+				LabelRevision:              "obsolete1",
+				canary.LabelTargetWorkload: "other-workload",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy, targetDeployment, secretCurrent, secretDesired, secretObsolete1, secretObsolete2, unrelatedSecret).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := r.promoteTargetWorkload(ctx, policy)
+	if err != nil {
+		t.Fatalf("promoteTargetWorkload failed: %v", err)
+	}
+
+	// Verify obsolete secrets are deleted
+	secrets := &corev1.SecretList{}
+	if err := fakeClient.List(ctx, secrets, client.InNamespace("default")); err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+
+	remainingNames := make(map[string]bool)
+	for _, s := range secrets.Items {
+		remainingNames[s.Name] = true
+	}
+
+	if !remainingNames["orders-api-db-pass-rev-oldcurrent"] {
+		t.Errorf("expected current revision secret to be retained")
+	}
+	if !remainingNames["orders-api-db-pass-rev-newdesired"] {
+		t.Errorf("expected desired revision secret to be retained")
+	}
+	if remainingNames["orders-api-db-pass-rev-obsolete1"] {
+		t.Errorf("expected obsolete secret 1 to be garbage-collected")
+	}
+	if remainingNames["orders-api-db-pass-rev-obsolete2"] {
+		t.Errorf("expected obsolete secret 2 to be garbage-collected")
+	}
+	if !remainingNames["other-workload-rev-obsolete1"] {
+		t.Errorf("expected unrelated workload secret to be retained")
+	}
+}
+
