@@ -1,0 +1,139 @@
+# GitOps Integration: Managing Argo CD Drift with DSO
+
+When managing Kubernetes workloads with **Argo CD** (specifically with `selfHeal: true` and `automated: prune` enabled), Argo CD continuously reconciles the live cluster state against the Git repository.
+
+Because the **Dynamic Secret Operator (DSO)** updates secret volumes, environment variables, and revision annotations directly in-cluster upon secret rotation, Argo CD can detect these mutations as "drift" and immediately revert them back to the Git state. This creates an **infinite reconciliation loop** (DSO updates -> Argo CD reverts -> Pod restarts).
+
+This guide explains how to configure `ignoreDifferences` in your Argo CD `Application` manifests to allow DSO to manage runtime secret rotation seamlessly while retaining full GitOps governance for application code, replicas, and infrastructure specs.
+
+---
+
+## The Solution: `ignoreDifferences` Configuration
+
+Argo CD provides the [`ignoreDifferences`](https://argo-cd.readthedocs.io/en/stable/user-guide/diffing/) feature to instruct the diffing engine to ignore specific fields mutated by in-cluster controllers.
+
+### Complete Argo CD `Application` Example
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-service-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/my-org/gitops-repo.git
+    targetRevision: HEAD
+    path: apps/order-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+
+  # Enable automated sync with Self-Heal
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+  # Instruct Argo CD to ignore DSO-managed mutations
+  ignoreDifferences:
+    # 1. Ignore DSO Revision Annotations on Pod Templates
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+        - /spec/template/spec/volumes
+
+    # 2. Support for StatefulSets
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+        - /spec/template/spec/volumes
+
+    # 3. Support for DaemonSets
+    - group: apps
+      kind: DaemonSet
+      jsonPointers:
+        - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+        - /spec/template/spec/volumes
+
+    # 4. Support for Argo Rollouts
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+        - /spec/template/spec/volumes
+```
+
+---
+
+## Fine-Grained JQ Path Ignoring (Recommended for Multi-Volume Pods)
+
+If your workloads mount multiple volumes (e.g., config maps, persistent volumes, TLS certificates) and you only want to ignore the specific operator-managed secret volumes without ignoring all volumes, use **JQ Path Expressions**:
+
+```yaml
+spec:
+  ignoreDifferences:
+    # Ignore DSO secret revision annotations across all supported workloads
+    - group: apps
+      kind: Deployment
+      jqPathExpressions:
+        - .spec.template.metadata.annotations["dso.quantumsys.dev/revision"]
+        - .spec.template.spec.volumes[] | select(.secret.secretName | startswith("order-service-rev-"))
+        - .spec.template.spec.containers[].env[] | select(.valueFrom.secretKeyRef.name | startswith("order-service-rev-"))
+        - .spec.template.spec.containers[].envFrom[] | select(.secretRef.name | startswith("order-service-rev-"))
+
+    - group: argoproj.io
+      kind: Rollout
+      jqPathExpressions:
+        - .spec.template.metadata.annotations["dso.quantumsys.dev/revision"]
+        - .spec.template.spec.volumes[] | select(.secret.secretName | startswith("order-service-rev-"))
+        - .spec.template.spec.containers[].env[] | select(.valueFrom.secretKeyRef.name | startswith("order-service-rev-"))
+        - .spec.template.spec.containers[].envFrom[] | select(.secretRef.name | startswith("order-service-rev-"))
+```
+
+---
+
+## System-Level (Global) Ignore Differences
+
+For cluster administrators managing hundreds of applications, you can configure these diffing rules globally in the `argocd-cm` ConfigMap instead of modifying every individual `Application` CR:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  resource.customizations.ignoreDifferences.apps_Deployment: |
+    jsonPointers:
+      - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+
+  resource.customizations.ignoreDifferences.apps_StatefulSet: |
+    jsonPointers:
+      - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+
+  resource.customizations.ignoreDifferences.apps_DaemonSet: |
+    jsonPointers:
+      - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+
+  resource.customizations.ignoreDifferences.argoproj.io_Rollout: |
+    jsonPointers:
+      - /spec/template/metadata/annotations/dso.quantumsys.dev~1revision
+```
+
+---
+
+## Summary of Benefits
+
+With this configuration:
+* **GitOps Compliance:** Git remains the single source of truth for application versions, images, environment configs, replicas, and policies.
+* **Zero-Downtime Secret Rotation:** DSO safely validates secrets via canary delivery and updates running workloads in-cluster without interference from Argo CD Self-Heal.
+* **Deterministic Rollback:** In the event of an upstream secret failure, DSO's circuit breaker halts rollout and retains the last known good revision without triggering Git sync conflicts.

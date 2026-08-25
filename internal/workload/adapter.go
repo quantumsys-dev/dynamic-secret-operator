@@ -35,6 +35,7 @@ const (
 	KindDeployment  = "Deployment"
 	KindStatefulSet = "StatefulSet"
 	KindDaemonSet   = "DaemonSet"
+	KindRollout     = "Rollout"
 )
 
 // WorkloadAdapter defines the polymorphic interface for managing different Kubernetes
@@ -61,9 +62,11 @@ func NewAdapter(kind string) (WorkloadAdapter, error) {
 		return NewStatefulSetAdapter(), nil
 	case KindDaemonSet:
 		return NewDaemonSetAdapter(), nil
+	case KindRollout:
+		return NewRolloutAdapter(), nil
 	default:
-		return nil, fmt.Errorf("unsupported workload kind %q: supported kinds are %s, %s, %s",
-			kind, KindDeployment, KindStatefulSet, KindDaemonSet)
+		return nil, fmt.Errorf("unsupported workload kind %q: supported kinds are %s, %s, %s, %s",
+			kind, KindDeployment, KindStatefulSet, KindDaemonSet, KindRollout)
 	}
 }
 

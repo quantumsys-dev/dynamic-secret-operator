@@ -61,9 +61,9 @@ type VaultReference struct {
 
 // WorkloadSelector defines the target deployment/workload to receive progressive rollouts.
 type WorkloadSelector struct {
-	// Kind is the type of Kubernetes resource to target (Deployment, StatefulSet, DaemonSet).
+	// Kind is the type of Kubernetes resource to target (Deployment, StatefulSet, DaemonSet, Rollout).
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=Deployment;StatefulSet;DaemonSet
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet;DaemonSet;Rollout
 	// +kubebuilder:default=Deployment
 	Kind string `json:"kind"`
 

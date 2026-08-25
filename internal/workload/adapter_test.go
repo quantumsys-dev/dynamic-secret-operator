@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	argorolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,6 +36,7 @@ func newTestScheme() *runtime.Scheme {
 	_ = appsv1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
 	_ = secretv1alpha1.AddToScheme(s)
+	_ = argorolloutsv1alpha1.AddToScheme(s)
 	return s
 }
 
@@ -96,6 +98,7 @@ func TestNewAdapter(t *testing.T) {
 		{kind: "", expectKind: KindDeployment, expectError: false},
 		{kind: "StatefulSet", expectKind: KindStatefulSet, expectError: false},
 		{kind: "DaemonSet", expectKind: KindDaemonSet, expectError: false},
+		{kind: "Rollout", expectKind: KindRollout, expectError: false},
 		{kind: "Job", expectError: true},
 		{kind: "CronJob", expectError: true},
 	}
@@ -287,6 +290,65 @@ func TestDaemonSetAdapter(t *testing.T) {
 	}
 	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "node-agent-rev-rev555" {
 		t.Errorf("expected promoted volume secret 'node-agent-rev-rev555', got %q",
+			updated.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+	}
+}
+
+func TestRolloutAdapter(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	rollout := &argorolloutsv1alpha1.Rollout{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "canary-service",
+			Namespace: "default",
+		},
+		Spec: argorolloutsv1alpha1.RolloutSpec{
+			Template: testPodTemplate("canary-service", "canary-service-secret"),
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rollout).Build()
+	adapter := NewRolloutAdapter()
+
+	// Fetch
+	if err := adapter.Fetch(ctx, client, types.NamespacedName{Name: "canary-service", Namespace: "default"}); err != nil {
+		t.Fatalf("Fetch failed: %v", err)
+	}
+	if adapter.Kind() != KindRollout {
+		t.Errorf("expected kind Rollout, got %s", adapter.Kind())
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "canary-policy", Namespace: "default"},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{ObjectName: "database-password"},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "rev777",
+		},
+	}
+
+	// BuildCanary produces an isolated 1-replica Deployment derived from Rollout template
+	canary := adapter.BuildCanary(policy, "canary-service-rev-rev777")
+	if canary.Name != "canary-service-canary" {
+		t.Errorf("expected canary name 'canary-service-canary', got %q", canary.Name)
+	}
+	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "canary-service-rev-rev777" {
+		t.Errorf("expected canary volume secret 'canary-service-rev-rev777', got %q",
+			canary.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+	}
+
+	// Promote
+	if err := adapter.Promote(ctx, client, policy, "canary-service-rev-rev777"); err != nil {
+		t.Fatalf("Promote failed: %v", err)
+	}
+
+	updated := &argorolloutsv1alpha1.Rollout{}
+	if err := client.Get(ctx, types.NamespacedName{Name: "canary-service", Namespace: "default"}, updated); err != nil {
+		t.Fatalf("failed to get updated rollout: %v", err)
+	}
+	if updated.Spec.Template.Spec.Volumes[0].Secret.SecretName != "canary-service-rev-rev777" {
+		t.Errorf("expected promoted volume secret 'canary-service-rev-rev777', got %q",
 			updated.Spec.Template.Spec.Volumes[0].Secret.SecretName)
 	}
 }
