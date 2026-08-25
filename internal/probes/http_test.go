@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 )
 
 func TestHTTPProbe_Execute(t *testing.T) {

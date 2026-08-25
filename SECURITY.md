@@ -15,7 +15,7 @@ The QuantumSys security and architecture team takes security vulnerabilities ser
 If you discover a security vulnerability in `dynamic-secret-operator`, please **DO NOT** create a public GitHub issue.
 
 Instead, please report the vulnerability privately via GitHub Security Advisories or by emailing:
-`security@quantumsys.io`
+`security@quantumsys.dev`
 
 ### Information to Include
 - Detailed description of the vulnerability.

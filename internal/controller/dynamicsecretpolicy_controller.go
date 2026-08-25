@@ -42,11 +42,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
-	"github.com/quantumsys/dynamic-secret-operator/internal/azure"
-	"github.com/quantumsys/dynamic-secret-operator/internal/canary"
-	"github.com/quantumsys/dynamic-secret-operator/internal/probes"
-	"github.com/quantumsys/dynamic-secret-operator/pkg/telemetry"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/canary"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/probes"
+	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
 // Condition Types for DynamicSecretPolicy state machine transitions.

@@ -1,4 +1,4 @@
-module github.com/quantumsys/dynamic-secret-operator
+module github.com/quantumsys-dev/dynamic-secret-operator
 
 go 1.26.7
 

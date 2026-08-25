@@ -13,7 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	gomock "go.uber.org/mock/gomock"
 )
 

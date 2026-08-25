@@ -25,7 +25,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 
-	secretv1alpha1 "github.com/quantumsys/dynamic-secret-operator/api/v1alpha1"
+	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 )
 
 func TestMySQLProbe_Execute(t *testing.T) {
