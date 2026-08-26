@@ -119,13 +119,27 @@ Synthetic health and connectivity probes executed against the canary pod before 
 
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `type` | `string` | **Yes** | Probe engine type. Options: `HTTP`, `TLS`, `PostgreSQL`, `MySQL`. |
-| `endpoint` | `string` | **Yes** | Host and port to connect to (e.g. `127.0.0.1:8080`, `postgres.db.svc:5432`). |
+| `type` | `string` | **Yes** | Probe engine type. Options: `HTTP`, `TLS`, `PostgreSQL`, `MySQL`, `Job`. |
+| `endpoint` | `string` | Context | Host and port to connect to (e.g. `127.0.0.1:8080`, `postgres.db.svc:5432`). Not used for `Job` probes. |
 | `path` | `string` | No | HTTP request path (only applicable for `HTTP` probes). |
 | `expectedStatus` | `int32` | No | Expected HTTP status code (default: `200`). |
 | `headers` | `map[string]string` | No | Custom HTTP request headers. |
-| `queryTimeout` | `int32` | No | Timeout in seconds for probe execution (default: `5`). |
+| `queryTimeout` | `int32` | No | Timeout in seconds for probe execution (default: `5`). Not used for `Job` probes. |
 | `thumbprint` | `string` | No | Expected SHA-1 or SHA-256 certificate thumbprint (for `TLS` probes). |
+| `job` | `JobProbeSpec` | Context | Job probe specification. **Required** when `type` is `Job`. |
+
+#### `spec.validationProbes[].job` — `JobProbeSpec`
+
+Configures the ephemeral `batch/v1.Job` launched by the operator as a validation probe.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `timeoutSeconds` | `*int32` | `60` | Maximum seconds to wait for the Job to reach a terminal state. The Job is deleted and the probe fails if this duration is exceeded. |
+| `jobTemplate` | `batchv1.JobTemplateSpec` | — | Standard Kubernetes `batch/v1` Job template. The operator sets `backoffLimit: 0` if unset. |
+
+**Placeholder substitution**: embed `{{REVISION_SECRET_NAME}}` anywhere inside the `jobTemplate` (env values, `secretKeyRef.name`, `args`, `command`). The operator replaces all occurrences with the name of the materialized Kubernetes `Secret` holding the new credentials before creating the Job.
+
+**Lifecycle**: the probe Job is always deleted after execution (success or failure) by the operator, preventing resource leaks in the target namespace.
 
 ---
 

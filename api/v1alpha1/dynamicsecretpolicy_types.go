@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -31,7 +32,7 @@ const (
 )
 
 // ProbeType defines the type of health/validation probe to execute against the workload.
-// +kubebuilder:validation:Enum=TLS;PostgreSQL;MySQL;HTTP
+// +kubebuilder:validation:Enum=TLS;PostgreSQL;MySQL;HTTP;Job
 type ProbeType string
 
 const (
@@ -39,6 +40,10 @@ const (
 	ProbeTypePostgreSQL ProbeType = "PostgreSQL"
 	ProbeTypeMySQL      ProbeType = "MySQL"
 	ProbeTypeHTTP       ProbeType = "HTTP"
+	// ProbeTypeJob launches an ephemeral batch/v1.Job using a user-supplied container image.
+	// This avoids embedding third-party drivers into the operator binary and enables
+	// arbitrarily complex validation logic (e.g., Redis PING, Kafka produce/consume, custom scripts).
+	ProbeTypeJob ProbeType = "Job"
 )
 
 // VaultReference specifies the location and identity of the secret in Azure Key Vault / external vault.
@@ -81,21 +86,75 @@ type CanaryStrategy struct {
 	TimeoutSeconds int32 `json:"timeoutSeconds"`
 }
 
+// ProbeCredentials maps specific keys within the materialized secret to database credentials.
+// Use this to explicitly declare which key holds the password, username, or database name,
+// instead of relying on well-known name guessing.
+type ProbeCredentials struct {
+	// PasswordKey is the key in the materialized Kubernetes secret that holds the password.
+	// Defaults to common names (password, pass, POSTGRES_PASSWORD) if not set.
+	// For single-value secrets from Azure Key Vault, use the objectName value (e.g. "db-password").
+	// +kubebuilder:validation:Optional
+	PasswordKey string `json:"passwordKey,omitempty"`
+
+	// UsernameKey is the key in the secret that holds the username.
+	// +kubebuilder:validation:Optional
+	UsernameKey string `json:"usernameKey,omitempty"`
+
+	// DatabaseKey is the key in the secret that holds the database name.
+	// +kubebuilder:validation:Optional
+	DatabaseKey string `json:"databaseKey,omitempty"`
+}
+
+// JobProbeSpec defines the configuration for a Job-based validation probe.
+// The operator will create an ephemeral batch/v1.Job in the target namespace,
+// monitor it to completion, capture any failure logs, and clean it up automatically.
+type JobProbeSpec struct {
+	// TimeoutSeconds is the maximum number of seconds to wait for the Job to complete.
+	// If the Job does not reach a terminal state within this time, it is deleted and
+	// the probe is marked as failed.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=60
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+
+	// JobTemplate is the batch/v1 job template spec to instantiate.
+	// The operator will set an OwnerReference on the created Job.
+	// Use the placeholder "{{REVISION_SECRET_NAME}}" anywhere within the template
+	// (env values, args, command) and the operator will substitute it with the
+	// name of the materialized Kubernetes Secret holding the new credentials.
+	// +kubebuilder:validation:Required
+	JobTemplate batchv1.JobTemplateSpec `json:"jobTemplate"`
+}
+
 // ValidationProbe configures synthetic probes executed during rollout.
 type ValidationProbe struct {
-	// Type of probe to execute (TLS, PostgreSQL, MySQL, HTTP).
+	// Type of probe to execute (TLS, PostgreSQL, MySQL, HTTP, Job).
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=TLS;PostgreSQL;MySQL;HTTP
+	// +kubebuilder:validation:Enum=TLS;PostgreSQL;MySQL;HTTP;Job
 	Type ProbeType `json:"type"`
 
 	// Endpoint is the network address or URL tested by the probe.
+	// Format: "host:port" or "host:port/dbname" for database probes.
+	// Not used for Job probes.
 	// +kubebuilder:validation:Optional
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// QueryTimeout specifies probe timeout in seconds.
+	// Not used for Job probes (use spec.job.timeoutSeconds instead).
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Minimum=1
 	QueryTimeout int32 `json:"queryTimeout,omitempty"`
+
+	// Credentials explicitly maps secret keys to database credential fields.
+	// If not set, the probe falls back to well-known key name conventions.
+	// Not used for Job probes.
+	// +kubebuilder:validation:Optional
+	Credentials *ProbeCredentials `json:"credentials,omitempty"`
+
+	// Job configures the ephemeral batch/v1.Job to run as the validation probe.
+	// Required when Type is "Job"; ignored for all other probe types.
+	// +kubebuilder:validation:Optional
+	Job *JobProbeSpec `json:"job,omitempty"`
 }
 
 // RollbackConfig defines automated rollback rules and safety thresholds.

@@ -35,7 +35,7 @@ flowchart TD
             CRD["📄 DynamicSecretPolicy<br/>(CRD Instance)"]
             SEC_NEW["🔒 Immutable SecretRevision<br/>(app-rev-f5a6b7)"]
             CANARY["🐤 Canary Pod & NetworkPolicy<br/>(Network-Isolated Testing)"]
-            PROBES["🩺 Validation Probes<br/>(HTTP / TLS / PostgreSQL / MySQL)"]
+            PROBES["🩺 Validation Probes<br/>(HTTP / TLS / PostgreSQL / MySQL / Job)"]
             PROD["🚀 Production Workload<br/>(Zero-Downtime Rollover)"]
         end
     end
@@ -63,6 +63,7 @@ flowchart TD
 | **Immutable SecretRevisions** | Materializes cryptographically hashed, immutable Kubernetes Secrets (`<workload>-rev-<sha256>`), preventing in-place race conditions. |
 | **Progressive Canary Validation** | Spins up isolated canary workloads with strict `NetworkPolicy` ingress rules and executes synthetic validation probes before touching production. |
 | **Comprehensive Probe Engine** | Built-in probes for **HTTP**, **TLS** (certificate expiration and thumbprint matching), **PostgreSQL**, and **MySQL** (`SELECT 1`). |
+| **Extensible Job-Based Probes** | "Bring Your Own Container" (`type: Job`) lets users supply a standard `batch/v1.JobTemplateSpec` (e.g., `redis:alpine`, `kafka-consumer`, custom scripts). The operator creates the Job ephemerally in the target namespace, substitutes `{{REVISION_SECRET_NAME}}` as a placeholder, monitors completion, captures failure logs into CRD Conditions, and auto-cleans up — with zero driver bloat in the operator binary. |
 | **Anti-Leakage Error Sanitization** | Intercepts all database and transport errors, stripping passwords, tokens, and raw DSNs before emitting logs or OpenTelemetry spans. |
 | **In-Memory Zeroization** | Sensitive byte buffers and secret payloads are zeroed out in RAM (`ZeroBytes`) immediately after materialization. |
 | **Circuit Breaker & Backoff** | Exponential backoff and threshold-based circuit breaker halts retry storms and preserves intact production workloads on bad credential updates. |
@@ -70,11 +71,22 @@ flowchart TD
 
 ---
 
-## 🔐 Azure Prerequisites & RBAC Setup
+## 🔐 Azure Prerequisites & Infrastructure Setup
 
-DSO requires an **Azure User-Assigned Managed Identity** with federated credentials configured for your AKS cluster.
+You can provision all required Azure resources (Resource Group, Key Vault, Service Bus, Event Grid, AKS, and Workload Identity Federation) automatically or manually:
 
-### 1. Assign Azure RBAC Roles
+### Automated Provisioning (PowerShell)
+Execute the infrastructure provisioner script with minimal-cost SKUs (Free Tier AKS, Standard Key Vault, Basic Service Bus):
+
+```powershell
+.\setup-azure-resources.ps1 -ResourceGroupName "rg-dso-dev" -Location "eastus"
+```
+
+---
+
+### Manual Azure RBAC Setup
+
+#### 1. Assign Azure RBAC Roles
 Assign the Managed Identity permissions on your Key Vault and Service Bus namespace:
 
 ```bash
@@ -93,7 +105,7 @@ az role assignment create \
   --scope "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.ServiceBus/namespaces/<SERVICEBUS_NAME>"
 ```
 
-### 2. Establish Workload Identity Federation
+#### 2. Establish Workload Identity Federation
 ```bash
 az identity federated-credential create \
   --name "dso-federated-credential" \
@@ -110,13 +122,26 @@ az identity federated-credential create \
 
 ### 1. Install via Helm
 
+**PowerShell (Windows):**
+```powershell
+helm install dso ./deploy/helm/dso `
+  --namespace dso-system `
+  --create-namespace `
+  --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" `
+  --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" `
+  --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" `
+  --set azure.serviceBus.queueName="<QUEUE_NAME>"
+```
+
+**Bash (Linux / macOS):**
 ```bash
-# Add repository or install from local chart
 helm install dso ./deploy/helm/dso \
   --namespace dso-system \
   --create-namespace \
   --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" \
-  --set metrics.serviceMonitor.enabled=true
+  --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" \
+  --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" \
+  --set azure.serviceBus.queueName="<QUEUE_NAME>"
 ```
 
 ### 2. Define a `DynamicSecretPolicy`
@@ -179,11 +204,19 @@ DSO exposes Prometheus metrics on `:8080/metrics`:
 
 ## 💡 Production & Enterprise Examples
 
-Explore fully reproducible local kind examples:
-- [**Fullstack Database Rotation**](examples/fullstack-db-rotation/): End-to-end web dashboard demonstrating live PostgreSQL zero-downtime credential rotations.
-- [**TLS Certificate Rotation**](examples/tls-certificate-rotation/): Automated Azure Key Vault certificate rotation with native `kubernetes.io/tls` secret mapping and TLS probe validation.
-- [**Argo Rollouts Blue/Green**](examples/argo-rollouts-blue-green/): Progressive Blue/Green delivery with immutable SecretRevisions and automated preview validation cutover.
-- [**Nginx Color Canary Rollout**](examples/nginx-color-rotation/): Visualizing canary rollout transitions and Argo CD GitOps drift auto-patching.
+Explore our comprehensive reference architecture examples for both local testing and live cloud deployment:
+
+### 💻 Local (`kind`) Examples
+- [**Fullstack Database Rotation**](examples/local/fullstack-db-rotation/): Interactive web dashboard demonstrating live PostgreSQL zero-downtime credential rotations.
+- [**TLS Certificate Rotation**](examples/local/tls-certificate-rotation/): Automated Azure Key Vault certificate rotation with native `kubernetes.io/tls` secret mapping and TLS probe validation.
+- [**Argo Rollouts Blue/Green**](examples/local/argo-rollouts-blue-green/): Progressive Blue/Green delivery with immutable SecretRevisions and automated preview validation cutover.
+- [**Nginx Color Canary Rollout**](examples/local/nginx-color-rotation/): Visualizing canary rollout transitions and Argo CD GitOps drift auto-patching.
+
+### ☁️ Azure Kubernetes Service (AKS) Examples
+- [**AKS Fullstack DB Rotation**](examples/aks/fullstack-db-rotation/): Live AKS cluster integration with Azure Key Vault, Service Bus, and Workload Identity.
+- [**AKS Argo Rollouts Blue/Green**](examples/aks/argo-rollouts-blue-green/): Live AKS Blue/Green promotion triggered by Azure Key Vault rotations.
+- [**AKS TLS Certificate Rotation**](examples/aks/tls-certificate-rotation/): Live AKS TLS Gateway with Azure Key Vault SSL certificate auto-parsing.
+- [**AKS Nginx Color Canary**](examples/aks/nginx-color-rotation/): Live AKS Canary rollout with Argo CD `ignoreDifferences` auto-patching.
 
 ---
 

@@ -23,6 +23,8 @@ import (
 )
 
 // NewProbeExecutor routes to the corresponding ProbeExecutor implementation based on probe type.
+// For ProbeTypeJob, it returns (nil, nil) — callers must use ExecuteJobProbe directly since
+// Job probes require access to a controller-runtime client and the owning policy object.
 func NewProbeExecutor(probeType string) (ProbeExecutor, error) {
 	switch secretv1alpha1.ProbeType(probeType) {
 	case secretv1alpha1.ProbeTypeHTTP:
@@ -33,6 +35,10 @@ func NewProbeExecutor(probeType string) (ProbeExecutor, error) {
 		return &PostgresProbe{}, nil
 	case secretv1alpha1.ProbeTypeMySQL:
 		return &MySQLProbe{}, nil
+	case secretv1alpha1.ProbeTypeJob:
+		// Job probes are dispatched directly by the controller via JobProbe.Execute().
+		// Return nil, nil so the controller can detect and handle this case.
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unsupported probe type: %s", probeType)
 	}
