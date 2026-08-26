@@ -39,12 +39,18 @@ flowchart TD
     end
 
     subgraph K8s Cluster ["☸️ Kubernetes Cluster"]
-        DSO["⚙️ Dynamic Secret Operator"]
-        CRD["📄 DynamicSecretPolicy"]
-        SEC["🔒 Immutable SecretRevision<br/>(app-rev-f5a6b7)"]
-        CANARY["🐤 Canary Pod & NetPol<br/>(Network-Isolated Testing)"]
-        PROBES["🩺 Validation Probes<br/>(HTTP / TLS / Postgres / MySQL)"]
-        PROD["🚀 Production Workload<br/>(Deployment / Argo Rollout)"]
+        subgraph DSO Namespace ["dso-system"]
+            DSO["⚙️ Dynamic Secret Operator<br/>(Azure Workload Identity)"]
+            OTEL["📊 OpenTelemetry & Prometheus<br/>(:8080/metrics)"]
+        end
+
+        subgraph App Namespace ["Application Namespace"]
+            CRD["📄 DynamicSecretPolicy<br/>(CRD Instance)"]
+            SEC_NEW["🔒 Immutable SecretRevision<br/>(app-rev-f5a6b7)"]
+            CANARY["🐤 Canary Pod & NetworkPolicy<br/>(Network-Isolated Testing)"]
+            PROBES["🩺 Validation Probes<br/>(HTTP / TLS / PostgreSQL / MySQL / Job)"]
+            PROD["🚀 Production Workload<br/>(Zero-Downtime Rollover)"]
+        end
     end
 
     ASB -.->|"1. Outbound Pull (NACK on Backpressure)"| DSO
@@ -58,7 +64,21 @@ flowchart TD
     DSO -->|"6. Progressive Patch & Promote"| PROD
 ```
 
-## ✨ Key Features & Enterprise Capabilities
+---
+
+## ✨ Key Enterprise Capabilities
+
+| Feature | Description |
+| :--- | :--- |
+| **Zero-Trust Passwordless Auth** | Integrates exclusively with **Azure Workload Identity** using projected federated tokens. No static credentials, client secrets, or long-lived keys. |
+| **Immutable SecretRevisions** | Materializes cryptographically hashed, immutable Kubernetes Secrets (`<workload>-rev-<sha256>`), preventing in-place race conditions. |
+| **Progressive Canary Validation** | Spins up isolated canary workloads with strict `NetworkPolicy` ingress rules and executes synthetic validation probes before touching production. |
+| **Comprehensive Probe Engine** | Built-in probes for **HTTP**, **TLS** (certificate expiration and thumbprint matching), **PostgreSQL**, and **MySQL** (`SELECT 1`). |
+| **Extensible Job-Based Probes** | "Bring Your Own Container" (`type: Job`) lets users supply a standard `batch/v1.JobTemplateSpec` (e.g., `redis:alpine`, `kafka-consumer`, custom scripts). The operator creates the Job ephemerally in the target namespace, substitutes `{{REVISION_SECRET_NAME}}` as a placeholder, monitors completion, captures failure logs into CRD Conditions, and auto-cleans up — with zero driver bloat in the operator binary. |
+| **Anti-Leakage Error Sanitization** | Intercepts all database and transport errors, stripping passwords, tokens, and raw DSNs before emitting logs or OpenTelemetry spans. |
+| **In-Memory Zeroization** | Sensitive byte buffers and secret payloads are zeroed out in RAM (`ZeroBytes`) immediately after materialization. |
+| **Circuit Breaker & Backoff** | Exponential backoff and threshold-based circuit breaker halts retry storms and preserves intact production workloads on bad credential updates. |
+| **Supply Chain Security** | Built on zero-CVE **Chainguard Static Distroless**, cryptographically signed keylessly via **Sigstore / Cosign OIDC**, with attached **SPDX SBOMs**. |
 
 *   **🛡️ Immutable Revisions (ADR-002):** Eliminates in-place mutation drift. Rotations generate unique, immutable SecretRevisions (`<workload>-rev-<sha256>`). Production pods are entirely shielded from bad credentials until the new revision passes all canary tests.
 *   **🩺 Comprehensive Validation Probes:** Ship with confidence using built-in synthetic probes for **PostgreSQL**, **MySQL** (executing `SELECT 1`), **HTTP/S**, and **TLS** (validating certificate expiration and SHA-256 thumbprint matching).
@@ -70,18 +90,49 @@ flowchart TD
     *   **Backpressure Handling:** Leverages Azure Service Bus Peek-Lock with explicit timeout context NACKs to ensure rotation events are safely preserved during cluster CPU/Queue saturation.
 *   **🚥 Native Rollout Compatibility:** Works natively with standard Kubernetes `Deployment`, `StatefulSet`, and `DaemonSet` resources, as well as native support for **Argo Rollouts (Blue/Green)** for advanced traffic shifting.
 
-## 🚀 Quickstart Guide
+## 🔐 Azure Prerequisites & Infrastructure Setup
 
-### 1. Installation
+You can provision all required Azure resources (Resource Group, Key Vault, Service Bus, Event Grid, AKS, and Workload Identity Federation) automatically or manually:
 
-Install DSO via Helm. DSO requires zero inbound ingress, communicating entirely via outbound Workload Identity.
+### Automated Provisioning (PowerShell)
+Execute the infrastructure provisioner script with minimal-cost SKUs (Free Tier AKS, Standard Key Vault, Basic Service Bus):
+
+```powershell
+.\setup-azure-resources.ps1 -ResourceGroupName "rg-dso-dev" -Location "eastus"
+```
+
+---
+
+### Manual Azure RBAC Setup
+
+#### 1. Assign Azure RBAC Roles
+Assign the Managed Identity permissions on your Key Vault and Service Bus namespace:
 
 ```bash
-helm repo add quantumsys-dev https://charts.quantumsys.dev
-helm install dso quantumsys-dev/dynamic-secret-operator \
-  --namespace dso-system \
-  --create-namespace \
-  --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>"
+# 1. Key Vault Secrets User (Read-only secret retrieval)
+az role assignment create \
+  --role "Key Vault Secrets User" \
+  --assignee-object-id "<MANAGED_IDENTITY_OBJECT_ID>" \
+  --assignee-principal-type "ServicePrincipal" \
+  --scope "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.KeyVault/vaults/<VAULT_NAME>"
+
+# 2. Azure Service Bus Data Receiver (Peek-Lock message consumption)
+az role assignment create \
+  --role "Azure Service Bus Data Receiver" \
+  --assignee-object-id "<MANAGED_IDENTITY_OBJECT_ID>" \
+  --assignee-principal-type "ServicePrincipal" \
+  --scope "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.ServiceBus/namespaces/<SERVICEBUS_NAME>"
+```
+
+#### 2. Establish Workload Identity Federation
+```bash
+az identity federated-credential create \
+  --name "dso-federated-credential" \
+  --identity-name "<MANAGED_IDENTITY_NAME>" \
+  --resource-group "<RG>" \
+  --issuer "<AKS_OIDC_ISSUER_URL>" \
+  --subject "system:serviceaccount:dso-system:dso-dynamic-secret-operator" \
+  --audience "api://AzureADTokenExchange"
 ```
 
 ### 2. Explore the Examples (`kind` Ready)
@@ -92,10 +143,26 @@ We provide comprehensive, end-to-end examples utilizing a local `kind` cluster. 
 *   **[Native TLS Certificate Rotation (`examples/tls-certificate-rotation`)](examples/tls-certificate-rotation/):** Watch DSO pull a raw PEM certificate, split it into `tls.crt`/`tls.key`, execute cryptographic TLS handshake probes, and rotate an Nginx Gateway without dropping connections.
 *   **[Nginx Color Canary (`examples/nginx-color-rotation`)](examples/nginx-color-rotation/):** A visual demonstration of Immutable SecretRevisions, canary transitions, and automatic Argo CD GitOps drift auto-patching.
 
-To run any example locally:
+**PowerShell (Windows):**
+```powershell
+helm install dso ./deploy/helm/dso `
+  --namespace dso-system `
+  --create-namespace `
+  --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" `
+  --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" `
+  --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" `
+  --set azure.serviceBus.queueName="<QUEUE_NAME>"
+```
+
+**Bash (Linux / macOS):**
 ```bash
-cd examples/tls-certificate-rotation
-./setup-kind.sh
+helm install dso ./deploy/helm/dso \
+  --namespace dso-system \
+  --create-namespace \
+  --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" \
+  --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" \
+  --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" \
+  --set azure.serviceBus.queueName="<QUEUE_NAME>"
 ```
 
 ## 📖 CRD API Reference Summary
@@ -141,10 +208,27 @@ spec:
 
 DSO's core rotation engine—the state machine, immutable revisions, canary provisioner, and probe executor—is entirely provider-agnostic. 
 
-While the current V1 release is heavily optimized for **Azure (Key Vault + Service Bus + Workload Identity)**, the architecture is designed for modular extensibility. Our upcoming roadmap includes native provider plugins for:
-*   ☁️ **AWS Secrets Manager & SQS** (via IRSA)
-*   ☁️ **Google Secret Manager & Pub/Sub** (via Workload Identity Federation)
-*   🏰 **HashiCorp Vault & RabbitMQ / Kafka**
+---
+
+## 💡 Production & Enterprise Examples
+
+Explore our comprehensive reference architecture examples for both local testing and live cloud deployment:
+
+### 💻 Local (`kind`) Examples
+- [**Fullstack Database Rotation**](examples/local/fullstack-db-rotation/): Interactive web dashboard demonstrating live PostgreSQL zero-downtime credential rotations.
+- [**TLS Certificate Rotation**](examples/local/tls-certificate-rotation/): Automated Azure Key Vault certificate rotation with native `kubernetes.io/tls` secret mapping and TLS probe validation.
+- [**Argo Rollouts Blue/Green**](examples/local/argo-rollouts-blue-green/): Progressive Blue/Green delivery with immutable SecretRevisions and automated preview validation cutover.
+- [**Nginx Color Canary Rollout**](examples/local/nginx-color-rotation/): Visualizing canary rollout transitions and Argo CD GitOps drift auto-patching.
+
+### ☁️ Azure Kubernetes Service (AKS) Examples
+- [**AKS Fullstack DB Rotation**](examples/aks/fullstack-db-rotation/): Live AKS cluster integration with Azure Key Vault, Service Bus, and Workload Identity.
+- [**AKS Argo Rollouts Blue/Green**](examples/aks/argo-rollouts-blue-green/): Live AKS Blue/Green promotion triggered by Azure Key Vault rotations.
+- [**AKS TLS Certificate Rotation**](examples/aks/tls-certificate-rotation/): Live AKS TLS Gateway with Azure Key Vault SSL certificate auto-parsing.
+- [**AKS Nginx Color Canary**](examples/aks/nginx-color-rotation/): Live AKS Canary rollout with Argo CD `ignoreDifferences` auto-patching.
+
+---
+
+## 📚 Architecture Decision Records (ADRs)
 
 We actively welcome community contributions, PRs, and provider plugin development to help make DSO the universal standard for progressive secret delivery across all major cloud providers.
 

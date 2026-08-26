@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -95,9 +96,12 @@ type DynamicSecretPolicyReconciler struct {
 // +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get;list
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=argoproj.io,resources=rollouts;applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -397,6 +401,8 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 }
 
 // runValidationProbes iterates over configured probes and executes them sequentially against the canary workload.
+// Job-type probes are dispatched directly via probes.JobProbe.Execute (which needs the k8s client and
+// the owning policy); all other probe types go through the ProbeRunner/ProbeExecutor pipeline.
 func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) error {
 	if len(policy.Spec.ValidationProbes) == 0 {
 		return nil
@@ -425,16 +431,30 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 			if err != nil {
 				return err
 			}
+			if executor == nil {
+				// executor == nil signals a Job probe — dispatch through JobProbe directly.
+				return (&probes.JobProbe{}).Execute(pCtx, r.Client, policy, probe, secretData)
+			}
 			return executor.Execute(pCtx, probe, secretData)
 		}
 	}
 
 	for _, probe := range policy.Spec.ValidationProbes {
-		timeout := 15 * time.Second
-		if probe.QueryTimeout > 0 {
-			timeout = time.Duration(probe.QueryTimeout) * time.Second
+		var probeCtx context.Context
+		var probeCancel context.CancelFunc
+
+		if probe.Type == secretv1alpha1.ProbeTypeJob {
+			// Job probes manage their own timeout via spec.job.timeoutSeconds.
+			// Pass the parent ctx without an additional timeout layer here.
+			probeCtx, probeCancel = context.WithCancel(ctx)
+		} else {
+			timeout := 15 * time.Second
+			if probe.QueryTimeout > 0 {
+				timeout = time.Duration(probe.QueryTimeout) * time.Second
+			}
+			probeCtx, probeCancel = context.WithTimeout(ctx, timeout)
 		}
-		probeCtx, probeCancel := context.WithTimeout(ctx, timeout)
+
 		start := time.Now()
 		err := runner(probeCtx, probe, secret.Data)
 		probeCancel()
@@ -649,8 +669,20 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
-		Owns(&appsv1.DaemonSet{}).
-		Owns(&argorolloutsv1alpha1.Rollout{})
+		Owns(&appsv1.DaemonSet{})
+
+	// Check if optional Argo Rollouts CRD is installed in the cluster RESTMapper
+	gvk := schema.GroupVersionKind{
+		Group:   "argoproj.io",
+		Version: "v1alpha1",
+		Kind:    "Rollout",
+	}
+	if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err == nil {
+		builder = builder.Owns(&argorolloutsv1alpha1.Rollout{})
+		ctrl.Log.Info("Argo Rollouts CRD detected; enabling Rollout watch")
+	} else {
+		ctrl.Log.Info("Argo Rollouts CRD not detected in cluster; skipping Rollout watch")
+	}
 
 	if r.EventsChannel != nil {
 		builder = builder.WatchesRawSource(source.Channel(r.EventsChannel, &handler.EnqueueRequestForObject{}))

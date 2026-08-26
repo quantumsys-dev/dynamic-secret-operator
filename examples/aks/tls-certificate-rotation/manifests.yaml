@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tls-nginx-config
+  namespace: default
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 8443 ssl;
+        server_name localhost;
+
+        ssl_certificate     /etc/ssl/certs/tls.crt;
+        ssl_certificate_key /etc/ssl/certs/tls.key;
+
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+
+        location / {
+          default_type application/json;
+          return 200 '{"status":"ok","tls":"active","message":"Secure TLS gateway on AKS running with DSO managed certificate"}\n';
+        }
+
+        location /health {
+          default_type text/plain;
+          return 200 'healthy\n';
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tls-gateway
+  namespace: default
+  labels:
+    app: tls-gateway
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: tls-gateway
+  template:
+    metadata:
+      labels:
+        app: tls-gateway
+    spec:
+      containers:
+        - name: gateway
+          image: nginx:alpine
+          ports:
+            - containerPort: 8443
+              name: https
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: tls-cert-volume
+              mountPath: /etc/ssl/certs
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: tls-nginx-config
+        - name: tls-cert-volume
+          secret:
+            secretName: tls-gateway-ingress-tls-cert-initial
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tls-gateway
+  namespace: default
+spec:
+  selector:
+    app: tls-gateway
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+  type: ClusterIP
+---
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: aks-ingress-tls-policy
+  namespace: default
+spec:
+  vaultRef:
+    keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
+    objectName: "ingress-tls-cert"
+    objectType: "Certificate"
+  workloadSelector:
+    kind: "Deployment"
+    name: "tls-gateway"
+  targetRef:
+    volumeName: "tls-cert-volume"
+  validationProbes:
+    - type: "TLS"
+      endpoint: "127.0.0.1:8443"
+      queryTimeout: 10
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

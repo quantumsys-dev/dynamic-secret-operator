@@ -1,0 +1,243 @@
+---
+# Redis Deployment — the target workload whose AUTH password is rotated by DSO.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-master
+  namespace: production
+  labels:
+    app: redis-master
+    app.kubernetes.io/instance: dso-redis-probe-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-master
+  template:
+    metadata:
+      labels:
+        app: redis-master
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-master-redis-auth-password-initial
+                  key: redis-auth-password
+                  optional: true
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - --no-auth-warning
+                - PING
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+# Redis consumer app — a sample workload that reads redis AUTH from a secret env var.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-consumer
+  namespace: production
+  labels:
+    app: redis-consumer
+    app.kubernetes.io/instance: dso-redis-probe-demo
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: redis-consumer
+  template:
+    metadata:
+      labels:
+        app: redis-consumer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: app
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # Simulates a consumer app that periodically pings Redis using the injected password.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while true; do
+                RESULT=$(redis-cli -h redis-master.production.svc.cluster.local \
+                  -a "$REDIS_AUTH_PASSWORD" --no-auth-warning PING 2>/dev/null || echo "ERROR")
+                echo "$(date -u): redis-ping=$RESULT"
+                sleep 15
+              done
+          env:
+            - name: REDIS_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-consumer-redis-auth-password-initial
+                  key: redis-auth-password
+                  optional: true
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "50m"
+              memory: "32Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master
+  namespace: production
+spec:
+  selector:
+    app: redis-master
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP
+---
+# DynamicSecretPolicy — monitors Key Vault for Redis AUTH password rotations,
+# runs an ephemeral redis:alpine Job probe to validate the new credentials,
+# and promotes the consumer workload only if PING succeeds.
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: redis-cache-rotation
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: dynamic-secret-operator
+    app.kubernetes.io/component: cache
+spec:
+  # 1. Azure Key Vault Reference
+  vaultRef:
+    keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
+    objectName: "redis-auth-password"
+    objectType: Secret
+
+  # 2. Target workload — the consumer deployment that mounts the Redis secret.
+  workloadSelector:
+    kind: Deployment
+    name: redis-consumer
+
+  # 3. Inject the rotated secret as an environment variable into the app container.
+  targetRef:
+    containerName: app
+    envName: REDIS_AUTH_PASSWORD
+
+  # 4. Canary strategy — allow 60 s for the probe Job + rollout.
+  canaryStrategy:
+    timeoutSeconds: 60
+
+  # 5. Job-based validation probe using the official redis:alpine image.
+  #    The operator substitutes {{REVISION_SECRET_NAME}} with the name of the
+  #    materialized Kubernetes Secret before creating the Job.
+  validationProbes:
+    - type: Job
+      job:
+        # Maximum seconds to wait for the probe Job to complete.
+        timeoutSeconds: 30
+        jobTemplate:
+          spec:
+            backoffLimit: 0
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/component: probe
+                  dso.quantumsys.dev/probe-type: redis
+              spec:
+                restartPolicy: Never
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 65534
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: redis-ping
+                    image: redis:7-alpine
+                    imagePullPolicy: IfNotPresent
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        drop: ["ALL"]
+                      readOnlyRootFilesystem: true
+                    env:
+                      - name: REDIS_HOST
+                        value: "redis-master.production.svc.cluster.local"
+                      - name: REDIS_PORT
+                        value: "6379"
+                      - name: REDIS_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            # {{REVISION_SECRET_NAME}} is replaced at runtime by the operator.
+                            name: "{{REVISION_SECRET_NAME}}"
+                            key: redis-auth-password
+                    command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        set -e
+                        echo "DSO Job Probe: validating Redis AUTH with new secret revision…"
+                        RESULT=$(redis-cli \
+                          -h "$REDIS_HOST" \
+                          -p "$REDIS_PORT" \
+                          -a "$REDIS_PASSWORD" \
+                          --no-auth-warning \
+                          PING)
+                        if [ "$RESULT" != "PONG" ]; then
+                          echo "ERROR: Redis PING returned unexpected result: '$RESULT'" >&2
+                          exit 1
+                        fi
+                        echo "SUCCESS: Redis PING returned PONG — new credentials are valid."
+                    resources:
+                      requests:
+                        cpu: "10m"
+                        memory: "16Mi"
+                      limits:
+                        cpu: "50m"
+                        memory: "32Mi"
+
+  # 6. Rollback configuration.
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

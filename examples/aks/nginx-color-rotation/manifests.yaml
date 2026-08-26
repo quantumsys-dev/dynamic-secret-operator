@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-color-template
+  namespace: default
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name localhost;
+      
+      location / {
+        default_type text/html;
+        return 200 '<!DOCTYPE html><html><body style="background-color: {{BG_COLOR}}; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif;"><h1>Dynamic Secret Operator – Live on AKS</h1></body></html>\n';
+      }
+
+      location /health {
+        default_type text/plain;
+        return 200 'healthy\n';
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-color-app
+  namespace: default
+  labels:
+    app: nginx-color-app
+    app.kubernetes.io/instance: dso-color-demo
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: nginx-color-app
+  template:
+    metadata:
+      labels:
+        app: nginx-color-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              COLOR=$(cat /mnt/secrets/nginx-bg-color 2>/dev/null || echo "#3b82f6")
+              sed "s/{{BG_COLOR}}/$COLOR/g" /etc/nginx/templates/default.conf > /etc/nginx/conf.d/default.conf
+              exec nginx -g "daemon off;"
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: template-volume
+              mountPath: /etc/nginx/templates
+            - name: color-secret-volume
+              mountPath: /mnt/secrets
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: template-volume
+          configMap:
+            name: nginx-color-template
+        - name: color-secret-volume
+          secret:
+            secretName: nginx-color-app-nginx-bg-color-initial
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-color-app
+  namespace: default
+spec:
+  selector:
+    app: nginx-color-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+---
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: aks-nginx-color-policy
+  namespace: default
+spec:
+  vaultRef:
+    keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
+    objectName: "nginx-bg-color"
+    objectType: "Secret"
+  workloadSelector:
+    kind: "Deployment"
+    name: "nginx-color-app"
+  targetRef:
+    volumeName: "color-secret-volume"
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://nginx-color-app.default.svc.cluster.local:80/health"
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
