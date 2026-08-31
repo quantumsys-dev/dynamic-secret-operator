@@ -31,7 +31,7 @@ param(
     [string]$IdentityName = "id-dso-dev",
 
     [Parameter(Mandatory = $false)]
-    [string]$KeyVaultName = "kv-dso-dev",
+    [string]$KeyVaultName = "kv-dso-dev-jc",
 
     [Parameter(Mandatory = $false)]
     [string]$ServiceBusNamespace = "sb-dso-dev",
@@ -52,7 +52,7 @@ param(
     [string]$ServiceAccountName = "dso-dynamic-secret-operator",
 
     [Parameter(Mandatory = $false)]
-    [string]$NodeVmSize = "standard_d2s_v3"
+    [string]$NodeVmSize = "standard_b2ps_v2"
 )
 
 $ErrorActionPreference = "Stop"

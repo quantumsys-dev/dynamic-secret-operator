@@ -47,32 +47,54 @@ if (-not $currentContext) {
 }
 Write-Success "Using Kubernetes Context: $currentContext"
 
-# 3. Seed initial secret in Azure Key Vault if not exists
+# 3. Check Key Vault accessibility
+Write-Step "Verifying access to Azure Key Vault '$KeyVaultName'..."
+$kvCheck = az keyvault show --name $KeyVaultName 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to access Key Vault '$KeyVaultName'. Please verify the name and your Azure permissions.`nDetails: $kvCheck"
+}
+Write-Success "Key Vault '$KeyVaultName' verified."
+
+# 4. Seed initial secret in Azure Key Vault if not exists
 Write-Step "Checking secret 'nginx-bg-color' in Azure Key Vault '$KeyVaultName'..."
 $secretCheck = az keyvault secret show --vault-name $KeyVaultName --name "nginx-bg-color" 2>$null
 if (-not $secretCheck) {
     Write-Info "Creating initial secret 'nginx-bg-color' in Key Vault..."
-    az keyvault secret set `
+    $setOut = az keyvault secret set `
         --vault-name $KeyVaultName `
         --name "nginx-bg-color" `
         --value "#3b82f6" `
-        --output none
+        --output none 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create secret 'nginx-bg-color' in Key Vault '$KeyVaultName'.`nDetails: $setOut"
+    }
     Write-Success "Initial secret 'nginx-bg-color' seeded in Key Vault."
 } else {
     Write-Info "Secret 'nginx-bg-color' already exists in Key Vault."
 }
 
-# 4. Apply manifests with Key Vault replacement
+# 5. Apply manifests with Key Vault replacement
 Write-Step "Deploying Nginx Color App and DynamicSecretPolicy manifests..."
 $manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
+if (-not (Test-Path $manifestPath)) {
+    throw "Manifest file not found: $manifestPath"
+}
 $manifestContent = Get-Content $manifestPath -Raw
 $manifestContent = $manifestContent -replace '\$\{KEYVAULT_NAME\}', $KeyVaultName
 
-$manifestContent | kubectl apply -f -
+$applyOut = $manifestContent | kubectl apply -f - 2>&1
+Write-Host $applyOut
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to apply manifests.`nDetails: $applyOut"
+}
 
-# 5. Wait for deployment to be ready
+# 6. Wait for deployment to be ready
 Write-Info "Waiting for Nginx Color App deployment to become ready..."
-kubectl rollout status deployment/nginx-color-app --timeout=120s
+$rolloutOut = kubectl rollout status deployment/nginx-color-app --timeout=120s 2>&1
+Write-Host $rolloutOut
+if ($LASTEXITCODE -ne 0) {
+    throw "Deployment rollout failed or timed out.`nDetails: $rolloutOut"
+}
 
 Write-Host "`n==================================================================" -ForegroundColor Green
 Write-Host "✅ Nginx Color Rotation Example deployed successfully on AKS!" -ForegroundColor Green
@@ -92,3 +114,4 @@ Next Steps:
 4. Watch DSO promote the workload with zero downtime!
 ==================================================================
 "@ -ForegroundColor Cyan
+

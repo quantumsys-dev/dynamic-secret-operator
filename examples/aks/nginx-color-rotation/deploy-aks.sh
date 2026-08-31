@@ -43,7 +43,15 @@ if [ -z "${CURRENT_CONTEXT}" ]; then
 fi
 echo "☸️  Using Kubernetes Context: ${CURRENT_CONTEXT}"
 
-# 3. Seed initial secret in Azure Key Vault if not exists
+# 3. Verify Key Vault accessibility
+echo "🔑 Verifying access to Azure Key Vault '${KEYVAULT_NAME}'..."
+if ! az keyvault show --name "${KEYVAULT_NAME}" >/dev/null 2>&1; then
+    echo "❌ Error: Unable to access Key Vault '${KEYVAULT_NAME}'. Please verify the name and your Azure permissions."
+    exit 1
+fi
+echo "✅ Key Vault '${KEYVAULT_NAME}' verified."
+
+# 4. Seed initial secret in Azure Key Vault if not exists
 echo "🔑 Checking secret 'nginx-bg-color' in Azure Key Vault '${KEYVAULT_NAME}'..."
 if ! az keyvault secret show --vault-name "${KEYVAULT_NAME}" --name "nginx-bg-color" >/dev/null 2>&1; then
     echo "ℹ️  Creating initial secret 'nginx-bg-color' in Key Vault..."
@@ -51,27 +59,31 @@ if ! az keyvault secret show --vault-name "${KEYVAULT_NAME}" --name "nginx-bg-co
         --vault-name "${KEYVAULT_NAME}" \
         --name "nginx-bg-color" \
         --value "#3b82f6" \
-        --output none
+        --output none || { echo "❌ Error: Failed to create secret 'nginx-bg-color' in Key Vault '${KEYVAULT_NAME}'."; exit 1; }
     echo "✅ Initial secret 'nginx-bg-color' seeded in Key Vault."
 else
     echo "ℹ️  Secret 'nginx-bg-color' already exists in Key Vault."
 fi
 
-# 4. Install DSO CRD if not present
+# 5. Install DSO CRD if not present
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 if [ -d "${REPO_ROOT}/config/crd" ]; then
     echo "🛠️  Applying DynamicSecretPolicy CRD..."
-    kubectl apply -k "${REPO_ROOT}/config/crd"
+    kubectl apply -k "${REPO_ROOT}/config/crd" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
 fi
 
-# 5. Apply manifests with Key Vault replacement
+# 6. Apply manifests with Key Vault replacement
 echo "📄 Deploying Nginx Color App and DynamicSecretPolicy manifests..."
-sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f -
+if [ ! -f "${SCRIPT_DIR}/manifests.yaml" ]; then
+    echo "❌ Error: Manifest file not found at ${SCRIPT_DIR}/manifests.yaml"
+    exit 1
+fi
+sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
 echo "⏳ Waiting for Nginx Color App deployment to be ready..."
-kubectl rollout status deployment/nginx-color-app --timeout=120s
+kubectl rollout status deployment/nginx-color-app --timeout=120s || { echo "❌ Error: Deployment rollout failed or timed out."; exit 1; }
 
 echo "=================================================================="
 echo "✅ Nginx Color Rotation Example deployed successfully on AKS!"
@@ -82,3 +94,4 @@ echo "2. Open http://localhost:8080"
 echo "3. Trigger a rotation in Key Vault:"
 echo "   az keyvault secret set --vault-name ${KEYVAULT_NAME} --name 'nginx-bg-color' --value '#10b981'"
 echo "=================================================================="
+
