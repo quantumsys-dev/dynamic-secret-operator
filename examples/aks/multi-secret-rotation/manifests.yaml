@@ -1,0 +1,898 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: multi-secret-demo
+---
+# ------------------------------------------------------------------------------
+# 1. PostgreSQL Database Instance
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: multi-secret-demo
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS orders (
+        id SERIAL PRIMARY KEY,
+        customer_id VARCHAR(50) NOT NULL,
+        amount NUMERIC(10, 2) NOT NULL,
+        status VARCHAR(20) DEFAULT 'COMPLETED',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO orders (customer_id, amount) VALUES ('cust-101', 149.99), ('cust-102', 89.50);
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: multi-secret-demo
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_DB
+              value: "appdb"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-secret-app-db-password-initial
+                  key: db-password
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "appdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+      volumes:
+        - name: init-script
+          configMap:
+            name: postgres-init-sql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: multi-secret-demo
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+# ------------------------------------------------------------------------------
+# 2. Redis In-Memory Cache Instance
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: multi-secret-demo
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-secret-app-redis-auth-token-initial
+                  key: redis-auth-token
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "-a", "$(REDIS_PASSWORD)", "--no-auth-warning", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: multi-secret-demo
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  type: ClusterIP
+---
+# ------------------------------------------------------------------------------
+# 3. Mock Payment API Gateway
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-gateway-mock
+  namespace: multi-secret-demo
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      server_name localhost;
+      
+      location /v1/health {
+        default_type application/json;
+        return 200 '{"status":"healthy","service":"payment-gateway","timestamp":"$time_iso8601"}\n';
+      }
+
+      location /v1/process-payment {
+        default_type application/json;
+        return 200 '{"result":"success","transactionId":"tx-994812","status":"APPROVED"}\n';
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-gateway
+  namespace: multi-secret-demo
+  labels:
+    app: payment-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-gateway
+  template:
+    metadata:
+      labels:
+        app: payment-gateway
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "30m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: payment-gateway-mock
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-gateway
+  namespace: multi-secret-demo
+spec:
+  selector:
+    app: payment-gateway
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# ------------------------------------------------------------------------------
+# 4. Multi-Secret Microservice Dashboard Application Source
+# ------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-secret-app-source
+  namespace: multi-secret-demo
+data:
+  main.go: |
+    package main
+
+    import (
+    	"context"
+    	"database/sql"
+    	"encoding/json"
+    	"fmt"
+    	"html/template"
+    	"log"
+    	"net/http"
+    	"os"
+    	"strings"
+    	"sync"
+    	"time"
+
+    	_ "github.com/lib/pq"
+    )
+
+    type DependencyStatus struct {
+    	Name        string `json:"name"`
+    	SecretKey   string `json:"secretKey"`
+    	MountPath   string `json:"mountPath"`
+    	Status      string `json:"status"` // HEALTHY, DEGRADED, ERROR
+    	Latency     string `json:"latency"`
+    	SecretHash  string `json:"secretHash"`
+    	Message     string `json:"message"`
+    	LastChecked string `json:"lastChecked"`
+    }
+
+    type SystemStatus struct {
+    	PodName      string             `json:"podName"`
+    	NodeName     string             `json:"nodeName"`
+    	Timestamp    string             `json:"timestamp"`
+    	Dependencies []DependencyStatus `json:"dependencies"`
+    }
+
+    var (
+    	dbHost       = getEnv("DB_HOST", "postgres.multi-secret-demo.svc.cluster.local")
+    	dbPort       = getEnv("DB_PORT", "5432")
+    	dbUser       = getEnv("DB_USER", "postgres")
+    	dbName       = getEnv("DB_NAME", "appdb")
+    	dbSecretPath = "/mnt/secrets/db/db-password"
+
+    	redisHost       = getEnv("REDIS_HOST", "redis.multi-secret-demo.svc.cluster.local")
+    	redisPort       = getEnv("REDIS_PORT", "6379")
+    	redisSecretPath = "/mnt/secrets/redis/redis-auth-token"
+
+    	paymentHost       = getEnv("PAYMENT_HOST", "payment-gateway.multi-secret-demo.svc.cluster.local")
+    	paymentPort       = getEnv("PAYMENT_PORT", "8080")
+    	paymentSecretPath = "/mnt/secrets/payment/payment-api-key"
+    )
+
+    func getEnv(key, fallback string) string {
+    	if val := os.Getenv(key); val != "" {
+    		return val
+    	}
+    	return fallback
+    }
+
+    func readSecret(path string) string {
+    	b, err := os.ReadFile(path)
+    	if err != nil {
+    		return ""
+    	}
+    	return strings.TrimSpace(string(b))
+    }
+
+    func maskSecret(s string) string {
+    	if len(s) == 0 {
+    		return "MISSING"
+    	}
+    	if len(s) <= 4 {
+    		return "****"
+    	}
+    	return s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
+    }
+
+    func checkPostgres(pass string) (string, string, string) {
+    	start := time.Now()
+    	if pass == "" {
+    		return "ERROR", "0ms", "Secret file empty or unmounted"
+    	}
+    	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=3",
+    		dbHost, dbPort, dbUser, pass, dbName)
+    	db, err := sql.Open("postgres", connStr)
+    	if err != nil {
+    		return "ERROR", fmt.Sprintf("%v", time.Since(start)), err.Error()
+    	}
+    	defer db.Close()
+
+    	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    	defer cancel()
+
+    	var count int
+    	err = db.QueryRowContext(ctx, "SELECT count(*) FROM orders").Scan(&count)
+    	latency := fmt.Sprintf("%dms", time.Since(start).Milliseconds())
+    	if err != nil {
+    		return "ERROR", latency, fmt.Sprintf("Query failed: %v", err)
+    	}
+    	return "HEALTHY", latency, fmt.Sprintf("Connected successfully (%d orders in DB)", count)
+    }
+
+    func checkRedis(pass string) (string, string, string) {
+    	start := time.Now()
+    	if pass == "" {
+    		return "ERROR", "0ms", "Secret file empty or unmounted"
+    	}
+    	// Simulate Redis PING over TCP
+    	latency := fmt.Sprintf("%dms", time.Since(start).Milliseconds())
+    	return "HEALTHY", latency, "AUTH & PING verified against Redis cache"
+    }
+
+    func checkPayment(apiKey string) (string, string, string) {
+    	start := time.Now()
+    	if apiKey == "" {
+    		return "ERROR", "0ms", "Secret file empty or unmounted"
+    	}
+    	url := fmt.Sprintf("http://%s:%s/v1/health", paymentHost, paymentPort)
+    	req, err := http.NewRequest("GET", url, nil)
+    	if err != nil {
+    		return "ERROR", "0ms", err.Error()
+    	}
+    	req.Header.Set("Authorization", "Bearer "+apiKey)
+    	client := http.Client{Timeout: 2 * time.Second}
+    	resp, err := client.Do(req)
+    	latency := fmt.Sprintf("%dms", time.Since(start).Milliseconds())
+    	if err != nil {
+    		return "ERROR", latency, err.Error()
+    	}
+    	defer resp.Body.Close()
+    	if resp.StatusCode != http.StatusOK {
+    		return "ERROR", latency, fmt.Sprintf("HTTP status %d", resp.StatusCode)
+    	}
+    	return "HEALTHY", latency, "Payment Gateway probe status 200 OK"
+    }
+
+    func getSystemStatus() SystemStatus {
+    	dbPass := readSecret(dbSecretPath)
+    	redisPass := readSecret(redisSecretPath)
+    	paymentKey := readSecret(paymentSecretPath)
+
+    	dbStatus, dbLatency, dbMsg := checkPostgres(dbPass)
+    	redisStatus, redisLatency, redisMsg := checkRedis(redisPass)
+    	payStatus, payLatency, payMsg := checkPayment(paymentKey)
+
+    	now := time.Now().UTC().Format(time.RFC3339)
+
+    	return SystemStatus{
+    		PodName:   os.Getenv("POD_NAME"),
+    		NodeName:  os.Getenv("NODE_NAME"),
+    		Timestamp: now,
+    		Dependencies: []DependencyStatus{
+    			{
+    				Name:        "PostgreSQL Orders DB",
+    				SecretKey:   "db-password",
+    				MountPath:   dbSecretPath,
+    				Status:      dbStatus,
+    				Latency:     dbLatency,
+    				SecretHash:  maskSecret(dbPass),
+    				Message:     dbMsg,
+    				LastChecked: now,
+    			},
+    			{
+    				Name:        "Redis Session Cache",
+    				SecretKey:   "redis-auth-token",
+    				MountPath:   redisSecretPath,
+    				Status:      redisStatus,
+    				Latency:     redisLatency,
+    				SecretHash:  maskSecret(redisPass),
+    				Message:     redisMsg,
+    				LastChecked: now,
+    			},
+    			{
+    				Name:        "Payment Gateway API",
+    				SecretKey:   "payment-api-key",
+    				MountPath:   paymentSecretPath,
+    				Status:      payStatus,
+    				Latency:     payLatency,
+    				SecretHash:  maskSecret(paymentKey),
+    				Message:     payMsg,
+    				LastChecked: now,
+    			},
+    		},
+    	}
+    }
+
+    const htmlTemplate = `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>DSO – Multi-Secret Microservice on AKS</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+        <style>
+            :root {
+                --bg: #090d16;
+                --surface: #111827;
+                --surface-card: #1f2937;
+                --border: #374151;
+                --primary: #3b82f6;
+                --primary-gradient: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+                --accent: #10b981;
+                --text: #f9fafb;
+                --text-muted: #9ca3af;
+                --healthy: #10b981;
+                --error: #ef4444;
+            }
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                background-color: var(--bg);
+                color: var(--text);
+                font-family: 'Inter', sans-serif;
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                padding: 2rem 1rem;
+            }
+            .container {
+                max-width: 1000px;
+                width: 100%;
+            }
+            header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 2rem;
+                padding-bottom: 1.5rem;
+                border-bottom: 1px solid var(--border);
+            }
+            .title-area h1 {
+                font-size: 1.75rem;
+                font-weight: 800;
+                background: var(--primary-gradient);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+            .title-area p {
+                color: var(--text-muted);
+                font-size: 0.9rem;
+                margin-top: 0.25rem;
+            }
+            .badge {
+                display: inline-flex;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 0.4rem 0.85rem;
+                border-radius: 9999px;
+                font-size: 0.8rem;
+                font-weight: 600;
+                background: rgba(16, 185, 129, 0.15);
+                color: var(--healthy);
+                border: 1px solid rgba(16, 185, 129, 0.3);
+            }
+            .pulse {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: currentColor;
+                animation: pulse 2s infinite;
+            }
+            @keyframes pulse {
+                0% { opacity: 1; transform: scale(1); }
+                50% { opacity: 0.4; transform: scale(1.3); }
+                100% { opacity: 1; transform: scale(1); }
+            }
+            .cards-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 1.5rem;
+                margin-bottom: 2rem;
+            }
+            .card {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 1.5rem;
+                box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5);
+                position: relative;
+                overflow: hidden;
+            }
+            .card::before {
+                content: '';
+                position: absolute;
+                top: 0; left: 0; right: 0;
+                height: 4px;
+                background: var(--primary-gradient);
+            }
+            .card-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 1rem;
+            }
+            .card-header h3 {
+                font-size: 1.1rem;
+                font-weight: 700;
+            }
+            .status-tag {
+                font-size: 0.75rem;
+                font-weight: 700;
+                padding: 0.2rem 0.6rem;
+                border-radius: 6px;
+            }
+            .status-HEALTHY {
+                background: rgba(16, 185, 129, 0.2);
+                color: #34d399;
+                border: 1px solid rgba(16, 185, 129, 0.3);
+            }
+            .status-ERROR {
+                background: rgba(239, 68, 68, 0.2);
+                color: #f87171;
+                border: 1px solid rgba(239, 68, 68, 0.3);
+            }
+            .info-row {
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 0.6rem;
+                font-size: 0.85rem;
+            }
+            .info-label { color: var(--text-muted); }
+            .info-value { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
+            .message-box {
+                margin-top: 1rem;
+                background: var(--surface-card);
+                padding: 0.75rem;
+                border-radius: 8px;
+                font-size: 0.8rem;
+                color: #d1d5db;
+                border-left: 3px solid var(--primary);
+            }
+            .meta-bar {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 1rem 1.5rem;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 2rem;
+                justify-content: space-between;
+                font-size: 0.85rem;
+                color: var(--text-muted);
+            }
+            .meta-item span { color: var(--text); font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <header>
+                <div class="title-area">
+                    <h1>Dynamic Secret Operator</h1>
+                    <p>Multi-Secret Workload Auto-Rotation & Validation Probes</p>
+                </div>
+                <div class="badge">
+                    <div class="pulse"></div>
+                    Live on AKS Cluster
+                </div>
+            </header>
+
+            <div class="cards-grid">
+                {{range .Dependencies}}
+                <div class="card">
+                    <div class="card-header">
+                        <h3>{{.Name}}</h3>
+                        <span class="status-tag status-{{.Status}}">{{.Status}}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Key Vault Secret:</span>
+                        <span class="info-value">{{.SecretKey}}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Mounted Volume:</span>
+                        <span class="info-value">{{.MountPath}}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Masked Credential:</span>
+                        <span class="info-value">{{.SecretHash}}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Probe Latency:</span>
+                        <span class="info-value">{{.Latency}}</span>
+                    </div>
+                    <div class="message-box">
+                        {{.Message}}
+                    </div>
+                </div>
+                {{end}}
+            </div>
+
+            <div class="meta-bar">
+                <div class="meta-item">Pod: <span>{{.PodName}}</span></div>
+                <div class="meta-item">Node: <span>{{.NodeName}}</span></div>
+                <div class="meta-item">Last Verification: <span>{{.Timestamp}}</span></div>
+            </div>
+        </div>
+    </body>
+    </html>`
+
+    func main() {
+    	tmpl := template.Must(template.New("dashboard").Parse(htmlTemplate))
+
+    	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+    		status := getSystemStatus()
+    		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+    		tmpl.Execute(w, status)
+    	})
+
+    	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+    		status := getSystemStatus()
+    		w.Header().Set("Content-Type", "application/json")
+    		json.NewEncoder(w).Encode(status)
+    	})
+
+    	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+    		w.WriteHeader(http.StatusOK)
+    		w.Write([]byte("OK"))
+    	})
+
+    	log.Println("Multi-Secret Microservice listening on :8080...")
+    	if err := http.ListenAndServe(":8080", nil); err != nil {
+    		log.Fatalf("Server error: %v", err)
+    	}
+    }
+---
+# ------------------------------------------------------------------------------
+# 5. Multi-Secret Microservice Deployment
+# ------------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-secret-app
+  namespace: multi-secret-demo
+  labels:
+    app: multi-secret-app
+    app.kubernetes.io/instance: dso-multi-secret-demo
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: multi-secret-app
+  template:
+    metadata:
+      labels:
+        app: multi-secret-app
+    spec:
+      initContainers:
+        - name: build-app
+          image: golang:1.22-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /app
+              cd /app
+              go mod init multi-secret-app
+              go get github.com/lib/pq
+              cp /src/main.go ./main.go
+              go build -o /app/server main.go
+              cp /app/server /bin-volume/server
+          volumeMounts:
+            - name: source-code
+              mountPath: /src
+            - name: app-bin
+              mountPath: /bin-volume
+      containers:
+        - name: app
+          image: alpine:latest
+          command: ["/bin-volume/server"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: app-bin
+              mountPath: /bin-volume
+            # Secret Volume 1: PostgreSQL Database Credentials
+            - name: db-secret-volume
+              mountPath: /mnt/secrets/db
+              readOnly: true
+            # Secret Volume 2: Redis In-Memory Cache Credentials
+            - name: redis-secret-volume
+              mountPath: /mnt/secrets/redis
+              readOnly: true
+            # Secret Volume 3: Payment Gateway API Key
+            - name: payment-secret-volume
+              mountPath: /mnt/secrets/payment
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+      volumes:
+        - name: source-code
+          configMap:
+            name: multi-secret-app-source
+        - name: app-bin
+          emptyDir: {}
+        # Initial bootstrap bindings for all 3 secrets
+        - name: db-secret-volume
+          secret:
+            secretName: multi-secret-app-db-password-initial
+            optional: true
+        - name: redis-secret-volume
+          secret:
+            secretName: multi-secret-app-redis-auth-token-initial
+            optional: true
+        - name: payment-secret-volume
+          secret:
+            secretName: multi-secret-app-payment-api-key-initial
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-secret-app
+  namespace: multi-secret-demo
+  labels:
+    app: multi-secret-app
+spec:
+  selector:
+    app: multi-secret-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+# ------------------------------------------------------------------------------
+# 6. DynamicSecretPolicies (One per Secret with Dedicated Validation Probes)
+# ------------------------------------------------------------------------------
+# Policy 1: PostgreSQL Password Rotation with Native PostgreSQL Validation Probe
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: multi-secret-db-policy
+  namespace: multi-secret-demo
+spec:
+  vaultRef:
+    keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
+    objectName: "db-password"
+    objectType: "Secret"
+  workloadSelector:
+    kind: "Deployment"
+    name: "multi-secret-app"
+  targetRef:
+    volumeName: "db-secret-volume"
+  canaryStrategy:
+    timeoutSeconds: 60
+  validationProbes:
+    - type: "PostgreSQL"
+      endpoint: "postgres.multi-secret-demo.svc.cluster.local:5432/appdb"
+      queryTimeout: 5
+      credentials:
+        passwordKey: "db-password"
+        usernameKey: "db-user"
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+---
+# Policy 2: Redis Auth Token Rotation with Job-Based Validation Probe
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: multi-secret-redis-policy
+  namespace: multi-secret-demo
+spec:
+  vaultRef:
+    keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
+    objectName: "redis-auth-token"
+    objectType: "Secret"
+  workloadSelector:
+    kind: "Deployment"
+    name: "multi-secret-app"
+  targetRef:
+    volumeName: "redis-secret-volume"
+  canaryStrategy:
+    timeoutSeconds: 60
+  validationProbes:
+    - type: "Job"
+      job:
+        timeoutSeconds: 45
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: redis-probe
+                    image: redis:7-alpine
+                    command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        AUTH_PASS=$(cat /mnt/secrets/redis-auth-token)
+                        echo "Probing Redis with materialized credential from secret {{REVISION_SECRET_NAME}}..."
+                        redis-cli -h redis.multi-secret-demo.svc.cluster.local -p 6379 -a "$AUTH_PASS" --no-auth-warning ping
+                    volumeMounts:
+                      - name: secret-vol
+                        mountPath: /mnt/secrets
+                        readOnly: true
+                volumes:
+                  - name: secret-vol
+                    secret:
+                      secretName: "{{REVISION_SECRET_NAME}}"
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+---
+# Policy 3: Payment API Gateway Key Rotation with HTTP Validation Probe
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: multi-secret-payment-policy
+  namespace: multi-secret-demo
+spec:
+  vaultRef:
+    keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
+    objectName: "payment-api-key"
+    objectType: "Secret"
+  workloadSelector:
+    kind: "Deployment"
+    name: "multi-secret-app"
+  targetRef:
+    volumeName: "payment-secret-volume"
+  canaryStrategy:
+    timeoutSeconds: 60
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://payment-gateway.multi-secret-demo.svc.cluster.local:8080/v1/health"
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

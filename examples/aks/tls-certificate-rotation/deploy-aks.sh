@@ -43,7 +43,15 @@ if [ -z "${CURRENT_CONTEXT}" ]; then
 fi
 echo "☸️  Using Kubernetes Context: ${CURRENT_CONTEXT}"
 
-# 3. Create or verify certificate in Azure Key Vault
+# 3. Verify Key Vault accessibility
+echo "🔑 Verifying access to Azure Key Vault '${KEYVAULT_NAME}'..."
+if ! az keyvault show --name "${KEYVAULT_NAME}" >/dev/null 2>&1; then
+    echo "❌ Error: Unable to access Key Vault '${KEYVAULT_NAME}'. Please verify the name and your Azure permissions."
+    exit 1
+fi
+echo "✅ Key Vault '${KEYVAULT_NAME}' verified."
+
+# 4. Create or verify certificate in Azure Key Vault
 echo "🔑 Checking certificate 'ingress-tls-cert' in Azure Key Vault '${KEYVAULT_NAME}'..."
 if ! az keyvault certificate show --vault-name "${KEYVAULT_NAME}" --name "ingress-tls-cert" >/dev/null 2>&1; then
     echo "ℹ️  Creating initial self-signed certificate 'ingress-tls-cert' in Key Vault..."
@@ -51,21 +59,30 @@ if ! az keyvault certificate show --vault-name "${KEYVAULT_NAME}" --name "ingres
         --vault-name "${KEYVAULT_NAME}" \
         --name "ingress-tls-cert" \
         --policy "$(az keyvault certificate get-default-policy)" \
-        --output none
+        --output none || { echo "❌ Error: Failed to create certificate 'ingress-tls-cert' in Key Vault '${KEYVAULT_NAME}'."; exit 1; }
     echo "⏳ Waiting for Key Vault certificate creation to finish..."
-    while true; do
+    TIMEOUT=60
+    ELAPSED=0
+    CERT_READY=false
+    while [ $ELAPSED -lt $TIMEOUT ]; do
         STATUS="$(az keyvault certificate show --vault-name "${KEYVAULT_NAME}" --name "ingress-tls-cert" --query "attributes.enabled" -o tsv 2>/dev/null || true)"
         if [ "${STATUS}" = "true" ]; then
+            CERT_READY=true
             break
         fi
         sleep 2
+        ELAPSED=$((ELAPSED + 2))
     done
+    if [ "${CERT_READY}" != "true" ]; then
+        echo "❌ Error: Timed out waiting for certificate 'ingress-tls-cert' to become ready in Key Vault."
+        exit 1
+    fi
     echo "✅ Initial certificate created in Key Vault."
 else
     echo "ℹ️  Certificate 'ingress-tls-cert' already exists in Key Vault."
 fi
 
-# 4. Generate initial placeholder secret in cluster for initial bootstrap
+# 5. Generate initial placeholder secret in cluster for initial bootstrap
 echo "🔒 Creating bootstrap TLS secret in cluster..."
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -74,28 +91,32 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
     -keyout "${TMP_DIR}/tls.key" \
     -out "${TMP_DIR}/tls.crt" \
     -subj "/CN=localhost/O=DynamicSecretOperator" \
-    >/dev/null 2>&1
+    >/dev/null 2>&1 || { echo "❌ Error: Failed to generate bootstrap self-signed TLS cert."; exit 1; }
 
 kubectl create secret tls tls-gateway-ingress-tls-cert-initial \
     --cert="${TMP_DIR}/tls.crt" \
     --key="${TMP_DIR}/tls.key" \
-    --dry-run=client -o yaml | kubectl apply -f -
+    --dry-run=client -o yaml | kubectl apply -f - || { echo "❌ Error: Failed to create bootstrap TLS secret."; exit 1; }
 
-# 5. Install DSO CRD if not present
+# 6. Install DSO CRD if not present
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 if [ -d "${REPO_ROOT}/config/crd" ]; then
     echo "🛠️  Applying DynamicSecretPolicy CRD..."
-    kubectl apply -k "${REPO_ROOT}/config/crd"
+    kubectl apply -k "${REPO_ROOT}/config/crd" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
 fi
 
-# 6. Apply manifests with Key Vault replacement
+# 7. Apply manifests with Key Vault replacement
 echo "📄 Deploying Nginx TLS Gateway and DynamicSecretPolicy manifests..."
-sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f -
+if [ ! -f "${SCRIPT_DIR}/manifests.yaml" ]; then
+    echo "❌ Error: Manifest file not found at ${SCRIPT_DIR}/manifests.yaml"
+    exit 1
+fi
+sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
 echo "⏳ Waiting for TLS Gateway deployment to be ready..."
-kubectl rollout status deployment/tls-gateway --timeout=120s
+kubectl rollout status deployment/tls-gateway --timeout=120s || { echo "❌ Error: TLS Gateway rollout failed or timed out."; exit 1; }
 
 echo "=================================================================="
 echo "✅ TLS Certificate Rotation Example deployed successfully on AKS!"

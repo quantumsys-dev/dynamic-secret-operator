@@ -34,8 +34,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -671,17 +671,21 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.DaemonSet{})
 
-	// Check if optional Argo Rollouts CRD is installed in the cluster RESTMapper
-	gvk := schema.GroupVersionKind{
-		Group:   "argoproj.io",
-		Version: "v1alpha1",
-		Kind:    "Rollout",
-	}
-	if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err == nil {
-		builder = builder.Owns(&argorolloutsv1alpha1.Rollout{})
-		ctrl.Log.Info("Argo Rollouts CRD detected; enabling Rollout watch")
+	// Check if optional Argo Rollouts CRD is actually installed in the cluster via API discovery
+	if discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig()); err == nil {
+		if resources, err := discoveryClient.ServerResourcesForGroupVersion("argoproj.io/v1alpha1"); err == nil && resources != nil {
+			for _, res := range resources.APIResources {
+				if res.Kind == "Rollout" {
+					builder = builder.Owns(&argorolloutsv1alpha1.Rollout{})
+					ctrl.Log.Info("Argo Rollouts CRD detected; enabling Rollout watch")
+					break
+				}
+			}
+		} else {
+			ctrl.Log.Info("Argo Rollouts CRD not detected in cluster; skipping Rollout watch")
+		}
 	} else {
-		ctrl.Log.Info("Argo Rollouts CRD not detected in cluster; skipping Rollout watch")
+		ctrl.Log.Info("Could not create discovery client; skipping Rollout watch")
 	}
 
 	if r.EventsChannel != nil {
