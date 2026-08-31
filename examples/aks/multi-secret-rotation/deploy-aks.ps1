@@ -1,0 +1,195 @@
+# ==============================================================================
+# Dynamic Secret Operator (DSO) – Deploy Multi-Secret Rotation Demo on AKS
+# ==============================================================================
+# This script provisions and seeds all 3 secrets in Azure Key Vault:
+# 1. db-password (PostgreSQL)
+# 2. redis-auth-token (Redis)
+# 3. payment-api-key (Payment API Gateway)
+#
+# Then deploys the Multi-Secret Microservice application and 3 DynamicSecretPolicy
+# resources with dedicated validation probes for each secret.
+# ==============================================================================
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true, Position = 0)]
+    [Alias("k")]
+    [string]$KeyVaultName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$Namespace = "multi-secret-demo"
+)
+
+$ErrorActionPreference = "Stop"
+
+function Write-Step {
+    param([string]$Message)
+    Write-Host "`n==================================================================" -ForegroundColor Cyan
+    Write-Host "🚀 $Message" -ForegroundColor Cyan
+    Write-Host "==================================================================" -ForegroundColor Cyan
+}
+
+function Write-Success {
+    param([string]$Message)
+    Write-Host "✅ $Message" -ForegroundColor Green
+}
+
+function Write-Info {
+    param([string]$Message)
+    Write-Host "ℹ️  $Message" -ForegroundColor Yellow
+}
+
+Write-Step "Deploying Multi-Secret Microservice Example to AKS Cluster..."
+Write-Info "Target Key Vault : $KeyVaultName"
+Write-Info "Target Namespace : $Namespace"
+
+# 1. Check prerequisites
+if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+    Write-Error "'kubectl' is required. Please install kubectl: https://kubernetes.io/docs/tasks/tools/"
+}
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    Write-Error "Azure CLI ('az') is required. Please install az: https://learn.microsoft.com/en-us/cli/azure/install-azure-cli"
+}
+
+# 2. Check cluster connection
+$currentContext = kubectl config current-context 2>$null
+if (-not $currentContext) {
+    Write-Error "Not connected to any Kubernetes cluster. Please run 'az aks get-credentials' first."
+}
+Write-Success "Using Kubernetes Context: $currentContext"
+
+# 3. Check Key Vault accessibility
+Write-Step "Verifying access to Azure Key Vault '$KeyVaultName'..."
+$kvCheck = az keyvault show --name $KeyVaultName 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to access Key Vault '$KeyVaultName'. Please verify the name and your Azure permissions.`nDetails: $kvCheck"
+}
+Write-Success "Key Vault '$KeyVaultName' verified."
+
+# 4. Ensure target namespace exists
+Write-Step "Ensuring namespace '$Namespace' exists..."
+$nsOut = kubectl create namespace $Namespace --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to ensure namespace '$Namespace'.`nDetails: $nsOut"
+}
+Write-Success "Namespace '$Namespace' ready."
+
+# 5. Seed all 3 secrets in Azure Key Vault
+$secrets = @(
+    @{ Name = "db-password"; Value = "InitialPsqlPass123!" },
+    @{ Name = "redis-auth-token"; Value = "InitialRedisToken456!" },
+    @{ Name = "payment-api-key"; Value = "sk_live_pay_9876543210" }
+)
+
+Write-Step "Checking & seeding initial secrets in Azure Key Vault '$KeyVaultName'..."
+foreach ($sec in $secrets) {
+    $secCheck = az keyvault secret show --vault-name $KeyVaultName --name $sec.Name 2>$null
+    if (-not $secCheck) {
+        Write-Info "Secret '$($sec.Name)' not found. Creating in Key Vault..."
+        $setOut = az keyvault secret set `
+            --vault-name $KeyVaultName `
+            --name $sec.Name `
+            --value $sec.Value `
+            --output none 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create secret '$($sec.Name)' in Key Vault '$KeyVaultName'.`nDetails: $setOut"
+        }
+        Write-Success "Secret '$($sec.Name)' created in Key Vault."
+    } else {
+        Write-Info "Secret '$($sec.Name)' already exists in Key Vault."
+    }
+}
+
+# 6. Create initial bootstrap secrets in Kubernetes
+Write-Step "Creating bootstrap secrets in namespace '$Namespace'..."
+$b1 = kubectl create secret generic multi-secret-app-db-password-initial `
+    --namespace $Namespace `
+    --from-literal=db-password="InitialPsqlPass123!" `
+    --from-literal=db-user="postgres" `
+    --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to create db-password bootstrap secret.`nDetails: $b1" }
+
+$b2 = kubectl create secret generic multi-secret-app-redis-auth-token-initial `
+    --namespace $Namespace `
+    --from-literal=redis-auth-token="InitialRedisToken456!" `
+    --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to create redis-auth-token bootstrap secret.`nDetails: $b2" }
+
+$b3 = kubectl create secret generic multi-secret-app-payment-api-key-initial `
+    --namespace $Namespace `
+    --from-literal=payment-api-key="sk_live_pay_9876543210" `
+    --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to create payment-api-key bootstrap secret.`nDetails: $b3" }
+
+Write-Success "Bootstrap Kubernetes secrets created."
+
+# 7. Apply DynamicSecretPolicy CRD (if repo root is available)
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
+if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd"))) {
+    Write-Step "Applying DynamicSecretPolicy CRD from repo..."
+    $crdOut = kubectl apply -k (Join-Path $RepoRoot "config/crd") 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to apply CRD.`nDetails: $crdOut" }
+    Write-Success "CRD applied."
+}
+
+# 8. Apply manifests with Key Vault name substitution
+Write-Step "Deploying Multi-Secret workloads and DynamicSecretPolicy manifests..."
+$manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
+if (-not (Test-Path $manifestPath)) {
+    throw "Manifest file not found: $manifestPath"
+}
+$manifestContent = Get-Content $manifestPath -Raw
+$manifestContent = $manifestContent -replace '\$\{KEYVAULT_NAME\}', $KeyVaultName
+
+$applyOut = $manifestContent | kubectl apply -f - 2>&1
+Write-Host $applyOut
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to apply manifests.`nDetails: $applyOut"
+}
+Write-Success "All manifests deployed successfully!"
+
+# 9. Wait for pods to roll out
+Write-Step "Waiting for deployments in '$Namespace' to be ready..."
+$r1 = kubectl rollout status deployment/postgres -n $Namespace --timeout=120s 2>&1
+Write-Host $r1
+if ($LASTEXITCODE -ne 0) { throw "Postgres rollout failed or timed out.`nDetails: $r1" }
+
+$r2 = kubectl rollout status deployment/redis -n $Namespace --timeout=120s 2>&1
+Write-Host $r2
+if ($LASTEXITCODE -ne 0) { throw "Redis rollout failed or timed out.`nDetails: $r2" }
+
+$r3 = kubectl rollout status deployment/payment-gateway -n $Namespace --timeout=120s 2>&1
+Write-Host $r3
+if ($LASTEXITCODE -ne 0) { throw "Payment Gateway rollout failed or timed out.`nDetails: $r3" }
+
+$r4 = kubectl rollout status deployment/multi-secret-app -n $Namespace --timeout=180s 2>&1
+Write-Host $r4
+if ($LASTEXITCODE -ne 0) { throw "Multi-Secret App rollout failed or timed out.`nDetails: $r4" }
+
+Write-Host @"
+
+==================================================================
+🎉 MULTI-SECRET MICROSERVICE DEPLOYED SUCCESSFULLY!
+==================================================================
+
+📊 Access the Multi-Secret Dashboard:
+   kubectl port-forward svc/multi-secret-app 8080:80 -n $Namespace
+
+   Then open in your browser: http://localhost:8080
+
+🔄 Test Independent Secret Rotations:
+
+1️⃣ Rotate PostgreSQL Database Password:
+   az keyvault secret set --vault-name "$KeyVaultName" --name "db-password" --value "NewRotatedPsqlPass999!"
+
+2️⃣ Rotate Redis Auth Token:
+   az keyvault secret set --vault-name "$KeyVaultName" --name "redis-auth-token" --value "NewRotatedRedisToken888!"
+
+3️⃣ Rotate Payment API Key:
+   az keyvault secret set --vault-name "$KeyVaultName" --name "payment-api-key" --value "sk_live_pay_new_777777"
+
+👀 Inspect DynamicSecretPolicies and Status:
+   kubectl get dynamicsecretpolicies -n $Namespace
+   kubectl describe dynamicsecretpolicy multi-secret-db-policy -n $Namespace
+==================================================================
+"@ -ForegroundColor Green

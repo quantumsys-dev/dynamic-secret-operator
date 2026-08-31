@@ -50,64 +50,92 @@ if (-not $currentContext) {
 }
 Write-Success "Using Kubernetes Context: $currentContext"
 
-# 3. Ensure target namespace exists
+# 3. Check Key Vault accessibility
+Write-Step "Verifying access to Azure Key Vault '$KeyVaultName'..."
+$kvCheck = az keyvault show --name $KeyVaultName 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to access Key Vault '$KeyVaultName'. Please verify the name and your Azure permissions.`nDetails: $kvCheck"
+}
+Write-Success "Key Vault '$KeyVaultName' verified."
+
+# 4. Ensure target namespace exists
 Write-Step "Ensuring namespace '$Namespace' exists..."
-kubectl create namespace $Namespace --dry-run=client -o yaml | kubectl apply -f - | Out-Null
+$nsOut = kubectl create namespace $Namespace --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to ensure namespace '$Namespace'.`nDetails: $nsOut"
+}
 Write-Success "Namespace '$Namespace' ready."
 
-# 4. Seed initial Redis AUTH password in Azure Key Vault
+# 5. Seed initial Redis AUTH password in Azure Key Vault
 Write-Step "Checking secret 'redis-auth-password' in Azure Key Vault '$KeyVaultName'..."
 $secretCheck = az keyvault secret show --vault-name $KeyVaultName --name "redis-auth-password" 2>$null
 if (-not $secretCheck) {
     Write-Info "Secret 'redis-auth-password' not found. Creating initial secret in Key Vault..."
-    az keyvault secret set `
+    $setOut = az keyvault secret set `
         --vault-name $KeyVaultName `
         --name "redis-auth-password" `
         --value "InitialRedisPassword123!" `
-        --output none
+        --output none 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create secret 'redis-auth-password' in Key Vault '$KeyVaultName'.`nDetails: $setOut"
+    }
     Write-Success "Initial secret 'redis-auth-password' seeded in Key Vault."
 } else {
     Write-Info "Secret 'redis-auth-password' already exists in Key Vault."
 }
 
-# 5. Create bootstrap secrets in the cluster so pods can start before DSO materializes the first revision.
+# 6. Create bootstrap secrets in the cluster so pods can start before DSO materializes the first revision.
 Write-Step "Creating bootstrap secrets in namespace '$Namespace'..."
 
-kubectl create secret generic redis-master-redis-auth-password-initial `
+$b1 = kubectl create secret generic redis-master-redis-auth-password-initial `
     --namespace $Namespace `
     --from-literal=redis-auth-password="InitialRedisPassword123!" `
-    --dry-run=client -o yaml | kubectl apply -f - | Out-Null
+    --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to create redis-master bootstrap secret.`nDetails: $b1" }
 
-kubectl create secret generic redis-consumer-redis-auth-password-initial `
+$b2 = kubectl create secret generic redis-consumer-redis-auth-password-initial `
     --namespace $Namespace `
     --from-literal=redis-auth-password="InitialRedisPassword123!" `
-    --dry-run=client -o yaml | kubectl apply -f - | Out-Null
+    --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to create redis-consumer bootstrap secret.`nDetails: $b2" }
 
 Write-Success "Bootstrap secrets created."
 
-# 6. Apply DynamicSecretPolicy CRD (if repo root is available)
+# 7. Apply DynamicSecretPolicy CRD (if repo root is available)
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
 if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd"))) {
     Write-Step "Applying DynamicSecretPolicy CRD from repo..."
-    kubectl apply -k (Join-Path $RepoRoot "config/crd") | Out-Null
+    $crdOut = kubectl apply -k (Join-Path $RepoRoot "config/crd") 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to apply CRD.`nDetails: $crdOut" }
     Write-Success "CRD applied."
 }
 
-# 7. Apply manifests with Key Vault substitution
+# 8. Apply manifests with Key Vault substitution
 Write-Step "Deploying Redis workloads and DynamicSecretPolicy manifests..."
 $manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
+if (-not (Test-Path $manifestPath)) {
+    throw "Manifest file not found: $manifestPath"
+}
 $manifestContent = Get-Content $manifestPath -Raw
 $manifestContent = $manifestContent -replace '\$\{KEYVAULT_NAME\}', $KeyVaultName
 $manifestContent = $manifestContent -replace '\$\{NAMESPACE\}', $Namespace
 
-$manifestContent | kubectl apply -n $Namespace -f -
+$applyOut = $manifestContent | kubectl apply -n $Namespace -f - 2>&1
+Write-Host $applyOut
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to apply manifests.`nDetails: $applyOut"
+}
 
-# 8. Wait for workloads to be ready
+# 9. Wait for workloads to be ready
 Write-Info "Waiting for Redis master to become ready..."
-kubectl rollout status deployment/redis-master -n $Namespace --timeout=120s
+$r1 = kubectl rollout status deployment/redis-master -n $Namespace --timeout=120s 2>&1
+Write-Host $r1
+if ($LASTEXITCODE -ne 0) { throw "Redis master rollout failed or timed out.`nDetails: $r1" }
 
 Write-Info "Waiting for redis-consumer to become ready..."
-kubectl rollout status deployment/redis-consumer -n $Namespace --timeout=120s
+$r2 = kubectl rollout status deployment/redis-consumer -n $Namespace --timeout=120s 2>&1
+Write-Host $r2
+if ($LASTEXITCODE -ne 0) { throw "Redis consumer rollout failed or timed out.`nDetails: $r2" }
 
 Write-Host "`n==================================================================" -ForegroundColor Green
 Write-Host "✅ Job-Based Redis Probe Example deployed successfully on AKS!" -ForegroundColor Green

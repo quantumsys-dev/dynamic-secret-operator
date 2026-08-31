@@ -47,38 +47,76 @@ if (-not $currentContext) {
 }
 Write-Success "Using Kubernetes Context: $currentContext"
 
-# 3. Create or verify certificate in Azure Key Vault
+# 3. Check Key Vault accessibility
+Write-Step "Verifying access to Azure Key Vault '$KeyVaultName'..."
+$kvCheck = az keyvault show --name $KeyVaultName 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to access Key Vault '$KeyVaultName'. Please verify the name and your Azure permissions.`nDetails: $kvCheck"
+}
+Write-Success "Key Vault '$KeyVaultName' verified."
+
+# 4. Create or verify certificate in Azure Key Vault
 Write-Step "Checking certificate 'ingress-tls-cert' in Azure Key Vault '$KeyVaultName'..."
 $certCheck = az keyvault certificate show --vault-name $KeyVaultName --name "ingress-tls-cert" 2>$null
 if (-not $certCheck) {
     Write-Info "Creating initial self-signed certificate 'ingress-tls-cert' in Key Vault..."
-    $defaultPolicy = az keyvault certificate get-default-policy
-    az keyvault certificate create `
+    $defaultPolicy = az keyvault certificate get-default-policy 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to get default certificate policy.`nDetails: $defaultPolicy"
+    }
+
+    $createCertOut = az keyvault certificate create `
         --vault-name $KeyVaultName `
         --name "ingress-tls-cert" `
         --policy $defaultPolicy `
-        --output none
+        --output none 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create certificate 'ingress-tls-cert' in Key Vault '$KeyVaultName'.`nDetails: $createCertOut"
+    }
 
     Write-Info "Waiting for Key Vault certificate creation to complete..."
-    while ($true) {
+    $timeoutSeconds = 60
+    $elapsed = 0
+    $certReady = $false
+    while ($elapsed -lt $timeoutSeconds) {
         $status = az keyvault certificate show --vault-name $KeyVaultName --name "ingress-tls-cert" --query "attributes.enabled" -o tsv 2>$null
         if ($status -eq "true") {
+            $certReady = $true
             break
         }
         Start-Sleep -Seconds 2
+        $elapsed += 2
+    }
+    if (-not $certReady) {
+        throw "Timed out waiting for certificate 'ingress-tls-cert' to become ready in Key Vault."
     }
     Write-Success "Initial certificate created in Key Vault."
 } else {
     Write-Info "Certificate 'ingress-tls-cert' already exists in Key Vault."
 }
 
-# 4. Apply manifests with Key Vault replacement
+# 5. Apply manifests with Key Vault replacement
 Write-Step "Deploying Nginx TLS Gateway and DynamicSecretPolicy manifests..."
 $manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
+if (-not (Test-Path $manifestPath)) {
+    throw "Manifest file not found: $manifestPath"
+}
 $manifestContent = Get-Content $manifestPath -Raw
 $manifestContent = $manifestContent -replace '\$\{KEYVAULT_NAME\}', $KeyVaultName
 
-$manifestContent | kubectl apply -f -
+$applyOut = $manifestContent | kubectl apply -f - 2>&1
+Write-Host $applyOut
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to apply manifests.`nDetails: $applyOut"
+}
+
+# 6. Wait for deployment to be ready
+Write-Info "Waiting for TLS Gateway deployment to become ready..."
+$rolloutOut = kubectl rollout status deployment/tls-gateway --timeout=120s 2>&1
+Write-Host $rolloutOut
+if ($LASTEXITCODE -ne 0) {
+    throw "TLS Gateway rollout failed or timed out.`nDetails: $rolloutOut"
+}
 
 Write-Host "`n==================================================================" -ForegroundColor Green
 Write-Host "✅ TLS Certificate Rotation Example deployed successfully on AKS!" -ForegroundColor Green

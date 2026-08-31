@@ -47,12 +47,20 @@ if [ -z "${CURRENT_CONTEXT}" ]; then
 fi
 echo "☸️  Using Kubernetes Context: ${CURRENT_CONTEXT}"
 
-# 3. Ensure target namespace exists
+# 3. Verify Key Vault accessibility
+echo "🔑 Verifying access to Azure Key Vault '${KEYVAULT_NAME}'..."
+if ! az keyvault show --name "${KEYVAULT_NAME}" >/dev/null 2>&1; then
+    echo "❌ Error: Unable to access Key Vault '${KEYVAULT_NAME}'. Please verify the name and your Azure permissions."
+    exit 1
+fi
+echo "✅ Key Vault '${KEYVAULT_NAME}' verified."
+
+# 4. Ensure target namespace exists
 echo "📦 Ensuring namespace '${NAMESPACE}' exists..."
-kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null || { echo "❌ Error: Failed to create namespace '${NAMESPACE}'."; exit 1; }
 echo "✅ Namespace '${NAMESPACE}' ready."
 
-# 4. Seed initial Redis AUTH password in Azure Key Vault
+# 5. Seed initial Redis AUTH password in Azure Key Vault
 echo "🔑 Checking secret 'redis-auth-password' in Azure Key Vault '${KEYVAULT_NAME}'..."
 if ! az keyvault secret show --vault-name "${KEYVAULT_NAME}" --name "redis-auth-password" >/dev/null 2>&1; then
     echo "ℹ️  Secret 'redis-auth-password' not found. Creating initial secret..."
@@ -60,48 +68,52 @@ if ! az keyvault secret show --vault-name "${KEYVAULT_NAME}" --name "redis-auth-
         --vault-name "${KEYVAULT_NAME}" \
         --name "redis-auth-password" \
         --value "InitialRedisPassword123!" \
-        --output none
+        --output none || { echo "❌ Error: Failed to create secret 'redis-auth-password' in Key Vault '${KEYVAULT_NAME}'."; exit 1; }
     echo "✅ Initial secret 'redis-auth-password' seeded in Key Vault."
 else
     echo "ℹ️  Secret 'redis-auth-password' already exists in Key Vault."
 fi
 
-# 5. Create bootstrap secrets so pods can start before DSO materializes the first revision.
+# 6. Create bootstrap secrets so pods can start before DSO materializes the first revision.
 echo "🔒 Creating bootstrap secrets in namespace '${NAMESPACE}'..."
 
 kubectl create secret generic redis-master-redis-auth-password-initial \
     --namespace "${NAMESPACE}" \
     --from-literal=redis-auth-password="InitialRedisPassword123!" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null || { echo "❌ Error: Failed to create redis-master bootstrap secret."; exit 1; }
 
 kubectl create secret generic redis-consumer-redis-auth-password-initial \
     --namespace "${NAMESPACE}" \
     --from-literal=redis-auth-password="InitialRedisPassword123!" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null || { echo "❌ Error: Failed to create redis-consumer bootstrap secret."; exit 1; }
 
 echo "✅ Bootstrap secrets created."
 
-# 6. Apply DynamicSecretPolicy CRD (if running from the repo)
+# 7. Apply DynamicSecretPolicy CRD (if running from the repo)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
 if [ -d "${REPO_ROOT}/config/crd" ]; then
     echo "🛠️  Applying DynamicSecretPolicy CRD..."
-    kubectl apply -k "${REPO_ROOT}/config/crd" >/dev/null
+    kubectl apply -k "${REPO_ROOT}/config/crd" >/dev/null || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
     echo "✅ CRD applied."
 fi
 
-# 7. Apply manifests with Key Vault substitution
+# 8. Apply manifests with Key Vault substitution
 echo "📄 Deploying Redis workloads and DynamicSecretPolicy manifests..."
-sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" \
-  | kubectl apply -n "${NAMESPACE}" -f -
+if [ ! -f "${SCRIPT_DIR}/manifests.yaml" ]; then
+    echo "❌ Error: Manifest file not found at ${SCRIPT_DIR}/manifests.yaml"
+    exit 1
+fi
+sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g; s/\${NAMESPACE}/${NAMESPACE}/g" "${SCRIPT_DIR}/manifests.yaml" \
+  | kubectl apply -n "${NAMESPACE}" -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
-# 8. Wait for workloads to become ready
+# 9. Wait for workloads to become ready
 echo "⏳ Waiting for redis-master to be ready..."
-kubectl rollout status deployment/redis-master -n "${NAMESPACE}" --timeout=120s
+kubectl rollout status deployment/redis-master -n "${NAMESPACE}" --timeout=120s || { echo "❌ Error: Redis master rollout failed or timed out."; exit 1; }
 
 echo "⏳ Waiting for redis-consumer to be ready..."
-kubectl rollout status deployment/redis-consumer -n "${NAMESPACE}" --timeout=120s
+kubectl rollout status deployment/redis-consumer -n "${NAMESPACE}" --timeout=120s || { echo "❌ Error: Redis consumer rollout failed or timed out."; exit 1; }
 
 echo "=================================================================="
 echo "✅ Job-Based Redis Probe Example deployed successfully on AKS!"
