@@ -212,13 +212,7 @@ DSO's core rotation engine—the state machine, immutable revisions, canary prov
 
 ## 💡 Production & Enterprise Examples
 
-Explore our comprehensive reference architecture examples for both local testing and live cloud deployment:
-
-### 💻 Local (`kind`) Examples
-- [**Fullstack Database Rotation**](examples/local/fullstack-db-rotation/): Interactive web dashboard demonstrating live PostgreSQL zero-downtime credential rotations.
-- [**TLS Certificate Rotation**](examples/local/tls-certificate-rotation/): Automated Azure Key Vault certificate rotation with native `kubernetes.io/tls` secret mapping and TLS probe validation.
-- [**Argo Rollouts Blue/Green**](examples/local/argo-rollouts-blue-green/): Progressive Blue/Green delivery with immutable SecretRevisions and automated preview validation cutover.
-- [**Nginx Color Canary Rollout**](examples/local/nginx-color-rotation/): Visualizing canary rollout transitions and Argo CD GitOps drift auto-patching.
+Explore our comprehensive reference architecture examples for testing:
 
 ### ☁️ Azure Kubernetes Service (AKS) Examples
 - [**AKS Multi-Secret Rotation**](examples/aks/multi-secret-rotation/): Multi-secret workload auto-rotation consuming PostgreSQL, Redis, and Payment API keys with dedicated validation probes.
