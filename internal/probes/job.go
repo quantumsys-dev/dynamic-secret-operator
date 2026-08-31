@@ -225,13 +225,29 @@ func buildProbeJob(
 }
 
 // substituteRevisionName walks all init and regular containers in the PodSpec,
-// replacing RevisionSecretNamePlaceholder in env values, command, and args.
+// replacing RevisionSecretNamePlaceholder in env values, valueFrom secretKeyRefs,
+// envFrom secretRefs, command, args, and volumes.
 func substituteRevisionName(spec *batchv1.JobSpec, revisionSecretName string) {
-	if spec == nil || spec.Template.Spec.Containers == nil {
+	if spec == nil {
 		return
 	}
 	replaceInContainers(spec.Template.Spec.InitContainers, revisionSecretName)
 	replaceInContainers(spec.Template.Spec.Containers, revisionSecretName)
+
+	for i := range spec.Template.Spec.Volumes {
+		v := &spec.Template.Spec.Volumes[i]
+		if v.Secret != nil {
+			v.Secret.SecretName = strings.ReplaceAll(v.Secret.SecretName, RevisionSecretNamePlaceholder, revisionSecretName)
+		}
+		if v.Projected != nil {
+			for j := range v.Projected.Sources {
+				src := &v.Projected.Sources[j]
+				if src.Secret != nil {
+					src.Secret.Name = strings.ReplaceAll(src.Secret.Name, RevisionSecretNamePlaceholder, revisionSecretName)
+				}
+			}
+		}
+	}
 }
 
 func replaceInContainers(containers []corev1.Container, revisionSecretName string) {
@@ -239,6 +255,22 @@ func replaceInContainers(containers []corev1.Container, revisionSecretName strin
 		c := &containers[i]
 		for j := range c.Env {
 			c.Env[j].Value = strings.ReplaceAll(c.Env[j].Value, RevisionSecretNamePlaceholder, revisionSecretName)
+			if c.Env[j].ValueFrom != nil && c.Env[j].ValueFrom.SecretKeyRef != nil {
+				c.Env[j].ValueFrom.SecretKeyRef.Name = strings.ReplaceAll(
+					c.Env[j].ValueFrom.SecretKeyRef.Name,
+					RevisionSecretNamePlaceholder,
+					revisionSecretName,
+				)
+			}
+		}
+		for j := range c.EnvFrom {
+			if c.EnvFrom[j].SecretRef != nil {
+				c.EnvFrom[j].SecretRef.Name = strings.ReplaceAll(
+					c.EnvFrom[j].SecretRef.Name,
+					RevisionSecretNamePlaceholder,
+					revisionSecretName,
+				)
+			}
 		}
 		for j := range c.Command {
 			c.Command[j] = strings.ReplaceAll(c.Command[j], RevisionSecretNamePlaceholder, revisionSecretName)
