@@ -10,7 +10,7 @@ spec:
     - name: http
       port: 80
       targetPort: 5678
-  type: ClusterIP
+  type: LoadBalancer
 ---
 apiVersion: v1
 kind: Service
@@ -89,7 +89,7 @@ spec:
     volumeName: "db-secret-volume"
   validationProbes:
     - type: "HTTP"
-      endpoint: "http://payment-service-preview.default.svc:80/"
+      endpoint: "http://payment-service-active.default.svc:80/"
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true

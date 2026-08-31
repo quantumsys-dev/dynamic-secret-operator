@@ -81,9 +81,10 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-if [ -d "${REPO_ROOT}/config/crd" ]; then
+if [ -d "${REPO_ROOT}/config/crd/bases" ]; then
     echo "🛠️  Applying DynamicSecretPolicy CRD..."
-    kubectl apply -k "${REPO_ROOT}/config/crd" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
+    kubectl apply --server-side --force-conflicts -f "${REPO_ROOT}/config/crd/bases" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
+    echo "✅ CRD applied."
 fi
 
 # 7. Apply manifests with Key Vault replacement
@@ -96,9 +97,37 @@ sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | ku
 
 echo "=================================================================="
 echo "✅ Argo Rollouts Blue/Green Example deployed successfully on AKS!"
+echo "=================================================================="
 echo ""
-echo "Next Steps:"
-echo "1. Watch the rollout: kubectl argo rollouts get rollout rollout-payment-service --watch"
-echo "2. Trigger a secret rotation in Key Vault:"
+echo "📋 STEP-BY-STEP VERIFICATION GUIDE:"
+echo "------------------------------------------------------------------"
+echo ""
+echo "1️⃣ Access the Active Payment Service:"
+echo "   - Public URL (LoadBalancer):"
+echo "     kubectl get svc payment-service-active"
+echo "     (Open http://<EXTERNAL-IP> in your browser)"
+echo ""
+echo "   - Fallback (Port-Forward):"
+echo "     kubectl port-forward svc/payment-service-active 8080:80"
+echo "     (Open http://localhost:8080)"
+echo ""
+echo "2️⃣ Monitor Argo Rollouts and DSO in Real Time (in separate terminals):"
+echo "   - Watch Argo Rollouts Blue/Green Progression:"
+echo "     kubectl argo rollouts get rollout rollout-payment-service --watch"
+echo ""
+echo "   - Watch DSO State Machine & Validation Conditions:"
+echo "     kubectl get dynamicsecretpolicy -w"
+echo ""
+echo "   - Stream Operator Logs:"
+echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"
+echo ""
+echo "3️⃣ Trigger a Secret Rotation in Azure Key Vault:"
 echo "   az keyvault secret set --vault-name ${KEYVAULT_NAME} --name 'payment-db-password' --value 'NewPaymentPassword2026_Rotated!'"
+echo ""
+echo "4️⃣ Observe Blue/Green Promotion Flow:"
+echo "   - DSO detects the secret rotation event and prepares the new secret revision."
+echo "   - Argo Rollouts provisions the new Green preview ReplicaSet."
+echo "   - DSO triggers synthetic validation probes against the preview pod."
+echo "   - Once validated, Argo Rollouts performs an atomic cutover of live traffic to the Green version!"
+echo "   - The old Blue ReplicaSet is safely scaled down with zero downtime."
 echo "=================================================================="

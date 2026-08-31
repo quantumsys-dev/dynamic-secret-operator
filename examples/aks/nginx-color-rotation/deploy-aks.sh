@@ -69,9 +69,10 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-if [ -d "${REPO_ROOT}/config/crd" ]; then
+if [ -d "${REPO_ROOT}/config/crd/bases" ]; then
     echo "🛠️  Applying DynamicSecretPolicy CRD..."
-    kubectl apply -k "${REPO_ROOT}/config/crd" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
+    kubectl apply --server-side --force-conflicts -f "${REPO_ROOT}/config/crd/bases" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
+    echo "✅ CRD applied."
 fi
 
 # 6. Apply manifests with Key Vault replacement
@@ -87,11 +88,42 @@ kubectl rollout status deployment/nginx-color-app --timeout=120s || { echo "❌ 
 
 echo "=================================================================="
 echo "✅ Nginx Color Rotation Example deployed successfully on AKS!"
+echo "=================================================================="
 echo ""
-echo "Next Steps:"
-echo "1. Port-forward the app: kubectl port-forward svc/nginx-color-app 8080:80"
-echo "2. Open http://localhost:8080"
-echo "3. Trigger a rotation in Key Vault:"
+echo "📋 STEP-BY-STEP VERIFICATION GUIDE:"
+echo "------------------------------------------------------------------"
+echo ""
+echo "1️⃣ Access the Nginx Web App:"
+echo "   - Public URL (LoadBalancer):"
+echo "     kubectl get svc nginx-color-app"
+echo "     (Open http://<EXTERNAL-IP> in your browser)"
+echo ""
+echo "   - Fallback (Port-Forward):"
+echo "     kubectl port-forward svc/nginx-color-app 8080:80"
+echo "     (Open http://localhost:8080)"
+echo ""
+echo "2️⃣ Monitor DSO and Workload in Real Time (in a separate terminal):"
+echo "   - Watch DSO State Machine & Conditions:"
+echo "     kubectl get dynamicsecretpolicy aks-nginx-color-policy -w"
+echo ""
+echo "   - Watch Pod Rollout & Canary Lifecycle:"
+echo "     kubectl get pods -l app=nginx-color-app -w"
+echo ""
+echo "   - Stream Operator Logs:"
+echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"
+echo ""
+echo "3️⃣ Trigger a Secret Rotation in Azure Key Vault:"
 echo "   az keyvault secret set --vault-name ${KEYVAULT_NAME} --name 'nginx-bg-color' --value '#10b981'"
+echo ""
+echo "4️⃣ Observe Zero-Downtime Promotion:"
+echo "   - Key Vault publishes SecretNewVersionCreated event to Azure Service Bus."
+echo "   - DSO triggers Canary Provisioning, runs synthetic HTTP /health probe."
+echo "   - Target Deployment 'nginx-color-app' is promoted to the new color with zero downtime!"
+echo "   - Refresh your browser to see the background change from Blue (#3b82f6) to Green (#10b981)!"
+echo ""
+echo "5️⃣ Test Circuit Breaker & Auto-Rollback (Optional):"
+echo "   - Inject an invalid value that fails health checks:"
+echo "     az keyvault secret set --vault-name ${KEYVAULT_NAME} --name 'nginx-bg-color' --value 'INVALID_COLOR'"
+echo "   - Watch DSO Canary fail synthetic probes and automatically abort rollout without affecting live traffic!"
 echo "=================================================================="
 

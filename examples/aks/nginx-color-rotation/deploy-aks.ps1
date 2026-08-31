@@ -73,7 +73,16 @@ if (-not $secretCheck) {
     Write-Info "Secret 'nginx-bg-color' already exists in Key Vault."
 }
 
-# 5. Apply manifests with Key Vault replacement
+# 5. Apply DynamicSecretPolicy CRD (if repo root is available)
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
+if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
+    Write-Step "Applying DynamicSecretPolicy CRD from repo..."
+    $crdOut = kubectl apply --server-side --force-conflicts -f (Join-Path $RepoRoot "config/crd/bases") 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to apply CRD.`nDetails: $crdOut" }
+    Write-Success "CRD applied."
+}
+
+# 6. Apply manifests with Key Vault replacement
 Write-Step "Deploying Nginx Color App and DynamicSecretPolicy manifests..."
 $manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
 if (-not (Test-Path $manifestPath)) {
@@ -96,22 +105,65 @@ if ($LASTEXITCODE -ne 0) {
     throw "Deployment rollout failed or timed out.`nDetails: $rolloutOut"
 }
 
+# 7. Check and display Public LoadBalancer Service IP
+Write-Step "Checking Public LoadBalancer IP for nginx-color-app..."
+$svcJson = kubectl get svc nginx-color-app -o json 2>$null
+$extIp = $null
+if ($svcJson) {
+    $svcInfo = $svcJson | ConvertFrom-Json
+    if ($svcInfo.status.loadBalancer.ingress -and $svcInfo.status.loadBalancer.ingress.Count -gt 0) {
+        $extIp = $svcInfo.status.loadBalancer.ingress[0].ip
+    }
+}
+
+if (-not $extIp) {
+    Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    Write-Info "Run 'kubectl get svc nginx-color-app -w' to view the public IP as soon as Azure assigns it."
+} else {
+    Write-Success "Public IP assigned: http://$extIp"
+}
+
 Write-Host "`n==================================================================" -ForegroundColor Green
 Write-Host "✅ Nginx Color Rotation Example deployed successfully on AKS!" -ForegroundColor Green
 Write-Host "==================================================================" -ForegroundColor Green
 
 Write-Host @"
 
-Next Steps:
-1. Port-forward the app:
-   kubectl port-forward svc/nginx-color-app 8080:80
+📋 STEP-BY-STEP VERIFICATION GUIDE:
+------------------------------------------------------------------
 
-2. Open http://localhost:8080 in your browser.
+1️⃣ Access the Nginx Web App:
+   - Public URL (LoadBalancer):
+     kubectl get svc nginx-color-app
+     (Open http://<EXTERNAL-IP> in your browser)
 
-3. Trigger a rotation in Azure Key Vault:
+   - Fallback (Port-Forward):
+     kubectl port-forward svc/nginx-color-app 8080:80
+     (Open http://localhost:8080)
+
+2️⃣ Monitor DSO and Workload in Real Time (in a separate terminal):
+   - Watch DSO State Machine & Conditions:
+     kubectl get dynamicsecretpolicy aks-nginx-color-policy -w
+
+   - Watch Pod Rollout & Canary Lifecycle:
+     kubectl get pods -l app=nginx-color-app -w
+
+   - Stream Operator Logs:
+     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f
+
+3️⃣ Trigger a Secret Rotation in Azure Key Vault:
    az keyvault secret set --vault-name $KeyVaultName --name "nginx-bg-color" --value "#10b981"
 
-4. Watch DSO promote the workload with zero downtime!
+4️⃣ Observe Zero-Downtime Promotion:
+   - Key Vault publishes SecretNewVersionCreated event to Azure Service Bus.
+   - DSO triggers Canary Provisioning, runs synthetic HTTP /health probe.
+   - Target Deployment 'nginx-color-app' is promoted to the new color with zero downtime!
+   - Refresh your browser to see the background change from Blue (#3b82f6) to Green (#10b981)!
+
+5️⃣ Test Circuit Breaker & Auto-Rollback (Optional):
+   - Inject an invalid value that fails health checks:
+     az keyvault secret set --vault-name $KeyVaultName --name "nginx-bg-color" --value "INVALID_COLOR"
+   - Watch DSO Canary fail synthetic probes and automatically abort rollout without affecting live traffic!
 ==================================================================
 "@ -ForegroundColor Cyan
 

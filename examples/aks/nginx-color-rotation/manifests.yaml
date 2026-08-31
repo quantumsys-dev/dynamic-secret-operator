@@ -89,7 +89,7 @@ spec:
     - name: http
       port: 80
       targetPort: 80
-  type: ClusterIP
+  type: LoadBalancer
 ---
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
