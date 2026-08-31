@@ -102,9 +102,10 @@ kubectl create secret tls tls-gateway-ingress-tls-cert-initial \
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-if [ -d "${REPO_ROOT}/config/crd" ]; then
+if [ -d "${REPO_ROOT}/config/crd/bases" ]; then
     echo "🛠️  Applying DynamicSecretPolicy CRD..."
-    kubectl apply -k "${REPO_ROOT}/config/crd" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
+    kubectl apply --server-side --force-conflicts -f "${REPO_ROOT}/config/crd/bases" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
+    echo "✅ CRD applied."
 fi
 
 # 7. Apply manifests with Key Vault replacement
@@ -120,10 +121,36 @@ kubectl rollout status deployment/tls-gateway --timeout=120s || { echo "❌ Erro
 
 echo "=================================================================="
 echo "✅ TLS Certificate Rotation Example deployed successfully on AKS!"
+echo "=================================================================="
 echo ""
-echo "Next Steps:"
-echo "1. Port-forward the HTTPS gateway: kubectl port-forward svc/tls-gateway 8443:8443"
-echo "2. Query endpoint: curl -k https://localhost:8443"
-echo "3. Trigger a certificate rotation in Key Vault:"
+echo "📋 STEP-BY-STEP VERIFICATION GUIDE:"
+echo "------------------------------------------------------------------"
+echo ""
+echo "1️⃣ Access the HTTPS TLS Gateway:"
+echo "   - Public Endpoint (LoadBalancer):"
+echo "     kubectl get svc tls-gateway"
+echo "     curl -kv https://<EXTERNAL-IP>:8443"
+echo ""
+echo "   - Fallback (Port-Forward):"
+echo "     kubectl port-forward svc/tls-gateway 8443:8443"
+echo "     curl -kv https://localhost:8443"
+echo ""
+echo "2️⃣ Monitor TLS Expiration & DSO in Real Time (in separate terminals):"
+echo "   - Inspect active TLS Certificate Subject & Expiration:"
+echo "     curl -kv https://localhost:8443 2>&1 | grep 'expire date'"
+echo ""
+echo "   - Watch DSO State Machine & Validation Conditions:"
+echo "     kubectl get dynamicsecretpolicy aks-ingress-tls-policy -w"
+echo ""
+echo "   - Stream Operator Logs:"
+echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"
+echo ""
+echo "3️⃣ Trigger a Certificate Renewal in Azure Key Vault:"
 echo "   az keyvault certificate create --vault-name ${KEYVAULT_NAME} --name 'ingress-tls-cert' --policy \"\$(az keyvault certificate get-default-policy)\""
+echo ""
+echo "4️⃣ Observe Zero-Downtime TLS Rollover:"
+echo "   - Azure Key Vault generates a new x509 certificate and private key."
+echo "   - DSO auto-extracts certificate blocks (tls.crt) and RSA private key (tls.key)."
+echo "   - DSO launches an isolated Canary and validates TLS handshakes with native TLS probe."
+echo "   - Live traffic switches to the new certificate with zero downtime and valid TLS handshakes!"
 echo "=================================================================="

@@ -91,7 +91,7 @@ spec:
     - name: https
       port: 8443
       targetPort: 8443
-  type: ClusterIP
+  type: LoadBalancer
 ---
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy

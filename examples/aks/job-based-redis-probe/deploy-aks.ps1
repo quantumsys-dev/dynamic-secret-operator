@@ -103,9 +103,9 @@ Write-Success "Bootstrap secrets created."
 
 # 7. Apply DynamicSecretPolicy CRD (if repo root is available)
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
-if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd"))) {
+if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
     Write-Step "Applying DynamicSecretPolicy CRD from repo..."
-    $crdOut = kubectl apply -k (Join-Path $RepoRoot "config/crd") 2>&1
+    $crdOut = kubectl apply --server-side --force-conflicts -f (Join-Path $RepoRoot "config/crd/bases") 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Failed to apply CRD.`nDetails: $crdOut" }
     Write-Success "CRD applied."
 }
@@ -143,20 +143,39 @@ Write-Host "==================================================================" 
 
 Write-Host @"
 
-Next Steps:
-1. Tail the redis-consumer logs to observe live PING results:
+📋 STEP-BY-STEP VERIFICATION GUIDE:
+------------------------------------------------------------------
+
+1️⃣ Tail Redis Consumer Logs (in a dedicated terminal):
    kubectl logs -n $Namespace -l app=redis-consumer -f
+   (Observe continuous PING/PONG heartbeats with current AUTH password)
 
-2. Watch the DynamicSecretPolicy conditions:
-   kubectl get dynamicsecretpolicy redis-cache-rotation -n $Namespace -w
+2️⃣ Monitor DSO Policy & Ephemeral Validation Jobs (in separate terminals):
+   - Watch Ephemeral Probe Job Lifecycle:
+     kubectl get jobs -n $Namespace -w
 
-3. Trigger a Redis AUTH password rotation in Azure Key Vault:
-   az keyvault secret set --vault-name $KeyVaultName --name "redis-auth-password" --value "RotatedRedisPassword456!"
+   - Watch DynamicSecretPolicy State Machine:
+     kubectl get dynamicsecretpolicy redis-cache-rotation -n $Namespace -w
 
-4. Observe DSO:
-   - Launch an ephemeral probe Job (kubectl get jobs -n $Namespace -w)
-   - Validate with redis-cli PING against the new password
-   - Promote redis-consumer with zero downtime if PING succeeds
-   - Auto-delete the probe Job
+   - Stream Operator Logs:
+     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f
+
+3️⃣ Execute Redis AUTH Password Rotation:
+   🔹 Step 3.1: Retrieve the current active password from Key Vault (or inspect secret):
+      `$CurrentPass = (az keyvault secret show --vault-name $KeyVaultName --name "redis-auth-password" --query value -o tsv)`
+
+   🔹 Step 3.2: Update the password inside running Redis Master:
+      kubectl exec deployment/redis-master -n $Namespace -- redis-cli -a `$CurrentPass CONFIG SET requirepass "RotatedRedisPassword456!"
+
+   🔹 Step 3.3: Update secret in Azure Key Vault:
+      az keyvault secret set --vault-name $KeyVaultName --name "redis-auth-password" --value "RotatedRedisPassword456!"
+
+4️⃣ Observe Job-Based Validation & Zero-Downtime Promotion:
+   - Key Vault emits SecretNewVersionCreated event to Azure Service Bus.
+   - DSO launches an ephemeral Kubernetes Job with 'redis:alpine' image.
+   - The Job executes 'redis-cli -a <new-password> ping' against the master.
+   - Upon successful PING validation (exit 0), DSO promotes 'redis-consumer'.
+   - The ephemeral validation Job is automatically cleaned up.
+   - Consumer logs reflect continuous zero-downtime PONG responses with no dropped connections!
 ==================================================================
 "@ -ForegroundColor Cyan

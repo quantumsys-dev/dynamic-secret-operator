@@ -95,7 +95,16 @@ if (-not $certCheck) {
     Write-Info "Certificate 'ingress-tls-cert' already exists in Key Vault."
 }
 
-# 5. Apply manifests with Key Vault replacement
+# 5. Apply DynamicSecretPolicy CRD (if repo root is available)
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
+if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
+    Write-Step "Applying DynamicSecretPolicy CRD from repo..."
+    $crdOut = kubectl apply --server-side --force-conflicts -f (Join-Path $RepoRoot "config/crd/bases") 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to apply CRD.`nDetails: $crdOut" }
+    Write-Success "CRD applied."
+}
+
+# 6. Apply manifests with Key Vault replacement
 Write-Step "Deploying Nginx TLS Gateway and DynamicSecretPolicy manifests..."
 $manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
 if (-not (Test-Path $manifestPath)) {
@@ -118,22 +127,59 @@ if ($LASTEXITCODE -ne 0) {
     throw "TLS Gateway rollout failed or timed out.`nDetails: $rolloutOut"
 }
 
+# 7. Check and display Public LoadBalancer Service IP
+Write-Step "Checking Public LoadBalancer IP for tls-gateway..."
+$svcJson = kubectl get svc tls-gateway -o json 2>$null
+$extIp = $null
+if ($svcJson) {
+    $svcInfo = $svcJson | ConvertFrom-Json
+    if ($svcInfo.status.loadBalancer.ingress -and $svcInfo.status.loadBalancer.ingress.Count -gt 0) {
+        $extIp = $svcInfo.status.loadBalancer.ingress[0].ip
+    }
+}
+
+if (-not $extIp) {
+    Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    Write-Info "Run 'kubectl get svc tls-gateway -w' to view the public IP as soon as Azure assigns it."
+} else {
+    Write-Success "Public HTTPS Endpoint: https://${extIp}:8443"
+}
+
 Write-Host "`n==================================================================" -ForegroundColor Green
 Write-Host "✅ TLS Certificate Rotation Example deployed successfully on AKS!" -ForegroundColor Green
 Write-Host "==================================================================" -ForegroundColor Green
 
 Write-Host @"
 
-Next Steps:
-1. Port-forward the HTTPS gateway:
-   kubectl port-forward svc/tls-gateway 8443:8443
+📋 STEP-BY-STEP VERIFICATION GUIDE:
+------------------------------------------------------------------
 
-2. Query the endpoint:
-   curl -k https://localhost:8443
+1️⃣ Access the HTTPS TLS Gateway:
+   - Public Endpoint (LoadBalancer):
+     kubectl get svc tls-gateway
+     curl -kv https://<EXTERNAL-IP>:8443
 
-3. Trigger a certificate rotation in Azure Key Vault:
+   - Fallback (Port-Forward):
+     kubectl port-forward svc/tls-gateway 8443:8443
+     curl -kv https://localhost:8443
+
+2️⃣ Monitor TLS Expiration & DSO in Real Time (in separate terminals):
+   - Inspect active TLS Certificate Subject & Expiration:
+     curl -kv https://localhost:8443 2>&1 | Select-String "expire date"
+
+   - Watch DSO State Machine & Validation Conditions:
+     kubectl get dynamicsecretpolicy aks-ingress-tls-policy -w
+
+   - Stream Operator Logs:
+     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f
+
+3️⃣ Trigger a Certificate Renewal in Azure Key Vault:
    az keyvault certificate create --vault-name $KeyVaultName --name "ingress-tls-cert" --policy (az keyvault certificate get-default-policy)
 
-4. Observe DSO auto-parse the new certificate, validate TLS handshakes, and promote the gateway!
+4️⃣ Observe Zero-Downtime TLS Rollover:
+   - Azure Key Vault generates a new x509 certificate and private key.
+   - DSO auto-extracts certificate blocks (tls.crt) and RSA private key (tls.key).
+   - DSO launches an isolated Canary and validates TLS handshakes with native TLS probe.
+   - Live traffic switches to the new certificate with zero downtime and valid TLS handshakes!
 ==================================================================
 "@ -ForegroundColor Cyan

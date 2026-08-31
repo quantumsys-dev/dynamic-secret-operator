@@ -181,10 +181,6 @@ spec:
           spec:
             backoffLimit: 0
             template:
-              metadata:
-                labels:
-                  app.kubernetes.io/component: probe
-                  dso.quantumsys.dev/probe-type: redis
               spec:
                 restartPolicy: Never
                 securityContext:

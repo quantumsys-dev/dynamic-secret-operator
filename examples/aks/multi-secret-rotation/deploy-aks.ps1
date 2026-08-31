@@ -125,9 +125,9 @@ Write-Success "Bootstrap Kubernetes secrets created."
 
 # 7. Apply DynamicSecretPolicy CRD (if repo root is available)
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
-if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd"))) {
+if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
     Write-Step "Applying DynamicSecretPolicy CRD from repo..."
-    $crdOut = kubectl apply -k (Join-Path $RepoRoot "config/crd") 2>&1
+    $crdOut = kubectl apply --server-side --force-conflicts -f (Join-Path $RepoRoot "config/crd/bases") 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Failed to apply CRD.`nDetails: $crdOut" }
     Write-Success "CRD applied."
 }
@@ -166,30 +166,70 @@ $r4 = kubectl rollout status deployment/multi-secret-app -n $Namespace --timeout
 Write-Host $r4
 if ($LASTEXITCODE -ne 0) { throw "Multi-Secret App rollout failed or timed out.`nDetails: $r4" }
 
+# 10. Check and display Public LoadBalancer Service IP
+Write-Step "Checking Public LoadBalancer IP for multi-secret-app..."
+$svcJson = kubectl get svc multi-secret-app -n $Namespace -o json 2>$null
+$extIp = $null
+if ($svcJson) {
+    $svcInfo = $svcJson | ConvertFrom-Json
+    if ($svcInfo.status.loadBalancer.ingress -and $svcInfo.status.loadBalancer.ingress.Count -gt 0) {
+        $extIp = $svcInfo.status.loadBalancer.ingress[0].ip
+    }
+}
+
+if (-not $extIp) {
+    Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    Write-Info "Run 'kubectl get svc multi-secret-app -n $Namespace -w' to view the public IP as soon as Azure assigns it."
+} else {
+    Write-Success "Public IP assigned: http://$extIp"
+}
+
 Write-Host @"
 
 ==================================================================
 🎉 MULTI-SECRET MICROSERVICE DEPLOYED SUCCESSFULLY!
 ==================================================================
 
-📊 Access the Multi-Secret Dashboard:
-   kubectl port-forward svc/multi-secret-app 8080:80 -n $Namespace
+📋 STEP-BY-STEP VERIFICATION GUIDE:
+------------------------------------------------------------------
 
-   Then open in your browser: http://localhost:8080
+1️⃣ Access the Multi-Secret Web Dashboard:
+   - Public URL (LoadBalancer):
+     kubectl get svc multi-secret-app -n $Namespace
+     (Open http://<EXTERNAL-IP> in your browser)
 
-🔄 Test Independent Secret Rotations:
+   - Fallback (Port-Forward):
+     kubectl port-forward svc/multi-secret-app 8080:80 -n $Namespace
+     (Open http://localhost:8080)
 
-1️⃣ Rotate PostgreSQL Database Password:
-   az keyvault secret set --vault-name "$KeyVaultName" --name "db-password" --value "NewRotatedPsqlPass999!"
+2️⃣ Monitor 3 Independent Secret Policies in Real Time:
+   - Watch All DynamicSecretPolicies:
+     kubectl get dynamicsecretpolicies -n $Namespace -w
 
-2️⃣ Rotate Redis Auth Token:
-   az keyvault secret set --vault-name "$KeyVaultName" --name "redis-auth-token" --value "NewRotatedRedisToken888!"
+   - Stream Operator Logs:
+     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f
 
-3️⃣ Rotate Payment API Key:
-   az keyvault secret set --vault-name "$KeyVaultName" --name "payment-api-key" --value "sk_live_pay_new_777777"
+3️⃣ Test Independent Secret Rotations:
 
-👀 Inspect DynamicSecretPolicies and Status:
-   kubectl get dynamicsecretpolicies -n $Namespace
-   kubectl describe dynamicsecretpolicy multi-secret-db-policy -n $Namespace
+   🔹 1. Rotate PostgreSQL Database Password:
+      a) Update Postgres user password in cluster:
+         kubectl exec deployment/postgres -n $Namespace -- psql -U appuser -d production_db -c "ALTER USER appuser WITH PASSWORD 'NewRotatedPsqlPass999!';"
+      b) Update secret in Azure Key Vault:
+         az keyvault secret set --vault-name "$KeyVaultName" --name "db-password" --value "NewRotatedPsqlPass999!"
+      -> DSO launches Canary and validates native PostgreSQL probe.
+
+   🔹 2. Rotate Redis Auth Token:
+      a) Update Redis password in cluster:
+         kubectl exec deployment/redis -n $Namespace -- redis-cli -a initialRedisToken123 CONFIG SET requirepass "NewRotatedRedisToken888!"
+      b) Update secret in Azure Key Vault:
+         az keyvault secret set --vault-name "$KeyVaultName" --name "redis-auth-token" --value "NewRotatedRedisToken888!"
+      -> DSO launches Canary and validates Redis connection probe.
+
+   🔹 3. Rotate Payment API Gateway Key:
+      az keyvault secret set --vault-name "$KeyVaultName" --name "payment-api-key" --value "sk_live_pay_new_777777"
+      -> DSO launches Canary and validates Payment API probe.
+
+4️⃣ Verify Granular Zero-Downtime Rollout:
+   - Refresh the web dashboard: each subsystem indicator turns green independently as its secret rotates!
 ==================================================================
 "@ -ForegroundColor Green

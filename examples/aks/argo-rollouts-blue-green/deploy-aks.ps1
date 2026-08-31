@@ -95,7 +95,16 @@ if (-not $nsCheck) {
     }
 }
 
-# 6. Apply manifests with Key Vault replacement
+# 6. Apply DynamicSecretPolicy CRD (if repo root is available)
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
+if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
+    Write-Step "Applying DynamicSecretPolicy CRD from repo..."
+    $crdOut = kubectl apply --server-side --force-conflicts -f (Join-Path $RepoRoot "config/crd/bases") 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Failed to apply CRD.`nDetails: $crdOut" }
+    Write-Success "CRD applied."
+}
+
+# 7. Apply manifests with Key Vault replacement
 Write-Step "Deploying Rollout, Services, and DynamicSecretPolicy manifests..."
 $manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
 if (-not (Test-Path $manifestPath)) {
@@ -110,19 +119,60 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to apply manifests.`nDetails: $applyOut"
 }
 
+# 7. Check and display Public LoadBalancer Service IP
+Write-Step "Checking Public LoadBalancer IP for payment-service-active..."
+$svcJson = kubectl get svc payment-service-active -o json 2>$null
+$extIp = $null
+if ($svcJson) {
+    $svcInfo = $svcJson | ConvertFrom-Json
+    if ($svcInfo.status.loadBalancer.ingress -and $svcInfo.status.loadBalancer.ingress.Count -gt 0) {
+        $extIp = $svcInfo.status.loadBalancer.ingress[0].ip
+    }
+}
+
+if (-not $extIp) {
+    Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    Write-Info "Run 'kubectl get svc payment-service-active -w' to view the public IP as soon as Azure assigns it."
+} else {
+    Write-Success "Public IP assigned: http://$extIp"
+}
+
 Write-Host "`n==================================================================" -ForegroundColor Green
 Write-Host "✅ Argo Rollouts Blue/Green Example deployed successfully on AKS!" -ForegroundColor Green
 Write-Host "==================================================================" -ForegroundColor Green
 
 Write-Host @"
 
-Next Steps:
-1. Watch the rollout:
-   kubectl argo rollouts get rollout rollout-payment-service --watch
+📋 STEP-BY-STEP VERIFICATION GUIDE:
+------------------------------------------------------------------
 
-2. Trigger a secret rotation in Azure Key Vault:
+1️⃣ Access the Active Payment Service:
+   - Public URL (LoadBalancer):
+     kubectl get svc payment-service-active
+     (Open http://<EXTERNAL-IP> in your browser)
+
+   - Fallback (Port-Forward):
+     kubectl port-forward svc/payment-service-active 8080:80
+     (Open http://localhost:8080)
+
+2️⃣ Monitor Argo Rollouts and DSO in Real Time (in separate terminals):
+   - Watch Argo Rollouts Blue/Green Progression:
+     kubectl argo rollouts get rollout rollout-payment-service --watch
+
+   - Watch DSO State Machine & Validation Conditions:
+     kubectl get dynamicsecretpolicy -w
+
+   - Stream Operator Logs:
+     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f
+
+3️⃣ Trigger a Secret Rotation in Azure Key Vault:
    az keyvault secret set --vault-name $KeyVaultName --name "payment-db-password" --value "NewPaymentPassword2026_Rotated!"
 
-3. Observe the green preview ReplicaSet provision, validate, and cut over live traffic!
+4️⃣ Observe Blue/Green Promotion Flow:
+   - DSO detects the secret rotation event and prepares the new secret revision.
+   - Argo Rollouts provisions the new Green preview ReplicaSet.
+   - DSO triggers synthetic validation probes against the preview pod.
+   - Once validated, Argo Rollouts performs an atomic cutover of live traffic to the Green version!
+   - The old Blue ReplicaSet is safely scaled down with zero downtime.
 ==================================================================
 "@ -ForegroundColor Cyan
