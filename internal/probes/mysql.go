@@ -73,8 +73,9 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 	}
 
 	// Note: database/sql and DSN formatting require string parameters. In Go, string conversions
-	// allocate immutable memory on the heap that cannot be zeroed via byte-wiping.
-	// Raw byte zeroing is maintained in materializeSecretRevision for secret payloads.
+	// allocate immutable memory on the heap that cannot be reliably zeroed; DSO relies on
+	// OS/container-level controls (readOnlyRootFilesystem, runAsNonRoot, dropped capabilities,
+	// disabled core dumps) rather than in-process memory zeroing - see docs/security.md.
 
 	host, port, err := splitHostPort(config.Endpoint, "3306")
 	if err != nil || host == "" || strings.ContainsAny(host, "?&/\\@#(): \t\r\n") || strings.ContainsAny(port, "?&/\\@#(): \t\r\n") {

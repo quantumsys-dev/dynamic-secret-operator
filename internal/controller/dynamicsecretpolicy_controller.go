@@ -747,7 +747,9 @@ func (r *DynamicSecretPolicyReconciler) gcOldSecretRevisions(ctx context.Context
 }
 
 // materializeSecretRevision pulls the secret payload from the registered provider backend (Azure, ESO, AWS, GCP, Vault),
-// calculates a deterministic hash, materializes the immutable Secret in the cluster, and zeroes in-memory byte buffers.
+// calculates a deterministic hash, and materializes the immutable Secret in the cluster. It does not zero in-memory
+// byte buffers: Go's garbage-collected runtime cannot reliably guarantee that, so DSO relies on OS/container-level
+// controls instead (readOnlyRootFilesystem, runAsNonRoot, dropped capabilities, disabled core dumps) - see docs/security.md.
 func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) (string, error) {
 	logger := log.FromContext(ctx)
 

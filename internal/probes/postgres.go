@@ -123,8 +123,9 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 	}
 
 	// Note: database/sql and URL formatting require string DSNs. In Go, string conversions
-	// allocate immutable memory on the heap that cannot be zeroed via byte-wiping.
-	// Raw byte zeroing is maintained in materializeSecretRevision for secret payloads.
+	// allocate immutable memory on the heap that cannot be reliably zeroed; DSO relies on
+	// OS/container-level controls (readOnlyRootFilesystem, runAsNonRoot, dropped capabilities,
+	// disabled core dumps) rather than in-process memory zeroing - see docs/security.md.
 
 	escapedUser := url.QueryEscape(username)
 	escapedPassword := url.QueryEscape(password)
