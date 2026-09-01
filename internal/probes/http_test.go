@@ -23,6 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 )
 
@@ -116,4 +119,35 @@ func TestHTTPProbe_Execute(t *testing.T) {
 			t.Fatalf("expected timeout error, got nil")
 		}
 	})
+
+	t.Run("propagates W3C trace context headers via otelhttp", func(t *testing.T) {
+		var traceparentReceived string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			traceparentReceived = r.Header.Get("traceparent")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer ts.Close()
+
+		tp := sdktrace.NewTracerProvider()
+		otel.SetTracerProvider(tp)
+
+		probe := &HTTPProbe{}
+		cfg := secretv1alpha1.ValidationProbe{
+			Type:     secretv1alpha1.ProbeTypeHTTP,
+			Endpoint: ts.URL,
+		}
+
+		ctx, span := tp.Tracer("test-probe").Start(context.Background(), "TestTracePropagation")
+		defer span.End()
+
+		if err := probe.Execute(ctx, cfg, nil); err != nil {
+			t.Fatalf("expected HTTP probe success, got: %v", err)
+		}
+
+		if traceparentReceived == "" {
+			t.Errorf("expected traceparent header to be injected by otelhttp, got empty")
+		}
+	})
 }
+
+

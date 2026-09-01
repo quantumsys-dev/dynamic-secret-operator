@@ -18,6 +18,7 @@ package telemetry
 
 import (
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -28,3 +29,12 @@ const (
 
 // Tracer is the shared global OpenTelemetry tracer for dynamic secret operator operations.
 var Tracer trace.Tracer = otel.Tracer(InstrumentationScopeName)
+
+func init() {
+	// Set default global propagator to W3C TraceContext and Baggage
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+}
+

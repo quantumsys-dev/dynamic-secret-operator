@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -60,14 +61,14 @@ func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.Validatio
 
 	client := p.Client
 	if client == nil {
-		transport := &http.Transport{
+		baseTransport := &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, // Allow canary internal probes with self-signed cluster certificates
 			},
 			ResponseHeaderTimeout: 10 * time.Second,
 		}
 		client = &http.Client{
-			Transport: transport,
+			Transport: otelhttp.NewTransport(baseTransport),
 			Timeout:   0, // Rely on ctx for timeout enforcement
 		}
 	}
