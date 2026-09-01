@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -73,10 +75,15 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 	// Raw byte zeroing is maintained in materializeSecretRevision for secret payloads.
 
 	host, port, err := splitHostPort(config.Endpoint, "3306")
-	if err != nil {
-		hostErr := fmt.Errorf("invalid mysql endpoint %q: %w", config.Endpoint, err)
+	if err != nil || host == "" || strings.ContainsAny(host, "?&/\\@#(): \t\r\n") || strings.ContainsAny(port, "?&/\\@#(): \t\r\n") {
+		hostErr := fmt.Errorf("invalid or unsafe mysql endpoint: %q", config.Endpoint)
 		span.RecordError(hostErr)
 		return hostErr
+	}
+	if portNum, pErr := strconv.Atoi(port); pErr != nil || portNum <= 0 || portNum > 65535 {
+		portErr := fmt.Errorf("invalid or unsafe mysql endpoint: %q", config.Endpoint)
+		span.RecordError(portErr)
+		return portErr
 	}
 
 	escapedUser := url.QueryEscape(username)

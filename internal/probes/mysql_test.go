@@ -167,4 +167,38 @@ func TestMySQLProbe_Execute(t *testing.T) {
 			t.Errorf("expected DSN to contain encoded credentials prefix %q, got %q", expectedPrefix, capturedDSN)
 		}
 	})
+
+	t.Run("security: rejects DSN smuggling and unsafe characters in endpoint", func(t *testing.T) {
+		probe := &MySQLProbe{}
+		maliciousEndpoints := []string{
+			"malicious-host:3306)/otherdb?allowCleartextPasswords=true&",
+			"localhost:3306?tls=skip-verify",
+			"localhost:3306/injected_db",
+			"db.local:3306#foo",
+			"db.local:3306@bar",
+			"db.local:70000",
+			"db.local:notaport",
+			"db.local:-1",
+		}
+
+		secretData := map[string][]byte{
+			"username": []byte("root"),
+			"password": []byte("pass"),
+		}
+
+		for _, ep := range maliciousEndpoints {
+			cfg := secretv1alpha1.ValidationProbe{
+				Type:     secretv1alpha1.ProbeTypeMySQL,
+				Endpoint: ep,
+			}
+			err := probe.Execute(context.Background(), cfg, secretData)
+			if err == nil {
+				t.Errorf("expected error for malicious endpoint %q, got nil", ep)
+			}
+			if !strings.Contains(err.Error(), "invalid or unsafe mysql endpoint") {
+				t.Errorf("expected error message to indicate unsafe endpoint for %q, got %v", ep, err)
+			}
+		}
+	})
 }
+

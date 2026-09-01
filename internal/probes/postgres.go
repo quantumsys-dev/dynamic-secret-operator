@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,10 +99,15 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 	}
 
 	host, port, endpointDB, err := parsePostgresEndpoint(config.Endpoint, "5432")
-	if err != nil {
-		hostErr := fmt.Errorf("invalid postgres endpoint %q: %w", config.Endpoint, err)
+	if err != nil || host == "" || strings.ContainsAny(host, "?&/\\@#(): \t\r\n") || strings.ContainsAny(port, "?&/\\@#(): \t\r\n") || strings.ContainsAny(endpointDB, "?&\\@# \t\r\n") {
+		hostErr := fmt.Errorf("invalid or unsafe postgres endpoint: %q", config.Endpoint)
 		span.RecordError(hostErr)
 		return hostErr
+	}
+	if portNum, pErr := strconv.Atoi(port); pErr != nil || portNum <= 0 || portNum > 65535 {
+		portErr := fmt.Errorf("invalid or unsafe postgres endpoint: %q", config.Endpoint)
+		span.RecordError(portErr)
+		return portErr
 	}
 
 	if endpointDB != "" && dbname == "" {

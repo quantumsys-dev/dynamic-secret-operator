@@ -167,4 +167,37 @@ func TestPostgresProbe_Execute(t *testing.T) {
 			t.Errorf("expected DSN to contain encoded credentials prefix %q, got %q", expectedPrefix, capturedDSN)
 		}
 	})
+
+	t.Run("security: rejects DSN smuggling and unsafe characters in endpoint", func(t *testing.T) {
+		probe := &PostgresProbe{}
+		maliciousEndpoints := []string{
+			"malicious-host:5432/otherdb?sslmode=require&",
+			"localhost:5432?sslmode=disable",
+			"db.local:5432#foo",
+			"db.local:5432@bar",
+			"db.local:70000",
+			"db.local:notaport",
+			"db.local:-1",
+		}
+
+		secretData := map[string][]byte{
+			"username": []byte("postgres"),
+			"password": []byte("pass"),
+		}
+
+		for _, ep := range maliciousEndpoints {
+			cfg := secretv1alpha1.ValidationProbe{
+				Type:     secretv1alpha1.ProbeTypePostgreSQL,
+				Endpoint: ep,
+			}
+			err := probe.Execute(context.Background(), cfg, secretData)
+			if err == nil {
+				t.Errorf("expected error for malicious endpoint %q, got nil", ep)
+			}
+			if !strings.Contains(err.Error(), "invalid or unsafe postgres endpoint") {
+				t.Errorf("expected error message to indicate unsafe endpoint for %q, got %v", ep, err)
+			}
+		}
+	})
 }
+
