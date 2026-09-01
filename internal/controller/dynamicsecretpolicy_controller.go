@@ -788,7 +788,11 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.DaemonSet{}).
-		Owns(&batchv1.Job{})
+		Owns(&batchv1.Job{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findPoliciesForSourceSecret),
+		)
 
 	if r.MaxConcurrentReconciles > 0 {
 		builder = builder.WithOptions(controller.Options{
@@ -818,6 +822,29 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 	}
 
 	return builder.Complete(r)
+}
+
+// findPoliciesForSourceSecret maps unmanaged source secrets (e.g. ESO synchronized secrets)
+// to the DynamicSecretPolicy resources that ingest them.
+func (r *DynamicSecretPolicyReconciler) findPoliciesForSourceSecret(ctx context.Context, obj client.Object) []ctrl.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok || secret.Labels[LabelManaged] == ManagedValueTrue {
+		return nil // Ignore our own materialized secrets (handled via Owns(&corev1.Secret{}))
+	}
+
+	var policies secretv1alpha1.DynamicSecretPolicyList
+	if err := r.List(ctx, &policies, client.InNamespace(secret.Namespace)); err != nil {
+		return nil
+	}
+
+	var reqs []ctrl.Request
+	for _, p := range policies.Items {
+		src := p.Spec.GetResolvedSource()
+		if src.Type == secretv1alpha1.SourceTypeK8sSecret && src.K8sSecret != nil && src.K8sSecret.Name == secret.Name {
+			reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Name: p.Name, Namespace: p.Namespace}})
+		}
+	}
+	return reqs
 }
 
 // extractPEMCertAndKey decodes raw PEM-encoded payload bytes and partitions them into

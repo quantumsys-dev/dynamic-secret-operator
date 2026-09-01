@@ -31,14 +31,11 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -168,15 +165,6 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Secret{}: {
-					Label: labels.SelectorFromSet(labels.Set{
-						controller.LabelManaged: controller.ManagedValueTrue,
-					}),
-				},
-			},
-		},
 		Metrics: metricsserver.Options{
 			BindAddress:   metricsAddr,
 			SecureServing: secureMetrics,
@@ -203,7 +191,7 @@ func main() {
 		setupLog.Error(err, "unable to create kubernetes clientset for log retrieval")
 	}
 
-	providerRegistry := sourceProvider.SetupDefaultRegistry(mgr.GetClient(), secretFetcher)
+	providerRegistry := sourceProvider.SetupDefaultRegistry(mgr.GetAPIReader(), secretFetcher)
 
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:                  mgr.GetClient(),

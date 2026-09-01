@@ -2172,3 +2172,97 @@ func TestDynamicSecretPolicyReconciler_ManagedSecretLabelAndCacheScoping(t *test
 	}
 }
 
+func TestFindPoliciesForSourceSecret(t *testing.T) {
+	scheme := setupTestScheme(t)
+	ctx := context.Background()
+
+	policyMatching := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "eso-policy-matching",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			Source: &secretv1alpha1.SecretSource{
+				Type: secretv1alpha1.SourceTypeK8sSecret,
+				K8sSecret: &secretv1alpha1.K8sSecretSource{
+					Name: "synced-db-pass",
+				},
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{Name: "app"},
+		},
+	}
+
+	policyOther := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "eso-policy-other",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			Source: &secretv1alpha1.SecretSource{
+				Type: secretv1alpha1.SourceTypeK8sSecret,
+				K8sSecret: &secretv1alpha1.K8sSecretSource{
+					Name: "unrelated-secret",
+				},
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{Name: "app"},
+		},
+	}
+
+	policyDifferentNS := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "eso-policy-diff-ns",
+			Namespace: "staging",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			Source: &secretv1alpha1.SecretSource{
+				Type: secretv1alpha1.SourceTypeK8sSecret,
+				K8sSecret: &secretv1alpha1.K8sSecretSource{
+					Name: "synced-db-pass",
+				},
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{Name: "app"},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policyMatching, policyOther, policyDifferentNS).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	// 1. Unmanaged ESO synced secret event -> maps to policyMatching
+	esoSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "synced-db-pass",
+			Namespace: "production",
+		},
+	}
+	reqs := r.findPoliciesForSourceSecret(ctx, esoSecret)
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 mapped request, got %d", len(reqs))
+	}
+	if reqs[0].Name != "eso-policy-matching" || reqs[0].Namespace != "production" {
+		t.Errorf("expected request for eso-policy-matching in production, got %v", reqs[0])
+	}
+
+	// 2. DSO Managed secret event -> ignored (returns nil)
+	managedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "app-synced-db-pass-rev-12345",
+			Namespace: "production",
+			Labels: map[string]string{
+				LabelManaged: ManagedValueTrue,
+			},
+		},
+	}
+	reqsManaged := r.findPoliciesForSourceSecret(ctx, managedSecret)
+	if len(reqsManaged) != 0 {
+		t.Errorf("expected 0 mapped requests for DSO managed secret, got %d", len(reqsManaged))
+	}
+}
+
+

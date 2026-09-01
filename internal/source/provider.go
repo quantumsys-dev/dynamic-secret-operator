@@ -106,13 +106,13 @@ func (p *AzureKeyVaultProvider) FetchSecret(ctx context.Context, policy *secretv
 
 // K8sSecretProvider implements Provider for intermediate Kubernetes secrets (e.g. ESO sync target).
 type K8sSecretProvider struct {
-	Client client.Client
+	Reader client.Reader
 }
 
 // FetchSecret retrieves the payload directly from an intermediate Kubernetes Secret in the policy namespace.
 func (p *K8sSecretProvider) FetchSecret(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) (*SecretPayload, error) {
-	if p.Client == nil {
-		return nil, fmt.Errorf("k8s client is not initialized on K8sSecretProvider")
+	if p.Reader == nil {
+		return nil, fmt.Errorf("k8s reader is not initialized on K8sSecretProvider")
 	}
 
 	src := policy.Spec.GetResolvedSource()
@@ -122,7 +122,7 @@ func (p *K8sSecretProvider) FetchSecret(ctx context.Context, policy *secretv1alp
 
 	secretName := src.K8sSecret.Name
 	sec := &corev1.Secret{}
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, sec); err != nil {
+	if err := p.Reader.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, sec); err != nil {
 		return nil, fmt.Errorf("failed to fetch intermediate Kubernetes source secret %q in namespace %q: %w", secretName, policy.Namespace, err)
 	}
 
@@ -153,13 +153,13 @@ func (p *StubProvider) FetchSecret(ctx context.Context, policy *secretv1alpha1.D
 }
 
 // SetupDefaultRegistry constructs a fully wired registry with standard and stub providers.
-func SetupDefaultRegistry(k8sClient client.Client, fetcher azure.SecretFetcher) *Registry {
+func SetupDefaultRegistry(k8sReader client.Reader, fetcher azure.SecretFetcher) *Registry {
 	reg := NewRegistry()
 	if fetcher != nil {
 		reg.Register(secretv1alpha1.SourceTypeAzureKeyVault, &AzureKeyVaultProvider{Fetcher: fetcher})
 	}
-	if k8sClient != nil {
-		reg.Register(secretv1alpha1.SourceTypeK8sSecret, &K8sSecretProvider{Client: k8sClient})
+	if k8sReader != nil {
+		reg.Register(secretv1alpha1.SourceTypeK8sSecret, &K8sSecretProvider{Reader: k8sReader})
 	}
 	reg.Register(secretv1alpha1.SourceTypeAWSSecretsManager, &StubProvider{Name: "AWSSecretsManager", Milestone: "v0.3.0"})
 	reg.Register(secretv1alpha1.SourceTypeGCPSecretManager, &StubProvider{Name: "GCPSecretManager", Milestone: "v0.3.0"})

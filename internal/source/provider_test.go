@@ -118,7 +118,7 @@ func TestK8sSecretProvider(t *testing.T) {
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sec).Build()
-	provider := &K8sSecretProvider{Client: c}
+	provider := &K8sSecretProvider{Reader: c}
 
 	policy := &secretv1alpha1.DynamicSecretPolicy{
 		ObjectMeta: metav1.ObjectMeta{
