@@ -21,7 +21,7 @@ flowchart TD
             DSO["⚙️ Dynamic Secret Operator\n(Azure Workload Identity)"]
         end
 
-        subgraph ProductionNS ["production Namespace"]
+        subgraph ProductionNS ["dso-examples Namespace"]
             SEC["🔒 Immutable SecretRevision\n(redis-consumer-redis-auth-password-rev-XXXX)"]
             REDIS["🗄️ redis-master\n(Deployment)"]
             APP["📦 redis-consumer\n(Deployment)"]
@@ -46,7 +46,7 @@ flowchart TD
 ## 💡 How It Works
 
 1. **Event Ingestion:** Azure Key Vault notifies Azure Service Bus via Event Grid when `redis-auth-password` is rotated.
-2. **Secret Materialization:** DSO fetches the new password and materializes an immutable `Secret` in the `production` namespace (e.g., `redis-consumer-redis-auth-password-rev-a1b2c3`).
+2. **Secret Materialization:** DSO fetches the new password and materializes an immutable `Secret` in the `dso-examples` namespace (e.g., `redis-consumer-redis-auth-password-rev-a1b2c3`).
 3. **Canary Provisioning:** DSO spins up an isolated 1-replica canary pod with strict `NetworkPolicy`.
 4. **Job Probe:** DSO creates an ephemeral `batch/v1.Job` using the `redis:7-alpine` image. The placeholder `{{REVISION_SECRET_NAME}}` in the Job template is substituted with the actual new secret name. The probe container runs `redis-cli PING` authenticating with the new password.
 5. **Pass / Fail:** If `PING` returns `PONG`, DSO promotes `redis-consumer` to use the new secret (zero downtime rolling update). If it fails, DSO captures the container logs, surfaces them as a `Condition` on the `DynamicSecretPolicy`, and (if configured) rolls back.
@@ -79,7 +79,7 @@ chmod +x deploy-aks.sh
 ```
 
 Both scripts will:
-- Create the `production` namespace
+- Create the `dso-examples` namespace
 - Seed the initial `redis-auth-password` secret in Key Vault
 - Create bootstrap secrets so pods start before DSO's first rotation
 - Apply `manifests.yaml` (Redis Deployment, Consumer Deployment, Service, DynamicSecretPolicy)
@@ -90,7 +90,7 @@ Both scripts will:
 Tail the redis-consumer logs to see live PING results:
 
 ```bash
-kubectl logs -n production -l app=redis-consumer -f
+kubectl logs -n dso-examples -l app=redis-consumer -f
 ```
 
 ### Step 3: Trigger a Redis AUTH Password Rotation
@@ -108,13 +108,13 @@ az keyvault secret set \
 
 ```bash
 # Watch the DynamicSecretPolicy conditions in real-time
-kubectl get dynamicsecretpolicy redis-cache-rotation -n production -w
+kubectl get dynamicsecretpolicy redis-cache-rotation -n dso-examples -w
 
 # Watch the ephemeral probe Job appear and disappear
-kubectl get jobs -n production -w
+kubectl get jobs -n dso-examples -w
 
 # Inspect policy conditions in detail (includes probe Job failure logs if any)
-kubectl describe dynamicsecretpolicy redis-cache-rotation -n production
+kubectl describe dynamicsecretpolicy redis-cache-rotation -n dso-examples
 ```
 
 ---

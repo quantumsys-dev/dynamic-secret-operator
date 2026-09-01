@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: payment-service-active
-  namespace: default
+  namespace: dso-examples
 spec:
   selector:
     app: payment-service
@@ -16,7 +16,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: payment-service-preview
-  namespace: default
+  namespace: dso-examples
 spec:
   selector:
     app: payment-service
@@ -30,7 +30,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
   name: rollout-payment-service
-  namespace: default
+  namespace: dso-examples
   labels:
     app: payment-service
 spec:
@@ -76,7 +76,7 @@ apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
   name: aks-rollout-payment-policy
-  namespace: default
+  namespace: dso-examples
 spec:
   vaultRef:
     keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
@@ -89,7 +89,7 @@ spec:
     volumeName: "db-secret-volume"
   validationProbes:
     - type: "HTTP"
-      endpoint: "http://payment-service-active.default.svc:80/"
+      endpoint: "http://payment-service-active.dso-examples.svc.cluster.local:80/"
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true

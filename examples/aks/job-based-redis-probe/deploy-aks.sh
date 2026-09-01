@@ -6,12 +6,12 @@
 set -euo pipefail
 
 KEYVAULT_NAME=""
-NAMESPACE="production"
+NAMESPACE="dso-examples"
 
 print_usage() {
     echo "Usage: $0 -k <KEYVAULT_NAME> [-n <NAMESPACE>]"
     echo "  -k    Name of the Azure Key Vault (e.g., kv-dso-dev)   [required]"
-    echo "  -n    Target Kubernetes namespace                        [default: production]"
+    echo "  -n    Target Kubernetes namespace                        [default: dso-examples]"
     exit 1
 }
 

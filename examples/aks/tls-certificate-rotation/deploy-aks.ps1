@@ -95,7 +95,12 @@ if (-not $certCheck) {
     Write-Info "Certificate 'ingress-tls-cert' already exists in Key Vault."
 }
 
-# 5. Apply DynamicSecretPolicy CRD (if repo root is available)
+# 5. Ensure target namespace exists and apply CRD
+Write-Step "Ensuring namespace 'dso-examples' exists..."
+$nsOut = kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to ensure namespace 'dso-examples'.`nDetails: $nsOut" }
+Write-Success "Namespace 'dso-examples' ready."
+
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
 if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
     Write-Step "Applying DynamicSecretPolicy CRD from repo..."
@@ -119,17 +124,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to apply manifests.`nDetails: $applyOut"
 }
 
-# 6. Wait for deployment to be ready
+# 7. Wait for deployment to be ready
 Write-Info "Waiting for TLS Gateway deployment to become ready..."
-$rolloutOut = kubectl rollout status deployment/tls-gateway --timeout=120s 2>&1
+$rolloutOut = kubectl rollout status deployment/tls-gateway -n dso-examples --timeout=120s 2>&1
 Write-Host $rolloutOut
 if ($LASTEXITCODE -ne 0) {
     throw "TLS Gateway rollout failed or timed out.`nDetails: $rolloutOut"
 }
 
-# 7. Check and display Public LoadBalancer Service IP
+# 8. Check and display Public LoadBalancer Service IP
 Write-Step "Checking Public LoadBalancer IP for tls-gateway..."
-$svcJson = kubectl get svc tls-gateway -o json 2>$null
+$svcJson = kubectl get svc tls-gateway -n dso-examples -o json 2>$null
 $extIp = $null
 if ($svcJson) {
     $svcInfo = $svcJson | ConvertFrom-Json
@@ -140,7 +145,7 @@ if ($svcJson) {
 
 if (-not $extIp) {
     Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
-    Write-Info "Run 'kubectl get svc tls-gateway -w' to view the public IP as soon as Azure assigns it."
+    Write-Info "Run 'kubectl get svc tls-gateway -n dso-examples -w' to view the public IP as soon as Azure assigns it."
 } else {
     Write-Success "Public HTTPS Endpoint: https://${extIp}:8443"
 }
@@ -156,11 +161,11 @@ Write-Host @"
 
 1️⃣ Access the HTTPS TLS Gateway:
    - Public Endpoint (LoadBalancer):
-     kubectl get svc tls-gateway
+     kubectl get svc tls-gateway -n dso-examples
      curl -kv https://<EXTERNAL-IP>:8443
 
    - Fallback (Port-Forward):
-     kubectl port-forward svc/tls-gateway 8443:8443
+     kubectl port-forward svc/tls-gateway 8443:8443 -n dso-examples
      curl -kv https://localhost:8443
 
 2️⃣ Monitor TLS Expiration & DSO in Real Time (in separate terminals):
@@ -168,7 +173,7 @@ Write-Host @"
      curl -kv https://localhost:8443 2>&1 | Select-String "expire date"
 
    - Watch DSO State Machine & Validation Conditions:
-     kubectl get dynamicsecretpolicy aks-ingress-tls-policy -w
+     kubectl get dynamicsecretpolicy aks-ingress-tls-policy -n dso-examples -w
 
    - Stream Operator Logs:
      kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f

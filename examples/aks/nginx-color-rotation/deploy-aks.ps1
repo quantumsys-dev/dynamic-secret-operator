@@ -73,7 +73,12 @@ if (-not $secretCheck) {
     Write-Info "Secret 'nginx-bg-color' already exists in Key Vault."
 }
 
-# 5. Apply DynamicSecretPolicy CRD (if repo root is available)
+# 5. Ensure target namespace exists and apply CRD
+Write-Step "Ensuring namespace 'dso-examples' exists..."
+$nsOut = kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to ensure namespace 'dso-examples'.`nDetails: $nsOut" }
+Write-Success "Namespace 'dso-examples' ready."
+
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
 if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
     Write-Step "Applying DynamicSecretPolicy CRD from repo..."
@@ -97,17 +102,17 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to apply manifests.`nDetails: $applyOut"
 }
 
-# 6. Wait for deployment to be ready
+# 7. Wait for deployment to be ready
 Write-Info "Waiting for Nginx Color App deployment to become ready..."
-$rolloutOut = kubectl rollout status deployment/nginx-color-app --timeout=120s 2>&1
+$rolloutOut = kubectl rollout status deployment/nginx-color-app -n dso-examples --timeout=120s 2>&1
 Write-Host $rolloutOut
 if ($LASTEXITCODE -ne 0) {
     throw "Deployment rollout failed or timed out.`nDetails: $rolloutOut"
 }
 
-# 7. Check and display Public LoadBalancer Service IP
+# 8. Check and display Public LoadBalancer Service IP
 Write-Step "Checking Public LoadBalancer IP for nginx-color-app..."
-$svcJson = kubectl get svc nginx-color-app -o json 2>$null
+$svcJson = kubectl get svc nginx-color-app -n dso-examples -o json 2>$null
 $extIp = $null
 if ($svcJson) {
     $svcInfo = $svcJson | ConvertFrom-Json
@@ -118,7 +123,7 @@ if ($svcJson) {
 
 if (-not $extIp) {
     Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
-    Write-Info "Run 'kubectl get svc nginx-color-app -w' to view the public IP as soon as Azure assigns it."
+    Write-Info "Run 'kubectl get svc nginx-color-app -n dso-examples -w' to view the public IP as soon as Azure assigns it."
 } else {
     Write-Success "Public IP assigned: http://$extIp"
 }
@@ -134,19 +139,19 @@ Write-Host @"
 
 1️⃣ Access the Nginx Web App:
    - Public URL (LoadBalancer):
-     kubectl get svc nginx-color-app
+     kubectl get svc nginx-color-app -n dso-examples
      (Open http://<EXTERNAL-IP> in your browser)
 
    - Fallback (Port-Forward):
-     kubectl port-forward svc/nginx-color-app 8080:80
+     kubectl port-forward svc/nginx-color-app 8080:80 -n dso-examples
      (Open http://localhost:8080)
 
 2️⃣ Monitor DSO and Workload in Real Time (in a separate terminal):
    - Watch DSO State Machine & Conditions:
-     kubectl get dynamicsecretpolicy aks-nginx-color-policy -w
+     kubectl get dynamicsecretpolicy aks-nginx-color-policy -n dso-examples -w
 
    - Watch Pod Rollout & Canary Lifecycle:
-     kubectl get pods -l app=nginx-color-app -w
+     kubectl get pods -n dso-examples -l app=nginx-color-app -w
 
    - Stream Operator Logs:
      kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f

@@ -9,7 +9,7 @@ param(
     [string]$KeyVaultName,
 
     [Parameter(Mandatory = $false)]
-    [string]$Namespace = "production"
+    [string]$Namespace = "dso-examples"
 )
 
 $ErrorActionPreference = "Stop"

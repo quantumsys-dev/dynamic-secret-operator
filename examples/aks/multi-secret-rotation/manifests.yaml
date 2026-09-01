@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: multi-secret-demo
+  name: dso-examples
 ---
 # ------------------------------------------------------------------------------
 # 1. PostgreSQL Database Instance
@@ -10,7 +10,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: postgres-init-sql
-  namespace: multi-secret-demo
+  namespace: dso-examples
 data:
   init.sql: |
     CREATE TABLE IF NOT EXISTS orders (
@@ -26,7 +26,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
-  namespace: multi-secret-demo
+  namespace: dso-examples
   labels:
     app: postgres
 spec:
@@ -79,7 +79,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgres
-  namespace: multi-secret-demo
+  namespace: dso-examples
 spec:
   selector:
     app: postgres
@@ -95,7 +95,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis
-  namespace: multi-secret-demo
+  namespace: dso-examples
   labels:
     app: redis
 spec:
@@ -141,7 +141,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: redis
-  namespace: multi-secret-demo
+  namespace: dso-examples
 spec:
   selector:
     app: redis
@@ -157,7 +157,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: payment-gateway-mock
-  namespace: multi-secret-demo
+  namespace: dso-examples
 data:
   default.conf: |
     server {
@@ -179,7 +179,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: payment-gateway
-  namespace: multi-secret-demo
+  namespace: dso-examples
   labels:
     app: payment-gateway
 spec:
@@ -223,7 +223,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: payment-gateway
-  namespace: multi-secret-demo
+  namespace: dso-examples
 spec:
   selector:
     app: payment-gateway
@@ -239,7 +239,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: multi-secret-app-source
-  namespace: multi-secret-demo
+  namespace: dso-examples
 data:
   main.go: |
     package main
@@ -254,7 +254,6 @@ data:
     	"net/http"
     	"os"
     	"strings"
-    	"sync"
     	"time"
 
     	_ "github.com/lib/pq"
@@ -279,17 +278,17 @@ data:
     }
 
     var (
-    	dbHost       = getEnv("DB_HOST", "postgres.multi-secret-demo.svc.cluster.local")
+    	dbHost       = getEnv("DB_HOST", "postgres.dso-examples.svc.cluster.local")
     	dbPort       = getEnv("DB_PORT", "5432")
     	dbUser       = getEnv("DB_USER", "postgres")
     	dbName       = getEnv("DB_NAME", "appdb")
     	dbSecretPath = "/mnt/secrets/db/db-password"
 
-    	redisHost       = getEnv("REDIS_HOST", "redis.multi-secret-demo.svc.cluster.local")
+    	redisHost       = getEnv("REDIS_HOST", "redis.dso-examples.svc.cluster.local")
     	redisPort       = getEnv("REDIS_PORT", "6379")
     	redisSecretPath = "/mnt/secrets/redis/redis-auth-token"
 
-    	paymentHost       = getEnv("PAYMENT_HOST", "payment-gateway.multi-secret-demo.svc.cluster.local")
+    	paymentHost       = getEnv("PAYMENT_HOST", "payment-gateway.dso-examples.svc.cluster.local")
     	paymentPort       = getEnv("PAYMENT_PORT", "8080")
     	paymentSecretPath = "/mnt/secrets/payment/payment-api-key"
     )
@@ -672,10 +671,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: multi-secret-app
-  namespace: multi-secret-demo
+  namespace: dso-examples
   labels:
     app: multi-secret-app
-    app.kubernetes.io/instance: dso-multi-secret-demo
+    app.kubernetes.io/instance: dso-dso-examples
 spec:
   replicas: 2
   strategy:
@@ -778,7 +777,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: multi-secret-app
-  namespace: multi-secret-demo
+  namespace: dso-examples
   labels:
     app: multi-secret-app
 spec:
@@ -798,7 +797,7 @@ apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
   name: multi-secret-db-policy
-  namespace: multi-secret-demo
+  namespace: dso-examples
 spec:
   vaultRef:
     keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
@@ -813,7 +812,7 @@ spec:
     timeoutSeconds: 60
   validationProbes:
     - type: "PostgreSQL"
-      endpoint: "postgres.multi-secret-demo.svc.cluster.local:5432/appdb"
+      endpoint: "postgres.dso-examples.svc.cluster.local:5432/appdb"
       queryTimeout: 5
       credentials:
         passwordKey: "db-password"
@@ -827,7 +826,7 @@ apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
   name: multi-secret-redis-policy
-  namespace: multi-secret-demo
+  namespace: dso-examples
 spec:
   vaultRef:
     keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
@@ -858,7 +857,7 @@ spec:
                       - |
                         AUTH_PASS=$(cat /mnt/secrets/redis-auth-token)
                         echo "Probing Redis with materialized credential from secret {{REVISION_SECRET_NAME}}..."
-                        redis-cli -h redis.multi-secret-demo.svc.cluster.local -p 6379 -a "$AUTH_PASS" --no-auth-warning ping
+                        redis-cli -h redis.dso-examples.svc.cluster.local -p 6379 -a "$AUTH_PASS" --no-auth-warning ping
                     volumeMounts:
                       - name: secret-vol
                         mountPath: /mnt/secrets
@@ -876,7 +875,7 @@ apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
   name: multi-secret-payment-policy
-  namespace: multi-secret-demo
+  namespace: dso-examples
 spec:
   vaultRef:
     keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
@@ -891,7 +890,7 @@ spec:
     timeoutSeconds: 60
   validationProbes:
     - type: "HTTP"
-      endpoint: "http://payment-gateway.multi-secret-demo.svc.cluster.local:8080/v1/health"
+      endpoint: "http://payment-gateway.dso-examples.svc.cluster.local:8080/v1/health"
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true

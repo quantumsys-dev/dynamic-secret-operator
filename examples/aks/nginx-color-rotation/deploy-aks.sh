@@ -65,7 +65,10 @@ else
     echo "ℹ️  Secret 'nginx-bg-color' already exists in Key Vault."
 fi
 
-# 5. Install DSO CRD if not present
+# 5. Ensure target namespace exists and install DSO CRD
+echo "📦 Ensuring namespace 'dso-examples' exists..."
+kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
@@ -84,7 +87,7 @@ fi
 sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
 echo "⏳ Waiting for Nginx Color App deployment to be ready..."
-kubectl rollout status deployment/nginx-color-app --timeout=120s || { echo "❌ Error: Deployment rollout failed or timed out."; exit 1; }
+kubectl rollout status deployment/nginx-color-app -n dso-examples --timeout=120s || { echo "❌ Error: Deployment rollout failed or timed out."; exit 1; }
 
 echo "=================================================================="
 echo "✅ Nginx Color Rotation Example deployed successfully on AKS!"
@@ -95,19 +98,19 @@ echo "------------------------------------------------------------------"
 echo ""
 echo "1️⃣ Access the Nginx Web App:"
 echo "   - Public URL (LoadBalancer):"
-echo "     kubectl get svc nginx-color-app"
+echo "     kubectl get svc nginx-color-app -n dso-examples"
 echo "     (Open http://<EXTERNAL-IP> in your browser)"
 echo ""
 echo "   - Fallback (Port-Forward):"
-echo "     kubectl port-forward svc/nginx-color-app 8080:80"
+echo "     kubectl port-forward svc/nginx-color-app 8080:80 -n dso-examples"
 echo "     (Open http://localhost:8080)"
 echo ""
 echo "2️⃣ Monitor DSO and Workload in Real Time (in a separate terminal):"
 echo "   - Watch DSO State Machine & Conditions:"
-echo "     kubectl get dynamicsecretpolicy aks-nginx-color-policy -w"
+echo "     kubectl get dynamicsecretpolicy aks-nginx-color-policy -n dso-examples -w"
 echo ""
 echo "   - Watch Pod Rollout & Canary Lifecycle:"
-echo "     kubectl get pods -l app=nginx-color-app -w"
+echo "     kubectl get pods -n dso-examples -l app=nginx-color-app -w"
 echo ""
 echo "   - Stream Operator Logs:"
 echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"

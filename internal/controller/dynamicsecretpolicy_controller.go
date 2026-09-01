@@ -79,6 +79,9 @@ const (
 // LabelRevision is the standard label attached to materialized revision secrets.
 const LabelRevision = "dso.quantumsys.dev/revision"
 
+// LabelPolicy identifies the DynamicSecretPolicy owning the materialized revision secret.
+const LabelPolicy = "dso.quantumsys.dev/policy"
+
 // DynamicSecretPolicyReconciler reconciles a DynamicSecretPolicy object
 type DynamicSecretPolicyReconciler struct {
 	client.Client
@@ -505,7 +508,10 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 
 	// Garbage Collect old revisions, keeping only the Current and Desired
 	secrets := &corev1.SecretList{}
-	labelSelector := client.MatchingLabels{canary.LabelTargetWorkload: targetName}
+	labelSelector := client.MatchingLabels{
+		canary.LabelTargetWorkload: targetName,
+		LabelPolicy:                policy.Name,
+	}
 	if err := r.List(ctx, secrets, client.InNamespace(policy.Namespace), labelSelector); err == nil {
 		for _, s := range secrets.Items {
 			rev := s.Labels[LabelRevision]
@@ -582,6 +588,7 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 			Labels: map[string]string{
 				LabelRevision:              revisionHash,
 				canary.LabelTargetWorkload: policy.Spec.WorkloadSelector.Name,
+				LabelPolicy:                policy.Name,
 			},
 		},
 		Type: secretType,

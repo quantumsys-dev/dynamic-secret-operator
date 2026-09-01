@@ -77,7 +77,10 @@ else
     echo "ℹ️  Argo Rollouts namespace already exists on cluster."
 fi
 
-# 6. Install DSO CRD if not present
+# 6. Ensure target namespace exists and install DSO CRD
+echo "📦 Ensuring namespace 'dso-examples' exists..."
+kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
@@ -104,19 +107,19 @@ echo "------------------------------------------------------------------"
 echo ""
 echo "1️⃣ Access the Active Payment Service:"
 echo "   - Public URL (LoadBalancer):"
-echo "     kubectl get svc payment-service-active"
+echo "     kubectl get svc payment-service-active -n dso-examples"
 echo "     (Open http://<EXTERNAL-IP> in your browser)"
 echo ""
 echo "   - Fallback (Port-Forward):"
-echo "     kubectl port-forward svc/payment-service-active 8080:80"
+echo "     kubectl port-forward svc/payment-service-active 8080:80 -n dso-examples"
 echo "     (Open http://localhost:8080)"
 echo ""
 echo "2️⃣ Monitor Argo Rollouts and DSO in Real Time (in separate terminals):"
 echo "   - Watch Argo Rollouts Blue/Green Progression:"
-echo "     kubectl argo rollouts get rollout rollout-payment-service --watch"
+echo "     kubectl argo rollouts get rollout rollout-payment-service -n dso-examples --watch"
 echo ""
 echo "   - Watch DSO State Machine & Validation Conditions:"
-echo "     kubectl get dynamicsecretpolicy -w"
+echo "     kubectl get dynamicsecretpolicy -n dso-examples -w"
 echo ""
 echo "   - Stream Operator Logs:"
 echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"

@@ -82,7 +82,10 @@ else
     echo "ℹ️  Certificate 'ingress-tls-cert' already exists in Key Vault."
 fi
 
-# 5. Generate initial placeholder secret in cluster for initial bootstrap
+# 5. Ensure target namespace exists and generate initial placeholder secret
+echo "📦 Ensuring namespace 'dso-examples' exists..."
+kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
 echo "🔒 Creating bootstrap TLS secret in cluster..."
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -94,6 +97,7 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
     >/dev/null 2>&1 || { echo "❌ Error: Failed to generate bootstrap self-signed TLS cert."; exit 1; }
 
 kubectl create secret tls tls-gateway-ingress-tls-cert-initial \
+    --namespace dso-examples \
     --cert="${TMP_DIR}/tls.crt" \
     --key="${TMP_DIR}/tls.key" \
     --dry-run=client -o yaml | kubectl apply -f - || { echo "❌ Error: Failed to create bootstrap TLS secret."; exit 1; }
@@ -117,7 +121,7 @@ fi
 sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
 echo "⏳ Waiting for TLS Gateway deployment to be ready..."
-kubectl rollout status deployment/tls-gateway --timeout=120s || { echo "❌ Error: TLS Gateway rollout failed or timed out."; exit 1; }
+kubectl rollout status deployment/tls-gateway -n dso-examples --timeout=120s || { echo "❌ Error: TLS Gateway rollout failed or timed out."; exit 1; }
 
 echo "=================================================================="
 echo "✅ TLS Certificate Rotation Example deployed successfully on AKS!"
@@ -128,11 +132,11 @@ echo "------------------------------------------------------------------"
 echo ""
 echo "1️⃣ Access the HTTPS TLS Gateway:"
 echo "   - Public Endpoint (LoadBalancer):"
-echo "     kubectl get svc tls-gateway"
+echo "     kubectl get svc tls-gateway -n dso-examples"
 echo "     curl -kv https://<EXTERNAL-IP>:8443"
 echo ""
 echo "   - Fallback (Port-Forward):"
-echo "     kubectl port-forward svc/tls-gateway 8443:8443"
+echo "     kubectl port-forward svc/tls-gateway 8443:8443 -n dso-examples"
 echo "     curl -kv https://localhost:8443"
 echo ""
 echo "2️⃣ Monitor TLS Expiration & DSO in Real Time (in separate terminals):"
@@ -140,7 +144,7 @@ echo "   - Inspect active TLS Certificate Subject & Expiration:"
 echo "     curl -kv https://localhost:8443 2>&1 | grep 'expire date'"
 echo ""
 echo "   - Watch DSO State Machine & Validation Conditions:"
-echo "     kubectl get dynamicsecretpolicy aks-ingress-tls-policy -w"
+echo "     kubectl get dynamicsecretpolicy aks-ingress-tls-policy -n dso-examples -w"
 echo ""
 echo "   - Stream Operator Logs:"
 echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"

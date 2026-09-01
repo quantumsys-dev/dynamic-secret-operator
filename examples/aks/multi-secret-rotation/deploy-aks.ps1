@@ -17,7 +17,7 @@ param(
     [string]$KeyVaultName,
 
     [Parameter(Mandatory = $false)]
-    [string]$Namespace = "multi-secret-demo"
+    [string]$Namespace = "dso-examples"
 )
 
 $ErrorActionPreference = "Stop"
