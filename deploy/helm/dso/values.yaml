@@ -60,6 +60,9 @@ controller:
   eventBufferSize: 1000
   # Maximum number of concurrent reconciliation workers for high-throughput secret rollouts
   maxConcurrentReconciles: 5
+  # Full resync period for the manager's cache. Bounds how long a DynamicSecretPolicy can go
+  # without a fresh drift-check against its source if an external rotation event is ever lost.
+  syncPeriod: "5m"
 
 # Pod Security Admission (PSA) Restricted compliant security contexts
 podSecurityContext:

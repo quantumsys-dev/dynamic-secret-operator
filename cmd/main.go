@@ -90,6 +90,7 @@ func main() {
 	var eventBufferSize int
 	var maxConcurrentReconciles int
 	var watchNamespaces string
+	var syncPeriod time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -105,6 +106,12 @@ func main() {
 		"Comma-separated list of namespaces to restrict the manager's cache and watches to, "+
 			"matching the RBAC grant when deployed with rbac.scope=Namespaced. Empty (default) "+
 			"watches all namespaces cluster-wide and requires a ClusterRole.")
+	flag.DurationVar(&syncPeriod, "sync-period", 5*time.Minute,
+		"Full resync period for the manager's cache. This bounds how long a DynamicSecretPolicy "+
+			"can go without a fresh drift-check against its source (e.g. Key Vault) if an "+
+			"external rotation event (Azure Service Bus) is ever lost - the reconciler treats "+
+			"a resync identically to a real event once DesiredRevision has been cleared by a "+
+			"prior promotion. Without this, controller-runtime's 10h default would apply.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -197,6 +204,7 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
+			SyncPeriod:        &syncPeriod,
 			DefaultNamespaces: defaultNamespaces,
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Secret{}: {
