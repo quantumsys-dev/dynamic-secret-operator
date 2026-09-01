@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 
+	argov1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -138,8 +139,8 @@ func discoverArgoCDAppName(obj client.Object) string {
 }
 
 // fetchArgoCDApplication retrieves the Application from the workload namespace or the default "argocd" namespace.
-func fetchArgoCDApplication(ctx context.Context, c client.Client, appName, workloadNamespace string) (*Application, error) {
-	app := &Application{}
+func fetchArgoCDApplication(ctx context.Context, c client.Client, appName, workloadNamespace string) (*argov1alpha1.Application, error) {
+	app := &argov1alpha1.Application{}
 
 	// 1. Try workload namespace
 	if err := c.Get(ctx, types.NamespacedName{Name: appName, Namespace: workloadNamespace}, app); err == nil {
@@ -152,7 +153,7 @@ func fetchArgoCDApplication(ctx context.Context, c client.Client, appName, workl
 	}
 
 	// 3. Fallback: Search across all namespaces
-	appList := &ApplicationList{}
+	appList := &argov1alpha1.ApplicationList{}
 	if err := c.List(ctx, appList); err == nil {
 		for i := range appList.Items {
 			if appList.Items[i].Name == appName {
@@ -161,12 +162,12 @@ func fetchArgoCDApplication(ctx context.Context, c client.Client, appName, workl
 		}
 	}
 
-	return nil, apierrors.NewNotFound(SchemeGroupVersion.WithResource("applications").GroupResource(), appName)
+	return nil, apierrors.NewNotFound(argov1alpha1.SchemeGroupVersion.WithResource("applications").GroupResource(), appName)
 }
 
 // ensureIgnoreDifferences verifies and appends required JSON pointers to the Application spec.
 // Returns true if modifications were made.
-func ensureIgnoreDifferences(app *Application, group, kind string) bool {
+func ensureIgnoreDifferences(app *argov1alpha1.Application, group, kind string) bool {
 	requiredPointers := []string{
 		JSONPointerRevisionAnnotation,
 		JSONPointerVolumes,
@@ -192,7 +193,7 @@ func ensureIgnoreDifferences(app *Application, group, kind string) bool {
 	}
 
 	// No matching group/kind entry found; create a new one
-	app.Spec.IgnoreDifferences = append(app.Spec.IgnoreDifferences, ResourceIgnoreDifferences{
+	app.Spec.IgnoreDifferences = append(app.Spec.IgnoreDifferences, argov1alpha1.ResourceIgnoreDifferences{
 		Group:        group,
 		Kind:         kind,
 		JSONPointers: requiredPointers,

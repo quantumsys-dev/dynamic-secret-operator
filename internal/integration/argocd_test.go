@@ -21,6 +21,7 @@ import (
 	"os"
 	"testing"
 
+	argov1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,7 +32,7 @@ import (
 func newTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = appsv1.AddToScheme(s)
-	_ = AddToScheme(s)
+	_ = argov1alpha1.AddToScheme(s)
 	return s
 }
 
@@ -101,13 +102,13 @@ func TestReconcileArgoCDIgnoreDifferences_PatchesApp(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	app := &Application{
+	app := &argov1alpha1.Application{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-app",
 			Namespace: "argocd",
 		},
-		Spec: ApplicationSpec{
-			IgnoreDifferences: []ResourceIgnoreDifferences{},
+		Spec: argov1alpha1.ApplicationSpec{
+			IgnoreDifferences: []argov1alpha1.ResourceIgnoreDifferences{},
 		},
 	}
 
@@ -127,7 +128,7 @@ func TestReconcileArgoCDIgnoreDifferences_PatchesApp(t *testing.T) {
 		t.Fatalf("expected successful reconcile, got %v", err)
 	}
 
-	updatedApp := &Application{}
+	updatedApp := &argov1alpha1.Application{}
 	if err := client.Get(ctx, types.NamespacedName{Name: "my-app", Namespace: "argocd"}, updatedApp); err != nil {
 		t.Fatalf("failed to fetch updated application: %v", err)
 	}
@@ -151,13 +152,13 @@ func TestReconcileArgoCDIgnoreDifferences_RolloutSupport(t *testing.T) {
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	app := &Application{
+	app := &argov1alpha1.Application{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "rollout-app",
 			Namespace: "argocd",
 		},
-		Spec: ApplicationSpec{
-			IgnoreDifferences: []ResourceIgnoreDifferences{
+		Spec: argov1alpha1.ApplicationSpec{
+			IgnoreDifferences: []argov1alpha1.ResourceIgnoreDifferences{
 				{
 					Group: "argoproj.io",
 					Kind:  "Rollout",
@@ -185,7 +186,7 @@ func TestReconcileArgoCDIgnoreDifferences_RolloutSupport(t *testing.T) {
 		t.Fatalf("expected successful reconcile, got %v", err)
 	}
 
-	updatedApp := &Application{}
+	updatedApp := &argov1alpha1.Application{}
 	if err := client.Get(ctx, types.NamespacedName{Name: "rollout-app", Namespace: "argocd"}, updatedApp); err != nil {
 		t.Fatalf("failed to fetch updated application: %v", err)
 	}
@@ -210,13 +211,13 @@ func TestReconcileArgoCDIgnoreDifferences_PreservesCustomUserEntries(t *testing.
 	ctx := context.Background()
 	scheme := newTestScheme()
 
-	app := &Application{
+	app := &argov1alpha1.Application{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "custom-app",
 			Namespace: "argocd",
 		},
-		Spec: ApplicationSpec{
-			IgnoreDifferences: []ResourceIgnoreDifferences{
+		Spec: argov1alpha1.ApplicationSpec{
+			IgnoreDifferences: []argov1alpha1.ResourceIgnoreDifferences{
 				{
 					Group: "apps",
 					Kind:  "StatefulSet",
@@ -251,7 +252,7 @@ func TestReconcileArgoCDIgnoreDifferences_PreservesCustomUserEntries(t *testing.
 		t.Fatalf("expected successful reconcile, got %v", err)
 	}
 
-	updatedApp := &Application{}
+	updatedApp := &argov1alpha1.Application{}
 	if err := client.Get(ctx, types.NamespacedName{Name: "custom-app", Namespace: "argocd"}, updatedApp); err != nil {
 		t.Fatalf("failed to fetch updated application: %v", err)
 	}

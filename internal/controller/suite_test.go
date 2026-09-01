@@ -117,7 +117,7 @@ var _ = AfterSuite(func() {
 	if cancel != nil {
 		cancel()
 	}
-	if testEnv != nil {
+	if cfg != nil && testEnv != nil {
 		By("tearing down the test environment")
 		_ = testEnv.Stop()
 	}
