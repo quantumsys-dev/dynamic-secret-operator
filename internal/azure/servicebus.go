@@ -24,6 +24,9 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/events"
@@ -32,6 +35,31 @@ import (
 
 // Compile-time assertion: ServiceBusListener must satisfy events.EventIngester.
 var _ events.EventIngester = &ServiceBusListener{}
+
+// applicationPropertiesCarrier adapts azservicebus's ApplicationProperties map to the
+// OpenTelemetry propagation.TextMapCarrier interface, so a W3C trace context set by the
+// producer (e.g. the system that published the Key Vault rotation event) can be extracted
+// and continued, instead of every ingested message starting a disconnected trace.
+type applicationPropertiesCarrier map[string]any
+
+func (c applicationPropertiesCarrier) Get(key string) string {
+	if v, ok := c[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func (c applicationPropertiesCarrier) Set(key, value string) {
+	c[key] = value
+}
+
+func (c applicationPropertiesCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
+}
 
 // Receiver defines the interface for receiving messages, allowing unit test mocking.
 type Receiver interface {
@@ -176,6 +204,17 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 				"bodySize", len(msg.Body),
 			)
 
+			// Continue the producer's trace, if it propagated W3C trace context via
+			// ApplicationProperties, rather than starting a disconnected trace per message.
+			msgCtx := otel.GetTextMapPropagator().Extract(ctx, applicationPropertiesCarrier(msg.ApplicationProperties))
+			msgCtx, span := telemetry.Tracer.Start(msgCtx, "ServiceBusReceiveMessage",
+				trace.WithAttributes(
+					attribute.String("messaging.system", "servicebus"),
+					attribute.String("messaging.destination.name", l.QueueName),
+					attribute.String("messaging.message.id", msg.MessageID),
+				),
+			)
+
 			// Construct a provider-agnostic AckFunc that wraps CompleteMessage.
 			ackFunc := events.AckFunc(func(ackCtx context.Context) error {
 				log.Info("completing Service Bus message after successful reconciliation", "messageID", msg.MessageID)
@@ -189,9 +228,10 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 
 			// Deliver the raw message body to the provider-agnostic handler.
 			if l.handler != nil {
-				if err := l.handler(ctx, msg.Body, ackFunc); err != nil {
+				if err := l.handler(msgCtx, msg.Body, ackFunc); err != nil {
 					log.Error(err, "handler failed to process message, abandoning lock", "messageID", msg.MessageID)
 					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
+					span.RecordError(err)
 
 					// Release the peek-lock immediately so the message becomes available for
 					// redelivery right away, instead of sitting locked until it naturally expires.
@@ -204,6 +244,7 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 					abandonCancel()
 				}
 			}
+			span.End()
 		}
 	}
 }

@@ -19,15 +19,71 @@ package azure
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/events"
 )
+
+func TestApplicationPropertiesCarrier(t *testing.T) {
+	t.Run("Get returns string values and empty string for missing/non-string keys", func(t *testing.T) {
+		c := applicationPropertiesCarrier{
+			"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			"non-string":  42,
+		}
+		if got := c.Get("traceparent"); got != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
+			t.Errorf("expected traceparent value, got %q", got)
+		}
+		if got := c.Get("non-string"); got != "" {
+			t.Errorf("expected empty string for non-string value, got %q", got)
+		}
+		if got := c.Get("missing"); got != "" {
+			t.Errorf("expected empty string for missing key, got %q", got)
+		}
+	})
+
+	t.Run("Set stores a value retrievable via Get", func(t *testing.T) {
+		c := applicationPropertiesCarrier{}
+		c.Set("baggage", "userId=alice")
+		if got := c.Get("baggage"); got != "userId=alice" {
+			t.Errorf("expected 'userId=alice', got %q", got)
+		}
+	})
+
+	t.Run("Keys returns all map keys", func(t *testing.T) {
+		c := applicationPropertiesCarrier{"a": "1", "b": "2"}
+		if got := len(c.Keys()); got != 2 {
+			t.Fatalf("expected 2 keys, got %d", got)
+		}
+	})
+
+	t.Run("integrates with the W3C TraceContext propagator to extract a remote span context", func(t *testing.T) {
+		traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+		spanID := "00f067aa0ba902b7"
+		props := applicationPropertiesCarrier{
+			"traceparent": fmt.Sprintf("00-%s-%s-01", traceID, spanID),
+		}
+
+		ctx := propagation.TraceContext{}.Extract(context.Background(), props)
+		sc := trace.SpanContextFromContext(ctx)
+		if !sc.IsValid() {
+			t.Fatalf("expected a valid extracted span context")
+		}
+		if sc.TraceID().String() != traceID {
+			t.Errorf("expected traceID %q, got %q", traceID, sc.TraceID().String())
+		}
+		if sc.SpanID().String() != spanID {
+			t.Errorf("expected spanID %q, got %q", spanID, sc.SpanID().String())
+		}
+	})
+}
 
 type mockTokenCredential struct{}
 
