@@ -58,6 +58,25 @@ var (
 		},
 		[]string{"namespace", "probe_type"},
 	)
+
+	// ServiceBusMessagesTotal tracks total Azure Service Bus messages processed, partitioned by status.
+	ServiceBusMessagesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dso_servicebus_messages_total",
+			Help: "Total number of Azure Service Bus messages processed, partitioned by status.",
+		},
+		[]string{"status"}, // ack, nack, dlq
+	)
+
+	// KeyVaultFetchLatency records latency in seconds for fetching secrets/certificates from Azure Key Vault.
+	KeyVaultFetchLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "dso_keyvault_fetch_latency_seconds",
+			Help:    "Latency in seconds for fetching secrets/certificates from Azure Key Vault.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"vault_name", "secret_name", "status"},
+	)
 )
 
 func init() {
@@ -67,5 +86,8 @@ func init() {
 		RotationsFailed,
 		CircuitBreakersTripped,
 		ProbeDurationSeconds,
+		ServiceBusMessagesTotal,
+		KeyVaultFetchLatency,
 	)
 }
+

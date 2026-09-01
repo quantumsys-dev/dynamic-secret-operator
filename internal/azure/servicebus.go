@@ -26,6 +26,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
 var _ manager.Runnable = &ServiceBusListener{}
@@ -181,12 +183,18 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 			// Construct transactional Ack function for the message
 			ackFunc := func(ackCtx context.Context) error {
 				log.Info("completing Service Bus message after successful reconciliation", "messageID", msg.MessageID)
-				return receiver.CompleteMessage(ackCtx, msg, nil)
+				if err := receiver.CompleteMessage(ackCtx, msg, nil); err != nil {
+					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
+					return err
+				}
+				telemetry.ServiceBusMessagesTotal.WithLabelValues("ack").Inc()
+				return nil
 			}
 
 			if l.Handler != nil {
 				if err := l.Handler(ctx, msg, ackFunc); err != nil {
 					log.Error(err, "handler failed to process message", "messageID", msg.MessageID)
+					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
 				}
 			}
 		}

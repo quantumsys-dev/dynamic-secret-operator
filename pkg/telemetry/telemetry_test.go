@@ -32,6 +32,11 @@ func TestTelemetry_MetricsAndTracing(t *testing.T) {
 		RotationsFailed.WithLabelValues(ns).Inc()
 		CircuitBreakersTripped.WithLabelValues(ns).Inc()
 		ProbeDurationSeconds.WithLabelValues(ns, "HTTP").Observe(0.125)
+		ServiceBusMessagesTotal.WithLabelValues("ack").Inc()
+		ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
+		ServiceBusMessagesTotal.WithLabelValues("dlq").Inc()
+		KeyVaultFetchLatency.WithLabelValues("https://myvault.vault.azure.net", "mysecret", "success").Observe(0.045)
+		KeyVaultFetchLatency.WithLabelValues("https://myvault.vault.azure.net", "mysecret", "error").Observe(0.010)
 	})
 
 	t.Run("starts and ends tracer spans cleanly", func(t *testing.T) {

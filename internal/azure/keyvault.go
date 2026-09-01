@@ -21,9 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
+
+	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
 // SecretPayload represents the retrieved secret and its cryptographic version metadata.
@@ -55,24 +58,35 @@ func NewKeyVaultFetcher(cred azcore.TokenCredential) (*AzureKeyVaultFetcher, err
 
 // GetSecret fetches a secret by name and optional version from the specified Azure Key Vault URI.
 func (f *AzureKeyVaultFetcher) GetSecret(ctx context.Context, vaultURI, secretName, version string) (*SecretPayload, error) {
+	start := time.Now()
+	status := "success"
+	defer func() {
+		telemetry.KeyVaultFetchLatency.WithLabelValues(vaultURI, secretName, status).Observe(time.Since(start).Seconds())
+	}()
+
 	if vaultURI == "" {
+		status = "error"
 		return nil, errors.New("vaultURI must not be empty")
 	}
 	if secretName == "" {
+		status = "error"
 		return nil, errors.New("secretName must not be empty")
 	}
 
 	client, err := azsecrets.NewClient(vaultURI, f.cred, nil)
 	if err != nil {
+		status = "error"
 		return nil, fmt.Errorf("failed to create azsecrets client for %q: %w", vaultURI, err)
 	}
 
 	resp, err := client.GetSecret(ctx, secretName, version, nil)
 	if err != nil {
+		status = "error"
 		return nil, fmt.Errorf("failed to retrieve secret %q from vault %q: %w", secretName, vaultURI, err)
 	}
 
 	if resp.Value == nil {
+		status = "error"
 		return nil, fmt.Errorf("retrieved secret %q has nil value", secretName)
 	}
 

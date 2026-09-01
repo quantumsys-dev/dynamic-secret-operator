@@ -200,4 +200,33 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 	if !ackCalled {
 		t.Errorf("expected AckFunc to trigger CompleteMessage")
 	}
+
+	t.Run("records NACK when handler returns error", func(t *testing.T) {
+		listener, err := NewServiceBusListener("sb.servicebus.windows.net", "my-queue", cred)
+		if err != nil {
+			t.Fatalf("failed to create listener: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		mock := &mockReceiver{
+			receiveFunc: func(c context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error) {
+				return []*azservicebus.ReceivedMessage{
+					{
+						MessageID: "msg-err",
+						Body:      []byte(`{"eventType": "Test"}`),
+					},
+				}, nil
+			},
+		}
+		listener.customReceiver = mock
+		listener.SetHandler(func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack AckFunc) error {
+			cancel()
+			return errors.New("handler failure")
+		})
+
+		_ = listener.Start(ctx)
+	})
 }
+
