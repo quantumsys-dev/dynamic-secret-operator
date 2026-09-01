@@ -18,6 +18,7 @@ package probes
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -36,10 +37,16 @@ func SanitizeDBError(err error, sensitiveData ...string) error {
 
 	msg := err.Error()
 
-	// Redact any explicitly supplied sensitive tokens/passwords
+	// Redact any explicitly supplied sensitive tokens/passwords, along with their
+	// URL-escaped form since DSNs are built with url.QueryEscape and drivers may echo
+	// the escaped value back in error messages.
 	for _, sensitive := range sensitiveData {
 		if trimmed := strings.TrimSpace(sensitive); len(trimmed) > 0 {
 			msg = strings.ReplaceAll(msg, trimmed, "[REDACTED]")
+
+			if escaped := url.QueryEscape(trimmed); escaped != trimmed {
+				msg = strings.ReplaceAll(msg, escaped, "[REDACTED]")
+			}
 		}
 	}
 
