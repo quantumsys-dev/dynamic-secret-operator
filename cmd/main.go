@@ -87,6 +87,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var eventBufferSize int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -95,7 +96,9 @@ func main() {
 	flag.BoolVar(&secureMetrics, "metrics-secure", false,
 		"If set the metrics endpoint is served securely")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+		"If set, HTTP/2 will be enabled for the metrics server")
+	flag.IntVar(&eventBufferSize, "event-buffer-size", 1000,
+		"The buffer capacity of the internal event channel bridging Azure Service Bus to the controller.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -185,7 +188,10 @@ func main() {
 	}
 
 	// Create buffered channel to bridge Service Bus rotation triggers to controller-runtime watch queue
-	eventsChannel := make(chan event.GenericEvent, 100)
+	if eventBufferSize <= 0 {
+		eventBufferSize = 1000
+	}
+	eventsChannel := make(chan event.GenericEvent, eventBufferSize)
 
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:        mgr.GetClient(),
