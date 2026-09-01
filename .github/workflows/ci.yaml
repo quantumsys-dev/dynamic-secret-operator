@@ -29,7 +29,7 @@ jobs:
           args: --timeout=5m
 
   test:
-    name: Run Unit Tests
+    name: Run Unit & Integration Tests (envtest)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -40,31 +40,20 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+
+      - name: Install setup-envtest and download k8s control-plane binaries
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19
+          K8S_ASSETS_DIR="$(setup-envtest use 1.31.0 -p path)"
+          echo "KUBEBUILDER_ASSETS=${K8S_ASSETS_DIR}" >> $GITHUB_ENV
 
       - name: Run Tests
         run: go test -v -race -count=1 ./api/... ./internal/... ./pkg/...
 
-  fuzz:
-    name: Fuzz Tests
-    runs-on: ubuntu-latest
-    needs: [test]
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
-      - name: Run Fuzz Tests (FuzzSanitizeDBError)
-        run: go test -fuzz=FuzzSanitizeDBError -fuzztime=30s ./internal/probes/...
-
   e2e:
     name: E2E Tests (Kind)
     runs-on: ubuntu-latest
-    needs: [lint]
+    needs: [lint, test]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4

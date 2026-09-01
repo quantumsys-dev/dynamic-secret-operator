@@ -1,0 +1,33 @@
+name: Continuous Fuzzing
+---
+on:
+  schedule:
+    - cron: '0 2 * * *' # Run nightly at 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: 'Duration to run fuzzing (e.g. 5m, 10m, 30m)'
+        required: false
+        default: '10m'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Deep Fuzz Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run Deep Fuzzing (FuzzSanitizeDBError)
+        run: |
+          FUZZ_TIME="${{ github.event.inputs.fuzztime || '10m' }}"
+          go test -fuzz=FuzzSanitizeDBError -fuzztime=${FUZZ_TIME} ./internal/probes/...
