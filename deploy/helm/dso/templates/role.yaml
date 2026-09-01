@@ -1,10 +1,16 @@
-{{- if and .Values.rbac.create (eq .Values.rbac.scope "Cluster") }}
+{{- if and .Values.rbac.create (eq .Values.rbac.scope "Namespaced") }}
+{{- $namespaces := .Values.rbac.watchNamespaces | default (list .Release.Namespace) }}
+{{- $fullName := include "dso.fullname" . }}
+{{- $labels := include "dso.labels" . }}
+{{- range $ns := $namespaces }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: {{ include "dso.fullname" . }}-manager-role
+  name: {{ $fullName }}-manager-role
+  namespace: {{ $ns }}
   labels:
-    {{- include "dso.labels" . | nindent 4 }}
+    {{- $labels | nindent 4 }}
 rules:
   - apiGroups:
       - ""
@@ -72,7 +78,7 @@ rules:
       - patch
       - update
       - watch
-  {{- if .Values.argoCD.autoPatch }}
+  {{- if $.Values.argoCD.autoPatch }}
   - apiGroups:
       - argoproj.io
     resources:
@@ -128,4 +134,5 @@ rules:
       - patch
       - update
       - watch
+{{- end }}
 {{- end }}

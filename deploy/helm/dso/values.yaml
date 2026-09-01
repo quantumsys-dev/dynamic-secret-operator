@@ -22,6 +22,16 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name: ""
 
+# Role-Based Access Control (RBAC) configuration
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+  # Scope of RBAC permissions: "Cluster" (ClusterRole/ClusterRoleBinding) or "Namespaced" (Role/RoleBinding)
+  # In high-security / multi-tenant clusters, set to "Namespaced" to eliminate cluster-wide secret access.
+  scope: "Cluster"
+  # When scope is "Namespaced", list of namespaces where DSO will have permissions (defaults to release namespace if empty)
+  watchNamespaces: []
+
 # Azure Workload Identity configuration
 azure:
   workloadIdentity:
