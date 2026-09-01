@@ -82,6 +82,12 @@ const LabelRevision = "dso.quantumsys.dev/revision"
 // LabelPolicy identifies the DynamicSecretPolicy owning the materialized revision secret.
 const LabelPolicy = "dso.quantumsys.dev/policy"
 
+// LabelManaged identifies secrets managed by the Dynamic Secret Operator.
+const LabelManaged = "dso.quantumsys.dev/managed"
+
+// ManagedValueTrue represents the standard active value for LabelManaged.
+const ManagedValueTrue = "true"
+
 // DynamicSecretPolicyReconciler reconciles a DynamicSecretPolicy object
 type DynamicSecretPolicyReconciler struct {
 	client.Client
@@ -589,6 +595,7 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 				LabelRevision:              revisionHash,
 				canary.LabelTargetWorkload: policy.Spec.WorkloadSelector.Name,
 				LabelPolicy:                policy.Name,
+				LabelManaged:               ManagedValueTrue,
 			},
 		},
 		Type: secretType,

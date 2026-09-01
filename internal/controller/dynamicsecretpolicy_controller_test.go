@@ -392,6 +392,9 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	if createdSecret.Labels[LabelPolicy] != policy.Name {
 		t.Errorf("expected secret policy label %q, got %q", policy.Name, createdSecret.Labels[LabelPolicy])
 	}
+	if createdSecret.Labels[LabelManaged] != ManagedValueTrue {
+		t.Errorf("expected secret managed label %q, got %q", ManagedValueTrue, createdSecret.Labels[LabelManaged])
+	}
 	if len(createdSecret.OwnerReferences) == 0 {
 		t.Errorf("expected controller owner reference on created secret")
 	}
@@ -2003,6 +2006,78 @@ func TestDynamicSecretPolicyReconciler_MaterializeTLSSecretRevision(t *testing.T
 	}
 	if _, ok := secret.Data[corev1.TLSPrivateKeyKey]; !ok {
 		t.Errorf("expected %q key in secret data", corev1.TLSPrivateKeyKey)
+	}
+	if secret.Labels[LabelManaged] != ManagedValueTrue {
+		t.Errorf("expected %s=%s label on TLS secret, got %q", LabelManaged, ManagedValueTrue, secret.Labels[LabelManaged])
+	}
+}
+
+// TestDynamicSecretPolicyReconciler_ManagedSecretLabelAndCacheScoping verifies that
+// materialized secrets are always stamped with LabelManaged="true", allowing the manager's
+// cache to strictly filter operator-managed secrets and isolate unmanaged cluster secrets.
+func TestDynamicSecretPolicyReconciler_ManagedSecretLabelAndCacheScoping(t *testing.T) {
+	scheme := setupTestScheme(t)
+	ctx := context.Background()
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis-cache-policy",
+			Namespace: "dso-examples",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://kv-test.vault.azure.net",
+				ObjectName:  "redis-password",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "redis-client",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policy).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		SecretFetcher: &mockSecretFetcher{
+			getSecretFunc: func(ctx context.Context, vaultURI, secretName, version string) (*azure.SecretPayload, error) {
+				return &azure.SecretPayload{
+					Value:   []byte("redis-super-secret-password-123"),
+					Version: "rev1",
+				}, nil
+			},
+		},
+	}
+
+	rev, err := r.materializeSecretRevision(ctx, policy)
+	if err != nil {
+		t.Fatalf("materializeSecretRevision failed: %v", err)
+	}
+
+	secretName := fmt.Sprintf("redis-client-redis-password-rev-%s", rev)
+	secret := &corev1.Secret{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "dso-examples", Name: secretName}, secret); err != nil {
+		t.Fatalf("failed to retrieve materialized secret %s: %v", secretName, err)
+	}
+
+	// Verify all 4 required security and tracking labels are present
+	if secret.Labels[LabelManaged] != ManagedValueTrue {
+		t.Errorf("expected label %s=%s, got %q", LabelManaged, ManagedValueTrue, secret.Labels[LabelManaged])
+	}
+	if secret.Labels[LabelPolicy] != "redis-cache-policy" {
+		t.Errorf("expected label %s=%s, got %q", LabelPolicy, "redis-cache-policy", secret.Labels[LabelPolicy])
+	}
+	if secret.Labels[canary.LabelTargetWorkload] != "redis-client" {
+		t.Errorf("expected label %s=%s, got %q", canary.LabelTargetWorkload, "redis-client", secret.Labels[canary.LabelTargetWorkload])
+	}
+	if secret.Labels[LabelRevision] != rev {
+		t.Errorf("expected label %s=%s, got %q", LabelRevision, rev, secret.Labels[LabelRevision])
 	}
 }
 
