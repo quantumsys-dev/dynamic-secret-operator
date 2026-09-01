@@ -41,6 +41,7 @@ func (m *mockTokenCredential) GetToken(ctx context.Context, options policy.Token
 type mockReceiver struct {
 	receiveFunc  func(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error)
 	completeFunc func(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error
+	abandonFunc  func(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.AbandonMessageOptions) error
 	closeFunc    func(ctx context.Context) error
 }
 
@@ -55,6 +56,13 @@ func (m *mockReceiver) ReceiveMessages(ctx context.Context, maxMessages int, opt
 func (m *mockReceiver) CompleteMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error {
 	if m.completeFunc != nil {
 		return m.completeFunc(ctx, message, options)
+	}
+	return nil
+}
+
+func (m *mockReceiver) AbandonMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.AbandonMessageOptions) error {
+	if m.abandonFunc != nil {
+		return m.abandonFunc(ctx, message, options)
 	}
 	return nil
 }
@@ -203,7 +211,7 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 		t.Errorf("expected AckFunc to trigger CompleteMessage")
 	}
 
-	t.Run("records NACK when handler returns error", func(t *testing.T) {
+	t.Run("abandons the message lock when handler returns error", func(t *testing.T) {
 		listener, err := NewServiceBusListener("sb.servicebus.windows.net", "my-queue", cred)
 		if err != nil {
 			t.Fatalf("failed to create listener: %v", err)
@@ -212,6 +220,8 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
+		abandonCalled := false
+		var abandonedMessageID string
 		mock := &mockReceiver{
 			receiveFunc: func(c context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error) {
 				return []*azservicebus.ReceivedMessage{
@@ -221,6 +231,11 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 					},
 				}, nil
 			},
+			abandonFunc: func(c context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.AbandonMessageOptions) error {
+				abandonCalled = true
+				abandonedMessageID = message.MessageID
+				return nil
+			},
 		}
 		listener.customReceiver = mock
 		listener.SetEventHandler(func(ctx context.Context, body []byte, ack events.AckFunc) error {
@@ -229,6 +244,13 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 		})
 
 		_ = listener.Start(ctx)
+
+		if !abandonCalled {
+			t.Errorf("expected AbandonMessage to be called when the handler returns an error")
+		}
+		if abandonedMessageID != "msg-err" {
+			t.Errorf("expected abandoned message ID %q, got %q", "msg-err", abandonedMessageID)
+		}
 	})
 }
 

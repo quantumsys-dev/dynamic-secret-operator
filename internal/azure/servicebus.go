@@ -37,6 +37,7 @@ var _ events.EventIngester = &ServiceBusListener{}
 type Receiver interface {
 	ReceiveMessages(ctx context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error)
 	CompleteMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error
+	AbandonMessage(ctx context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.AbandonMessageOptions) error
 	Close(ctx context.Context) error
 }
 
@@ -189,8 +190,18 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 			// Deliver the raw message body to the provider-agnostic handler.
 			if l.handler != nil {
 				if err := l.handler(ctx, msg.Body, ackFunc); err != nil {
-					log.Error(err, "handler failed to process message", "messageID", msg.MessageID)
+					log.Error(err, "handler failed to process message, abandoning lock", "messageID", msg.MessageID)
 					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
+
+					// Release the peek-lock immediately so the message becomes available for
+					// redelivery right away, instead of sitting locked until it naturally expires.
+					// ctx may already be canceled (shutdown, or the handler's own timeout), so use
+					// a short-lived context independent of it.
+					abandonCtx, abandonCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if abandonErr := receiver.AbandonMessage(abandonCtx, msg, nil); abandonErr != nil {
+						log.Error(abandonErr, "failed to abandon message lock", "messageID", msg.MessageID)
+					}
+					abandonCancel()
 				}
 			}
 		}
