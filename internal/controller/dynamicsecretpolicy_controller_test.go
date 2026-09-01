@@ -553,7 +553,16 @@ func TestDynamicSecretPolicyReconciler_StateTransitions(t *testing.T) {
 				Name:      "unhandled-policy",
 				Namespace: "default",
 			},
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				VaultRef: secretv1alpha1.VaultReference{
+					KeyVaultURI: "https://my-vault.vault.azure.net",
+					ObjectName:  "db-pass",
+					ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+				},
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{Name: "app"},
+			},
 			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				DesiredRevision: "unhandled-rev",
 				Conditions: []metav1.Condition{
 					{
 						Type:   "UnknownState",

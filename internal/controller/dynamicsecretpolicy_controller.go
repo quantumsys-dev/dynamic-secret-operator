@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/pem"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,6 +54,7 @@ import (
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/canary"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/integration"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/probes"
+	sourceProvider "github.com/quantumsys-dev/dynamic-secret-operator/internal/source"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/workload"
 	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
@@ -96,6 +98,8 @@ type DynamicSecretPolicyReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	SecretFetcher azure.SecretFetcher
+	// ProviderRegistry manages pluggable secret ingestion backends (Azure, ESO K8sSecret, AWS, GCP, Vault)
+	ProviderRegistry *sourceProvider.Registry
 	// KubeClient allows retrieving pod failure logs from Job probes
 	KubeClient kubernetes.Interface
 	// MaxConcurrentReconciles controls worker parallelism in controller-runtime
@@ -185,8 +189,8 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			ctx = log.IntoContext(ctx, logger)
 		}
 
-		// If the upstream secret has changed, reset the circuit breaker and state
-		if policy.Status.CurrentRevision != revisionHash && policy.Status.DesiredRevision != revisionHash {
+		// If the upstream secret has changed to a NEW revision, reset the circuit breaker and state
+		if revisionHash != "" && policy.Status.CurrentRevision != revisionHash && policy.Status.DesiredRevision != revisionHash {
 			logger.Info("upstream secret drift detected; resetting circuit breaker",
 				"newRevision", revisionHash,
 				"currentRevision", policy.Status.CurrentRevision,
@@ -199,8 +203,8 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 	}
 
-	// If Circuit Breaker is tripped during an active rollout (and no upstream drift detected), halt reconciliation
-	if currentState != "" && (policy.Status.ConsecutiveFailures >= threshold || meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCircuitBreakerTripped)) {
+	// If Circuit Breaker is tripped, halt reconciliation
+	if policy.Status.ConsecutiveFailures >= threshold || meta.IsStatusConditionTrue(policy.Status.Conditions, ConditionTypeCircuitBreakerTripped) {
 		logger.Error(nil, "circuit breaker tripped; halting reconciliation loop",
 			"consecutiveFailures", policy.Status.ConsecutiveFailures,
 			"threshold", threshold,
@@ -286,7 +290,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 
-		secretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.VaultRef.ObjectName, policy.Status.DesiredRevision)
+		secretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.GetVaultObjectName(), policy.Status.DesiredRevision)
 
 		// 1. Provision Canary Deployment derived polymorphically from target workload
 		canaryDeploy := adapter.BuildCanary(policy, secretName)
@@ -303,27 +307,40 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		}
 		logger.Info("provisioned canary deployment", "canaryDeployment", canaryDeploy.Name, "targetKind", targetKind)
 
-		// 2. Provision Canary NetworkPolicy
-		netpol := canary.BuildNetworkPolicy(policy)
-		if err := controllerutil.SetControllerReference(policy, netpol, r.Scheme); err != nil {
-			logger.Error(err, "failed to set controller reference on canary network policy")
-			span.RecordError(err)
-			return ctrl.Result{}, err
-		}
+		// 2. Provision Canary NetworkPolicy (Standard or eBPF CiliumNetworkPolicy)
+		netpolName := ""
+		if policy.Spec.NetworkPolicy != nil && policy.Spec.NetworkPolicy.Provider == secretv1alpha1.NetworkPolicyProviderCilium {
+			ciliumNetpol := canary.BuildCiliumNetworkPolicy(policy)
+			if err := r.Create(ctx, ciliumNetpol); err != nil && !apierrors.IsAlreadyExists(err) {
+				logger.Error(err, "failed to create canary cilium network policy")
+				span.RecordError(err)
+				return ctrl.Result{}, err
+			}
+			netpolName = ciliumNetpol.GetName()
+			logger.Info("enforced eBPF canary CiliumNetworkPolicy isolation", "ciliumNetworkPolicy", netpolName)
+		} else {
+			netpol := canary.BuildNetworkPolicy(policy)
+			if err := controllerutil.SetControllerReference(policy, netpol, r.Scheme); err != nil {
+				logger.Error(err, "failed to set controller reference on canary network policy")
+				span.RecordError(err)
+				return ctrl.Result{}, err
+			}
 
-		if err := r.Create(ctx, netpol); err != nil && !apierrors.IsAlreadyExists(err) {
-			logger.Error(err, "failed to create canary network policy")
-			span.RecordError(err)
-			return ctrl.Result{}, err
+			if err := r.Create(ctx, netpol); err != nil && !apierrors.IsAlreadyExists(err) {
+				logger.Error(err, "failed to create canary network policy")
+				span.RecordError(err)
+				return ctrl.Result{}, err
+			}
+			netpolName = netpol.Name
+			logger.Info("enforced canary network policy isolation", "networkPolicy", netpolName)
 		}
-		logger.Info("enforced canary network policy isolation", "networkPolicy", netpol.Name)
 
 		meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeRevisionPrepared)
 		cond := metav1.Condition{
 			Type:    ConditionTypeCanaryProvisioning,
 			Status:  metav1.ConditionTrue,
 			Reason:  ReasonProvisioning,
-			Message: fmt.Sprintf("Canary deployment %s and isolation policy %s provisioned", canaryDeploy.Name, netpol.Name),
+			Message: fmt.Sprintf("Canary deployment %s and isolation policy %s provisioned", canaryDeploy.Name, netpolName),
 		}
 		if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
 			logger.Error(err, "failed to transition to CanaryProvisioning")
@@ -449,7 +466,7 @@ func (r *DynamicSecretPolicyReconciler) reconcileValidationProbes(ctx context.Co
 	}
 
 	targetName := policy.Spec.WorkloadSelector.Name
-	secretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.VaultRef.ObjectName, policy.Status.DesiredRevision)
+	secretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.GetVaultObjectName(), policy.Status.DesiredRevision)
 
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, secret); err != nil {
@@ -570,7 +587,7 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 		logger.Error(err, "failed to reconcile Argo CD ignoreDifferences; continuing with workload promotion", "targetWorkload", targetName)
 	}
 
-	newSecretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.VaultRef.ObjectName, policy.Status.DesiredRevision)
+	newSecretName := fmt.Sprintf("%s-%s-rev-%s", targetName, policy.Spec.GetVaultObjectName(), policy.Status.DesiredRevision)
 	if err := adapter.Promote(ctx, r.Client, policy, newSecretName); err != nil {
 		return fmt.Errorf("failed to promote target %s %q: %w", targetKind, targetName, err)
 	}
@@ -598,52 +615,80 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 	return nil
 }
 
-// materializeSecretRevision pulls the secret payload from Azure Key Vault, calculates a deterministic hash,
-// materializes the immutable Secret in the cluster, and zeroes in-memory byte buffers immediately.
+// materializeSecretRevision pulls the secret payload from the registered provider backend (Azure, ESO, AWS, GCP, Vault),
+// calculates a deterministic hash, materializes the immutable Secret in the cluster, and zeroes in-memory byte buffers.
 func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) (string, error) {
 	logger := log.FromContext(ctx)
 
-	if r.SecretFetcher == nil {
-		return "", fmt.Errorf("secret fetcher is not configured on reconciler")
+	reg := r.ProviderRegistry
+	if reg == nil {
+		reg = sourceProvider.SetupDefaultRegistry(r.Client, r.SecretFetcher)
+	}
+
+	src := policy.Spec.GetResolvedSource()
+	provider, err := reg.Get(src.Type)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve source provider for policy %q: %w", policy.Name, err)
 	}
 
 	kvCtx, kvCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer kvCancel()
 
-	payload, err := r.SecretFetcher.GetSecret(
-		kvCtx,
-		policy.Spec.VaultRef.KeyVaultURI,
-		policy.Spec.VaultRef.ObjectName,
-		"",
-	)
+	payload, err := provider.FetchSecret(kvCtx, policy)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch secret from vault: %w", err)
+		return "", fmt.Errorf("failed to fetch secret from source provider %q: %w", src.Type, err)
 	}
 
 	// Compute deterministic short hash (first 12 characters of SHA-256)
 	hasher := sha256.New()
-	hasher.Write(payload.Value)
+	if len(payload.Data) == 1 {
+		for _, v := range payload.Data {
+			hasher.Write(v)
+		}
+	} else {
+		keys := make([]string, 0, len(payload.Data))
+		for k := range payload.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			hasher.Write([]byte(k))
+			hasher.Write(payload.Data[k])
+		}
+	}
 	if payload.Version != "" {
 		hasher.Write([]byte(payload.Version))
 	}
 	revisionHash := fmt.Sprintf("%x", hasher.Sum(nil))[:12]
-	secretName := fmt.Sprintf("%s-%s-rev-%s", policy.Spec.WorkloadSelector.Name, policy.Spec.VaultRef.ObjectName, revisionHash)
+	secretName := fmt.Sprintf("%s-%s-rev-%s", policy.Spec.WorkloadSelector.Name, policy.Spec.GetVaultObjectName(), revisionHash)
 
 	secretType := corev1.SecretTypeOpaque
-	secretData := map[string][]byte{
-		policy.Spec.VaultRef.ObjectName: payload.Value,
+	secretData := make(map[string][]byte, len(payload.Data))
+	for k, v := range payload.Data {
+		secretData[k] = v
 	}
 
 	// For TLS certificates, split and map PEM blocks into standard kubernetes.io/tls keys
-	if policy.Spec.VaultRef.ObjectType == secretv1alpha1.VaultObjectTypeCertificate ||
-		strings.Contains(string(payload.Value), "-----BEGIN ") {
-		certData, keyData := extractPEMCertAndKey(payload.Value)
-		if len(certData) > 0 {
-			secretData[corev1.TLSCertKey] = certData
-			if len(keyData) > 0 {
-				secretData[corev1.TLSPrivateKeyKey] = keyData
+	if src.Type == secretv1alpha1.SourceTypeAzureKeyVault && src.AzureKeyVault != nil && src.AzureKeyVault.ObjectType == secretv1alpha1.VaultObjectTypeCertificate {
+		for _, v := range payload.Data {
+			if strings.Contains(string(v), "-----BEGIN ") {
+				certData, keyData := extractPEMCertAndKey(v)
+				if len(certData) > 0 {
+					secretData[corev1.TLSCertKey] = certData
+					if len(keyData) > 0 {
+						secretData[corev1.TLSPrivateKeyKey] = keyData
+					}
+					secretType = corev1.SecretTypeTLS
+				}
+				break
 			}
-			secretType = corev1.SecretTypeTLS
+		}
+	} else {
+		// General check: if tls.crt and tls.key exist in secretData, set type to TLS
+		if _, hasCert := secretData[corev1.TLSCertKey]; hasCert {
+			if _, hasKey := secretData[corev1.TLSPrivateKeyKey]; hasKey {
+				secretType = corev1.SecretTypeTLS
+			}
 		}
 	}
 
@@ -683,6 +728,7 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 		"secret", secretName,
 		"revision", revisionHash,
 		"workload", policy.Spec.WorkloadSelector.Name,
+		"sourceType", src.Type,
 	)
 
 	return revisionHash, nil
@@ -721,6 +767,12 @@ func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.Dy
 	}
 	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeRevisionPrepared) != nil {
 		return ConditionTypeRevisionPrepared
+	}
+
+	for _, c := range policy.Status.Conditions {
+		if c.Status == metav1.ConditionTrue {
+			return c.Type
+		}
 	}
 
 	// If DesiredRevision is set but condition is pending, start rollout at RevisionPrepared

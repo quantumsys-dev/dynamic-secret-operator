@@ -46,7 +46,136 @@ const (
 	ProbeTypeJob ProbeType = "Job"
 )
 
+// SourceType defines the supported secret source provider backends.
+// +kubebuilder:validation:Enum=AzureKeyVault;K8sSecret;AWSSecretsManager;GCPSecretManager;Vault
+type SourceType string
+
+const (
+	// SourceTypeAzureKeyVault configures real-time event-driven secret ingestion from Azure Key Vault.
+	SourceTypeAzureKeyVault SourceType = "AzureKeyVault"
+	// SourceTypeK8sSecret configures universal multi-cloud ingestion via intermediate Kubernetes secrets (e.g., ESO synergy).
+	SourceTypeK8sSecret SourceType = "K8sSecret"
+	// SourceTypeAWSSecretsManager configures ingestion from AWS Secrets Manager via EventBridge/SQS.
+	SourceTypeAWSSecretsManager SourceType = "AWSSecretsManager"
+	// SourceTypeGCPSecretManager configures ingestion from Google Cloud Secret Manager via Pub/Sub.
+	SourceTypeGCPSecretManager SourceType = "GCPSecretManager"
+	// SourceTypeVault configures ingestion from HashiCorp Vault.
+	SourceTypeVault SourceType = "Vault"
+)
+
+// AzureKeyVaultSource configures real-time event-driven secret ingestion from Azure Key Vault.
+type AzureKeyVaultSource struct {
+	// KeyVaultURI is the URI of the Azure Key Vault.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.matches('^https://[a-zA-Z0-9-]+\\\\.(?:vault\\\\.azure\\\\.net|vault\\\\.azure\\\\.cn|vault\\\\.usgovcloudapi\\\\.net)(?:/|$)?')",message="Invalid Azure Key Vault URI"
+	KeyVaultURI string `json:"keyVaultURI"`
+
+	// ObjectName is the name of the secret, certificate, or key within Key Vault.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.size() > 0",message="objectName must not be empty"
+	ObjectName string `json:"objectName"`
+
+	// ObjectType specifies whether the secret is a Secret, Certificate, or Key.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=Secret;Certificate;Key
+	// +kubebuilder:default=Secret
+	ObjectType VaultObjectType `json:"objectType,omitempty"`
+}
+
+// K8sSecretSource configures universal multi-cloud ingestion via intermediate Kubernetes secrets (e.g. ESO).
+type K8sSecretSource struct {
+	// Name of the intermediate source secret synchronized by ESO or external tools in the same namespace.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.size() > 0",message="name must not be empty"
+	Name string `json:"name"`
+}
+
+// AWSSecretsManagerSource reserved stub for native AWS Secrets Manager + EventBridge/SQS provider.
+type AWSSecretsManagerSource struct {
+	// SecretID is the ARN or friendly name of the AWS secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	SecretID string `json:"secretID"`
+
+	// Region is the AWS region (e.g. us-east-1).
+	// +kubebuilder:validation:Optional
+	Region string `json:"region,omitempty"`
+}
+
+// GCPSecretManagerSource reserved stub for native GCP Secret Manager + Pub/Sub provider.
+type GCPSecretManagerSource struct {
+	// SecretID is the resource path (projects/*/secrets/*) of the GCP secret.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	SecretID string `json:"secretID"`
+}
+
+// VaultSource reserved stub for native HashiCorp Vault webhook/engine provider.
+type VaultSource struct {
+	// Path is the Vault secret path.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Path string `json:"path"`
+}
+
+// SecretSource defines the pluggable provider backend configuration.
+// +kubebuilder:validation:XValidation:rule="self.type != 'AzureKeyVault' || has(self.azureKeyVault)",message="azureKeyVault configuration is required when source type is AzureKeyVault"
+// +kubebuilder:validation:XValidation:rule="self.type != 'K8sSecret' || has(self.k8sSecret)",message="k8sSecret configuration is required when source type is K8sSecret"
+// +kubebuilder:validation:XValidation:rule="self.type != 'AWSSecretsManager' || has(self.awsSecretsManager)",message="awsSecretsManager configuration is required when source type is AWSSecretsManager"
+// +kubebuilder:validation:XValidation:rule="self.type != 'GCPSecretManager' || has(self.gcpSecretManager)",message="gcpSecretManager configuration is required when source type is GCPSecretManager"
+// +kubebuilder:validation:XValidation:rule="self.type != 'Vault' || has(self.vault)",message="vault configuration is required when source type is Vault"
+type SecretSource struct {
+	// Type specifies the source provider backend.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=AzureKeyVault;K8sSecret;AWSSecretsManager;GCPSecretManager;Vault
+	Type SourceType `json:"type"`
+
+	// AzureKeyVault configures real-time event-driven ingestion from Azure Key Vault.
+	// +kubebuilder:validation:Optional
+	AzureKeyVault *AzureKeyVaultSource `json:"azureKeyVault,omitempty"`
+
+	// K8sSecret configures universal multi-cloud ingestion via intermediate Kubernetes secrets (e.g., ESO synergy).
+	// +kubebuilder:validation:Optional
+	K8sSecret *K8sSecretSource `json:"k8sSecret,omitempty"`
+
+	// AWSSecretsManager configures ingestion from AWS Secrets Manager.
+	// +kubebuilder:validation:Optional
+	AWSSecretsManager *AWSSecretsManagerSource `json:"awsSecretsManager,omitempty"`
+
+	// GCPSecretManager configures ingestion from Google Cloud Secret Manager.
+	// +kubebuilder:validation:Optional
+	GCPSecretManager *GCPSecretManagerSource `json:"gcpSecretManager,omitempty"`
+
+	// Vault configures ingestion from HashiCorp Vault.
+	// +kubebuilder:validation:Optional
+	Vault *VaultSource `json:"vault,omitempty"`
+}
+
+// NetworkPolicyProvider defines the network policy engine used for canary sandboxing.
+// +kubebuilder:validation:Enum=Standard;Cilium
+type NetworkPolicyProvider string
+
+const (
+	// NetworkPolicyProviderStandard generates networking.k8s.io/v1.NetworkPolicy.
+	NetworkPolicyProviderStandard NetworkPolicyProvider = "Standard"
+	// NetworkPolicyProviderCilium generates cilium.io/v2.CiliumNetworkPolicy for eBPF/Hubble visibility.
+	NetworkPolicyProviderCilium NetworkPolicyProvider = "Cilium"
+)
+
+// NetworkPolicySpec configures the network isolation engine for canary workloads.
+type NetworkPolicySpec struct {
+	// Provider specifies the network policy engine (Standard for networking.k8s.io/v1, Cilium for cilium.io/v2 CiliumNetworkPolicy).
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=Standard;Cilium
+	// +kubebuilder:default=Standard
+	Provider NetworkPolicyProvider `json:"provider,omitempty"`
+}
+
 // VaultReference specifies the location and identity of the secret in Azure Key Vault / external vault.
+// Deprecated: Use SecretSource (spec.source) instead.
 type VaultReference struct {
 	// KeyVaultURI is the URI of the Azure Key Vault or secret backend.
 	// +kubebuilder:validation:Required
@@ -197,10 +326,19 @@ type TargetRef struct {
 }
 
 // DynamicSecretPolicySpec defines the desired state of DynamicSecretPolicy.
+// +kubebuilder:validation:XValidation:rule="has(self.source) || has(self.vaultRef)",message="either spec.source or spec.vaultRef must be specified"
 type DynamicSecretPolicySpec struct {
-	// VaultRef references the external secret store and secret identity.
-	// +kubebuilder:validation:Required
-	VaultRef VaultReference `json:"vaultRef"`
+	// Source configures the pluggable secret provider backend (AzureKeyVault, K8sSecret / ESO, AWS, GCP, Vault).
+	// +kubebuilder:validation:Optional
+	Source *SecretSource `json:"source,omitempty"`
+
+	// VaultRef is the legacy Azure Key Vault reference. Deprecated: use spec.source instead.
+	// +kubebuilder:validation:Optional
+	VaultRef VaultReference `json:"vaultRef,omitempty"`
+
+	// NetworkPolicy configures network isolation (standard NetworkPolicy or eBPF CiliumNetworkPolicy).
+	// +kubebuilder:validation:Optional
+	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
 
 	// WorkloadSelector identifies the target workload for progressive rotation.
 	// +kubebuilder:validation:Required
@@ -221,6 +359,59 @@ type DynamicSecretPolicySpec struct {
 	// TargetRef explicitly binds the secret to a specific volume name or environment variable.
 	// +kubebuilder:validation:Optional
 	TargetRef *TargetRef `json:"targetRef,omitempty"`
+}
+
+// GetResolvedSource returns the active SecretSource, synthesizing one from legacy VaultRef if needed.
+func (s *DynamicSecretPolicySpec) GetResolvedSource() SecretSource {
+	if s.Source != nil {
+		return *s.Source
+	}
+	if s.VaultRef.KeyVaultURI != "" || s.VaultRef.ObjectName != "" {
+		objType := s.VaultRef.ObjectType
+		if objType == "" {
+			objType = VaultObjectTypeSecret
+		}
+		return SecretSource{
+			Type: SourceTypeAzureKeyVault,
+			AzureKeyVault: &AzureKeyVaultSource{
+				KeyVaultURI: s.VaultRef.KeyVaultURI,
+				ObjectName:  s.VaultRef.ObjectName,
+				ObjectType:  objType,
+			},
+		}
+	}
+	return SecretSource{}
+}
+
+// GetVaultObjectName returns the primary name/identifier of the secret being managed.
+func (s *DynamicSecretPolicySpec) GetVaultObjectName() string {
+	src := s.GetResolvedSource()
+	switch src.Type {
+	case SourceTypeAzureKeyVault:
+		if src.AzureKeyVault != nil {
+			return src.AzureKeyVault.ObjectName
+		}
+	case SourceTypeK8sSecret:
+		if src.K8sSecret != nil {
+			return src.K8sSecret.Name
+		}
+	case SourceTypeAWSSecretsManager:
+		if src.AWSSecretsManager != nil {
+			return src.AWSSecretsManager.SecretID
+		}
+	case SourceTypeGCPSecretManager:
+		if src.GCPSecretManager != nil {
+			return src.GCPSecretManager.SecretID
+		}
+	case SourceTypeVault:
+		if src.Vault != nil {
+			return src.Vault.Path
+		}
+	}
+	if s.VaultRef.ObjectName != "" {
+		return s.VaultRef.ObjectName
+	}
+	return "secret"
 }
 
 // DynamicSecretPolicyStatus defines the observed state of DynamicSecretPolicy.

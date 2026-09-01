@@ -51,6 +51,7 @@ import (
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/controller"
+	sourceProvider "github.com/quantumsys-dev/dynamic-secret-operator/internal/source"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -202,10 +203,13 @@ func main() {
 		setupLog.Error(err, "unable to create kubernetes clientset for log retrieval")
 	}
 
+	providerRegistry := sourceProvider.SetupDefaultRegistry(mgr.GetClient(), secretFetcher)
+
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
 		SecretFetcher:           secretFetcher,
+		ProviderRegistry:        providerRegistry,
 		KubeClient:              kubeClient,
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 		EventsChannel:           eventsChannel,
