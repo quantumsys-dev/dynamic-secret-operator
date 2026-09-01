@@ -44,8 +44,14 @@ const (
 // Required DSO JSON pointers for Argo CD ignoreDifferences.
 const (
 	JSONPointerRevisionAnnotation = "/spec/template/metadata/annotations/dso.quantumsys.dev~1revision"
-	JSONPointerVolumes            = "/spec/template/spec/volumes"
 )
+
+// JQPathExpressionRevisionVolumes ignores diffs only for volumes referencing a DSO-materialized
+// revision secret (named <target>-<objectName>-rev-<12-hex-hash>, per materializeSecretRevision),
+// rather than the entire volumes array. A blanket "/spec/template/spec/volumes" JSON pointer would
+// blind Argo CD to any other volume change pushed via Git (new ConfigMap/PVC/TLS volumes, etc.) -
+// this JQ expression only excludes the specific array elements DSO itself mutates.
+const JQPathExpressionRevisionVolumes = `.spec.template.spec.volumes[] | select(.secret.secretName != null and (.secret.secretName | test("-rev-[0-9a-f]{12}$")))`
 
 // IsAutoPatchEnabled returns true if the operator is configured to automatically
 // patch Argo CD Application ignoreDifferences.
@@ -165,20 +171,22 @@ func fetchArgoCDApplication(ctx context.Context, c client.Client, appName, workl
 	return nil, apierrors.NewNotFound(argov1alpha1.SchemeGroupVersion.WithResource("applications").GroupResource(), appName)
 }
 
-// ensureIgnoreDifferences verifies and appends required JSON pointers to the Application spec.
-// Returns true if modifications were made.
+// ensureIgnoreDifferences verifies and appends required JSON pointers and JQ path expressions to
+// the Application spec. Returns true if modifications were made.
 func ensureIgnoreDifferences(app *argov1alpha1.Application, group, kind string) bool {
-	requiredPointers := []string{
-		JSONPointerRevisionAnnotation,
-		JSONPointerVolumes,
-	}
+	requiredPointers := []string{JSONPointerRevisionAnnotation}
+	requiredJQExpressions := []string{JQPathExpressionRevisionVolumes}
 
 	for i := range app.Spec.IgnoreDifferences {
 		item := &app.Spec.IgnoreDifferences[i]
 		if (item.Group == group || (item.Group == "" && group == "apps")) && item.Kind == kind {
-			existingPointers := make(map[string]bool)
+			existingPointers := make(map[string]bool, len(item.JSONPointers))
 			for _, p := range item.JSONPointers {
 				existingPointers[p] = true
+			}
+			existingJQExpressions := make(map[string]bool, len(item.JQPathExpressions))
+			for _, p := range item.JQPathExpressions {
+				existingJQExpressions[p] = true
 			}
 
 			modified := false
@@ -188,15 +196,22 @@ func ensureIgnoreDifferences(app *argov1alpha1.Application, group, kind string) 
 					modified = true
 				}
 			}
+			for _, req := range requiredJQExpressions {
+				if !existingJQExpressions[req] {
+					item.JQPathExpressions = append(item.JQPathExpressions, req)
+					modified = true
+				}
+			}
 			return modified
 		}
 	}
 
 	// No matching group/kind entry found; create a new one
 	app.Spec.IgnoreDifferences = append(app.Spec.IgnoreDifferences, argov1alpha1.ResourceIgnoreDifferences{
-		Group:        group,
-		Kind:         kind,
-		JSONPointers: requiredPointers,
+		Group:             group,
+		Kind:              kind,
+		JSONPointers:      requiredPointers,
+		JQPathExpressions: requiredJQExpressions,
 	})
 	return true
 }

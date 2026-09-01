@@ -19,6 +19,7 @@ package integration
 import (
 	"context"
 	"os"
+	"regexp"
 	"testing"
 
 	argov1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
@@ -28,6 +29,36 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// TestJQPathExpressionRevisionVolumes_MatchesOnlyDSOManagedSecretNames verifies that the
+// embedded regex correctly identifies DSO-materialized revision secret names (built as
+// <target>-<objectName>-rev-<12-hex-hash> by materializeSecretRevision) and rejects unrelated
+// volume secret names, so the Argo CD ignoreDifferences override stays scoped to just DSO's own
+// volumes rather than reintroducing the original whole-array blind spot.
+func TestJQPathExpressionRevisionVolumes_MatchesOnlyDSOManagedSecretNames(t *testing.T) {
+	patternMatch := regexp.MustCompile(`test\("([^"]+)"\)`).FindStringSubmatch(JQPathExpressionRevisionVolumes)
+	if len(patternMatch) != 2 {
+		t.Fatalf("could not extract regex pattern from JQPathExpressionRevisionVolumes: %s", JQPathExpressionRevisionVolumes)
+	}
+	pattern := regexp.MustCompile(patternMatch[1])
+
+	dsoManagedSecretName := "order-service-db-pass-rev-a1b2c3d4e5f6"
+	if !pattern.MatchString(dsoManagedSecretName) {
+		t.Errorf("expected DSO-managed secret name %q to match, but it didn't", dsoManagedSecretName)
+	}
+
+	unrelatedNames := []string{
+		"tls-certificate-secret",
+		"my-app-config",
+		"order-service-rev-old", // legacy/manual name, not a real 12-hex revision hash
+		"",
+	}
+	for _, name := range unrelatedNames {
+		if pattern.MatchString(name) {
+			t.Errorf("expected unrelated secret name %q NOT to match, but it did", name)
+		}
+	}
+}
 
 func newTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -142,8 +173,11 @@ func TestReconcileArgoCDIgnoreDifferences_PatchesApp(t *testing.T) {
 		t.Errorf("expected entry for apps/Deployment, got %s/%s", entry.Group, entry.Kind)
 	}
 
-	if len(entry.JSONPointers) != 2 {
-		t.Errorf("expected 2 JSON pointers, got %d", len(entry.JSONPointers))
+	if len(entry.JSONPointers) != 1 {
+		t.Errorf("expected 1 JSON pointer, got %d", len(entry.JSONPointers))
+	}
+	if len(entry.JQPathExpressions) != 1 || entry.JQPathExpressions[0] != JQPathExpressionRevisionVolumes {
+		t.Errorf("expected 1 JQ path expression for revision volumes, got %v", entry.JQPathExpressions)
 	}
 }
 
@@ -200,9 +234,13 @@ func TestReconcileArgoCDIgnoreDifferences_RolloutSupport(t *testing.T) {
 		t.Errorf("expected entry for argoproj.io/Rollout, got %s/%s", entry.Group, entry.Kind)
 	}
 
-	// Should have merged missing JSONPointerVolumes
-	if len(entry.JSONPointers) != 2 {
-		t.Errorf("expected 2 JSON pointers after merge, got %d", len(entry.JSONPointers))
+	// Should have merged the missing JQ path expression for revision volumes, while keeping the
+	// pre-existing revision annotation pointer intact (not duplicated).
+	if len(entry.JSONPointers) != 1 {
+		t.Errorf("expected 1 JSON pointer after merge, got %d", len(entry.JSONPointers))
+	}
+	if len(entry.JQPathExpressions) != 1 || entry.JQPathExpressions[0] != JQPathExpressionRevisionVolumes {
+		t.Errorf("expected 1 JQ path expression for revision volumes after merge, got %v", entry.JQPathExpressions)
 	}
 }
 
@@ -270,8 +308,9 @@ func TestReconcileArgoCDIgnoreDifferences_PreservesCustomUserEntries(t *testing.
 		t.Errorf("expected CustomResource entry preserved untouched")
 	}
 	// Verify DSO entry was appended
-	if updatedApp.Spec.IgnoreDifferences[2].Kind != "Deployment" || len(updatedApp.Spec.IgnoreDifferences[2].JSONPointers) != 2 {
-		t.Errorf("expected Deployment entry correctly added with 2 JSON pointers")
+	dsoEntry := updatedApp.Spec.IgnoreDifferences[2]
+	if dsoEntry.Kind != "Deployment" || len(dsoEntry.JSONPointers) != 1 || len(dsoEntry.JQPathExpressions) != 1 {
+		t.Errorf("expected Deployment entry correctly added with 1 JSON pointer and 1 JQ path expression, got %+v", dsoEntry)
 	}
 }
 
