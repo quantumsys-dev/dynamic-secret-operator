@@ -89,6 +89,7 @@ func main() {
 	var secureMetrics bool
 	var eventBufferSize int
 	var maxConcurrentReconciles int
+	var watchNamespaces string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -100,6 +101,10 @@ func main() {
 		"The buffer capacity of the internal event channel bridging Azure Service Bus to the controller.")
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 5,
 		"The maximum number of concurrent Reconciles which can be run.")
+	flag.StringVar(&watchNamespaces, "watch-namespaces", "",
+		"Comma-separated list of namespaces to restrict the manager's cache and watches to, "+
+			"matching the RBAC grant when deployed with rbac.scope=Namespaced. Empty (default) "+
+			"watches all namespaces cluster-wide and requires a ClusterRole.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -170,9 +175,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Restrict the manager's cache (and therefore its List/Watch calls) to the namespaces the
+	// operator's ServiceAccount actually has RBAC permissions in when deployed with
+	// rbac.scope=Namespaced. Without this, a namespaced Role/RoleBinding pairs with a manager
+	// that still tries to watch cluster-wide, which fails outright with Forbidden errors.
+	var defaultNamespaces map[string]cache.Config
+	for _, ns := range strings.Split(watchNamespaces, ",") {
+		ns = strings.TrimSpace(ns)
+		if ns == "" {
+			continue
+		}
+		if defaultNamespaces == nil {
+			defaultNamespaces = make(map[string]cache.Config)
+		}
+		defaultNamespaces[ns] = cache.Config{}
+	}
+	if len(defaultNamespaces) > 0 {
+		setupLog.Info("restricting manager cache to explicit watch namespaces", "namespaces", defaultNamespaces)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
+			DefaultNamespaces: defaultNamespaces,
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Secret{}: {
 					Label: labels.NewSelector().Add(*secretCacheRequirement),

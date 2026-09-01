@@ -45,6 +45,10 @@ spec:
             - --metrics-bind-address=:{{ .Values.metrics.port }}
             - --event-buffer-size={{ .Values.controller.eventBufferSize | default 1000 }}
             - --max-concurrent-reconciles={{ .Values.controller.maxConcurrentReconciles | default 5 }}
+            {{- if eq .Values.rbac.scope "Namespaced" }}
+            {{- $watchNamespaces := .Values.rbac.watchNamespaces | default (list .Release.Namespace) }}
+            - --watch-namespaces={{ join "," $watchNamespaces }}
+            {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:

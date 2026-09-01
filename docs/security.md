@@ -70,12 +70,13 @@ By default, Kubernetes operators that reconcile `Secret` resources risk caching 
 
 ```go
 // cmd/main.go
+secretCacheRequirement, _ := labels.NewRequirement(
+    "dso.quantumsys.dev/managed", selection.In, []string{"true", "watch"},
+)
 Cache: cache.Options{
     ByObject: map[client.Object]cache.ByObject{
         &corev1.Secret{}: {
-            Label: labels.SelectorFromSet(labels.Set{
-                "dso.quantumsys.dev/managed": "true",
-            }),
+            Label: labels.NewSelector().Add(*secretCacheRequirement),
         },
     },
 }
@@ -86,8 +87,13 @@ Cache: cache.Options{
    - `dso.quantumsys.dev/policy: <policy-name>`
    - `dso.quantumsys.dev/revision: <hash>`
    - `dso.quantumsys.dev/target-workload: <workload-name>`
-2. **Cache Restriction:** The operator's informer only requests and watches secrets bearing `dso.quantumsys.dev/managed: "true"`.
+2. **Cache Restriction:** The operator's informer only requests and watches secrets bearing `dso.quantumsys.dev/managed: "true"` (secrets DSO owns) or `dso.quantumsys.dev/managed: "watch"` (externally owned source secrets DSO only observes, e.g. an ESO sync target - see [ADR-003](architecture/003-decoupling-secret-ingestion-eso.md)).
 3. **Protection of Third-Party Secrets:** The operator never receives or caches `ServiceAccount` tokens, cluster TLS certificates, Helm release secrets, or unrelated tenant data.
+
+### RBAC Is a Separate Boundary From the Cache
+The cache restriction above only limits what the operator's own in-process informer *holds in memory* - it is a client-side filter, not an API-server-enforced boundary. The `ClusterRole` the operator's ServiceAccount holds still grants `get`/`list`/`watch` on the `secrets` resource across **all** namespaces, because Kubernetes RBAC has no concept of "restrict to secrets with this label" - RBAC rules can only be scoped by API group, resource, verb, and (optionally) an explicit `resourceNames` list, none of which can express a label selector. This means that if the DSO pod itself were compromised (e.g. via a dependency vulnerability or container escape), the attacker's stolen ServiceAccount token could call the Kubernetes API directly to read **any** secret in the cluster, including unrelated `kube-system` TLS certificates and other workloads' credentials - the cache scoping above would not stop them, since it is bypassed entirely by talking to the API server directly rather than through the operator's cache.
+
+There is no way to close this gap with RBAC alone while still supporting cluster-wide secret rotation from a single Deployment. For high-security or multi-tenant clusters, deploy DSO with `rbac.scope: "Namespaced"` and an explicit `rbac.watchNamespaces` list in the Helm chart's `values.yaml`. This grants a `Role`/`RoleBinding` per listed namespace instead of a cluster-wide `ClusterRole`, **and** passes the same namespace list to the operator via `--watch-namespaces`, which sets `cache.Options.DefaultNamespaces` so the manager's own List/Watch calls are scoped identically to the RBAC grant - eliminating the ability to read secrets outside those namespaces even if the pod is compromised, rather than just narrowing the RBAC grant while the manager still (harmlessly, but noisily) attempts to watch cluster-wide.
 
 ---
 
