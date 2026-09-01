@@ -34,12 +34,18 @@ func BuildCiliumNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *unstr
 	netpolName := fmt.Sprintf("%s-canary-cilium-netpol", targetName)
 
 	egressRules := []interface{}{
-		// 1. CoreDNS in-cluster egress with L7 DNS visibility
+		// 1. CoreDNS in-cluster egress with L7 DNS visibility. Matched by the standard k8s-app
+		// label rather than a namespace (which varies across distributions: kube-system,
+		// openshift-dns, etc), across all namespaces.
 		map[string]interface{}{
 			"toEndpoints": []interface{}{
 				map[string]interface{}{
-					"matchLabels": map[string]interface{}{
-						"k8s:io.kubernetes.pod.namespace": "kube-system",
+					"matchExpressions": []interface{}{
+						map[string]interface{}{
+							"key":      "k8s:k8s-app",
+							"operator": "In",
+							"values":   []interface{}{"kube-dns", "coredns"},
+						},
 					},
 				},
 			},

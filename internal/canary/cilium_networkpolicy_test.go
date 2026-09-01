@@ -72,4 +72,38 @@ func TestBuildCiliumNetworkPolicy(t *testing.T) {
 	if !ok || len(egress) != 3 {
 		t.Fatalf("expected 3 egress rules (DNS + 2 probes), got %d", len(egress))
 	}
+
+	dnsRule, ok := egress[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected DNS egress rule to be a map")
+	}
+	toEndpoints, ok := dnsRule["toEndpoints"].([]interface{})
+	if !ok || len(toEndpoints) != 1 {
+		t.Fatalf("expected 1 toEndpoints selector on DNS rule, got %d", len(toEndpoints))
+	}
+	endpointSelector, ok := toEndpoints[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected toEndpoints[0] to be a map")
+	}
+	if _, hasNamespaceMatch := endpointSelector["matchLabels"]; hasNamespaceMatch {
+		t.Errorf("expected no namespace-scoped matchLabels on DNS rule, since the DNS namespace name varies by distribution")
+	}
+	matchExpressions, ok := endpointSelector["matchExpressions"].([]interface{})
+	if !ok || len(matchExpressions) != 1 {
+		t.Fatalf("expected 1 matchExpressions entry on DNS rule, got %d", len(matchExpressions))
+	}
+	expr, ok := matchExpressions[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected matchExpressions[0] to be a map")
+	}
+	if expr["key"] != "k8s:k8s-app" {
+		t.Errorf("expected matchExpressions key 'k8s:k8s-app', got %v", expr["key"])
+	}
+	if expr["operator"] != "In" {
+		t.Errorf("expected matchExpressions operator 'In', got %v", expr["operator"])
+	}
+	values, ok := expr["values"].([]interface{})
+	if !ok || len(values) != 2 || values[0] != "kube-dns" || values[1] != "coredns" {
+		t.Errorf("expected matchExpressions values [kube-dns, coredns], got %v", expr["values"])
+	}
 }
