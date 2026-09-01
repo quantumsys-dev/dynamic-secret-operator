@@ -10,14 +10,23 @@ This guide explains how to configure `ignoreDifferences` in your Argo CD `Applic
 
 ## ⚙️ Automatic vs Manual Drift Management
 
+> [!WARNING]
+> ### 🛑 Critical: App-of-Apps & Strict Declarative GitOps Notice
+> If your organization uses the **Argo CD App-of-Apps pattern** or **ApplicationSets** (where the `Application` CRD manifests themselves are committed to Git and continuously reconciled by a root Argo CD application), **DO NOT enable automatic in-cluster patching**.
+>
+> If `ARGOCD_AUTOPATCH_ENABLED="true"` is enabled in an App-of-Apps environment, DSO's in-cluster patches to the parent `Application` CR will be immediately detected by the root App-of-Apps controller as external drift. Argo CD will revert the `Application` CR back to its Git definition, resulting in an infinite patch-revert reconciliation war between DSO and Argo CD.
+>
+> **Best Practice for App-of-Apps:**
+> Keep `ARGOCD_AUTOPATCH_ENABLED="false"` (the default). Commit the `ignoreDifferences` or fine-grained `jqPathExpressions` blocks directly into your Git repository's `Application` YAML manifests (or define them globally in the `argocd-cm` ConfigMap).
+
 DSO provides two methods to manage Argo CD diffing:
 
-1. **Automatic In-Cluster Patching (`ARGOCD_AUTOPATCH_ENABLED="true"`):**
-   When enabled in DSO, the operator discovers the parent Argo CD `Application` via tracking labels (`app.kubernetes.io/instance` or `argocd.argoproj.io/tracking-id`) and automatically injects standard JSON Pointers (`/spec/template/metadata/annotations/dso.quantumsys.dev~1revision` and `/spec/template/spec/volumes`) into the Application's `spec.ignoreDifferences`.
-   > ⚠️ **Scope Notice:** Automatic patching ignores the `/spec/template/spec/volumes` array as a whole. If your application relies on GitOps diff enforcement for non-DSO volumes (e.g. ConfigMaps or PVCs) on the same Pod, we recommend disabling auto-patching and defining fine-grained `jqPathExpressions` manually.
+1. **Declarative GitOps Manifests (Default & Recommended for App-of-Apps):**
+   Explicitly declare `ignoreDifferences` or fine-grained `jqPathExpressions` in your Git repository's `Application` manifest as detailed below. This prevents any out-of-band cluster mutation drift.
 
-2. **Declarative GitOps Manifests (Manual Configuration):**
-   Explicitly declare `ignoreDifferences` or fine-grained `jqPathExpressions` in your Git repository's `Application` manifest as detailed below.
+2. **Automatic In-Cluster Patching (`ARGOCD_AUTOPATCH_ENABLED="true"`, Opt-In):**
+   When explicitly enabled in standalone Application environments, the operator discovers the parent Argo CD `Application` via tracking labels (`app.kubernetes.io/instance` or `argocd.argoproj.io/tracking-id`) and automatically injects standard JSON Pointers (`/spec/template/metadata/annotations/dso.quantumsys.dev~1revision` and `/spec/template/spec/volumes`) into the Application's `spec.ignoreDifferences`.
+   > ⚠️ **Scope Notice:** Automatic patching ignores the `/spec/template/spec/volumes` array as a whole. If your application relies on GitOps diff enforcement for non-DSO volumes (e.g. ConfigMaps or PVCs) on the same Pod, define fine-grained `jqPathExpressions` manually.
 
 ---
 
