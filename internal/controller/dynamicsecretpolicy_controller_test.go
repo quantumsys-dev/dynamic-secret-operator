@@ -389,6 +389,9 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	if createdSecret.Labels[LabelRevision] != desiredRevision {
 		t.Errorf("expected secret revision label %q, got %q", desiredRevision, createdSecret.Labels[LabelRevision])
 	}
+	if createdSecret.Labels[LabelPolicy] != policy.Name {
+		t.Errorf("expected secret policy label %q, got %q", policy.Name, createdSecret.Labels[LabelPolicy])
+	}
 	if len(createdSecret.OwnerReferences) == 0 {
 		t.Errorf("expected controller owner reference on created secret")
 	}
@@ -1650,6 +1653,7 @@ func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *test
 			Labels: map[string]string{
 				LabelRevision:              "oldcurrent",
 				canary.LabelTargetWorkload: "orders-api",
+				LabelPolicy:                policy.Name,
 			},
 		},
 	}
@@ -1660,6 +1664,7 @@ func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *test
 			Labels: map[string]string{
 				LabelRevision:              "newdesired",
 				canary.LabelTargetWorkload: "orders-api",
+				LabelPolicy:                policy.Name,
 			},
 		},
 	}
@@ -1670,6 +1675,7 @@ func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *test
 			Labels: map[string]string{
 				LabelRevision:              "obsolete1",
 				canary.LabelTargetWorkload: "orders-api",
+				LabelPolicy:                policy.Name,
 			},
 		},
 	}
@@ -1680,6 +1686,7 @@ func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *test
 			Labels: map[string]string{
 				LabelRevision:              "obsolete2",
 				canary.LabelTargetWorkload: "orders-api",
+				LabelPolicy:                policy.Name,
 			},
 		},
 	}
@@ -1691,6 +1698,7 @@ func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *test
 			Labels: map[string]string{
 				LabelRevision:              "obsolete1",
 				canary.LabelTargetWorkload: "other-workload",
+				LabelPolicy:                "other-policy",
 			},
 		},
 	}
@@ -1736,6 +1744,200 @@ func TestDynamicSecretPolicyReconciler_GarbageCollectsOldSecretRevisions(t *test
 	}
 	if !remainingNames["other-workload-rev-obsolete1"] {
 		t.Errorf("expected unrelated workload secret to be retained")
+	}
+}
+
+// TestDynamicSecretPolicyReconciler_GarbageCollectMultiPolicyIsolation verifies that
+// when multiple DynamicSecretPolicies target the same Deployment (e.g. Postgres and Redis),
+// the GC cycle of Policy A does NOT delete active secrets belonging to Policy B.
+func TestDynamicSecretPolicyReconciler_GarbageCollectMultiPolicyIsolation(t *testing.T) {
+	scheme := setupTestScheme(t)
+	ctx := context.Background()
+
+	targetDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payment-api",
+			Namespace: "production",
+		},
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "api",
+							Env: []corev1.EnvVar{
+								{
+									Name: "DB_PASS",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "payment-api-db-pass-rev-db01",
+											},
+											Key: "db-password",
+										},
+									},
+								},
+								{
+									Name: "REDIS_PASS",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: "payment-api-redis-pass-rev-redis01",
+											},
+											Key: "redis-password",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Policy A: Database Credentials for payment-api
+	policyA := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "policy-db",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://vault.vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "payment-api",
+			},
+			TargetRef: &secretv1alpha1.TargetRef{
+				ContainerName: "api",
+				EnvName:       "DB_PASS",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			CurrentRevision: "db-old",
+			DesiredRevision: "db-new",
+		},
+	}
+
+	// Secrets for Policy A (payment-api, policy-db)
+	secPolicyACurrent := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payment-api-db-pass-rev-db-old",
+			Namespace: "production",
+			Labels: map[string]string{
+				LabelRevision:              "db-old",
+				canary.LabelTargetWorkload: "payment-api",
+				LabelPolicy:                "policy-db",
+			},
+		},
+	}
+	secPolicyADesired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payment-api-db-pass-rev-db-new",
+			Namespace: "production",
+			Labels: map[string]string{
+				LabelRevision:              "db-new",
+				canary.LabelTargetWorkload: "payment-api",
+				LabelPolicy:                "policy-db",
+			},
+		},
+	}
+	secPolicyAObsolete := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payment-api-db-pass-rev-db-orphan",
+			Namespace: "production",
+			Labels: map[string]string{
+				LabelRevision:              "db-orphan",
+				canary.LabelTargetWorkload: "payment-api",
+				LabelPolicy:                "policy-db",
+			},
+		},
+	}
+
+	// Secrets for Policy B (same workload "payment-api", but policy-redis)
+	// Even though revisions "redis-active" and "redis-desired" differ from Policy A's revisions,
+	// Policy A's GC cycle must NEVER reap them!
+	secPolicyBActive := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payment-api-redis-pass-rev-redis-active",
+			Namespace: "production",
+			Labels: map[string]string{
+				LabelRevision:              "redis-active",
+				canary.LabelTargetWorkload: "payment-api",
+				LabelPolicy:                "policy-redis",
+			},
+		},
+	}
+	secPolicyBDesired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "payment-api-redis-pass-rev-redis-desired",
+			Namespace: "production",
+			Labels: map[string]string{
+				LabelRevision:              "redis-desired",
+				canary.LabelTargetWorkload: "payment-api",
+				LabelPolicy:                "policy-redis",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(
+			targetDeployment,
+			policyA,
+			secPolicyACurrent,
+			secPolicyADesired,
+			secPolicyAObsolete,
+			secPolicyBActive,
+			secPolicyBDesired,
+		).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	// Trigger Policy A promotion and GC
+	if err := r.promoteTargetWorkload(ctx, policyA); err != nil {
+		t.Fatalf("promoteTargetWorkload for Policy A failed: %v", err)
+	}
+
+	// Query remaining secrets in namespace
+	secretList := &corev1.SecretList{}
+	if err := fakeClient.List(ctx, secretList, client.InNamespace("production")); err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+
+	remaining := make(map[string]bool)
+	for _, s := range secretList.Items {
+		remaining[s.Name] = true
+	}
+
+	// Policy A obsolete secret MUST be deleted
+	if remaining["payment-api-db-pass-rev-db-orphan"] {
+		t.Errorf("expected Policy A obsolete secret to be garbage collected")
+	}
+
+	// Policy A active secrets MUST be retained
+	if !remaining["payment-api-db-pass-rev-db-old"] {
+		t.Errorf("expected Policy A current revision secret to be retained")
+	}
+	if !remaining["payment-api-db-pass-rev-db-new"] {
+		t.Errorf("expected Policy A desired revision secret to be retained")
+	}
+
+	// CRITICAL: Policy B secrets targeting the same deployment MUST be completely intact!
+	if !remaining["payment-api-redis-pass-rev-redis-active"] {
+		t.Errorf("CRITICAL BUG: Policy A GC mistakenly deleted Policy B's active secret!")
+	}
+	if !remaining["payment-api-redis-pass-rev-redis-desired"] {
+		t.Errorf("CRITICAL BUG: Policy A GC mistakenly deleted Policy B's desired secret!")
 	}
 }
 
