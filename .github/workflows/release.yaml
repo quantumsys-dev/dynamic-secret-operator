@@ -110,3 +110,20 @@ jobs:
           name: dso-operator-sbom
           path: dso-operator-sbom.spdx.json
           retention-days: 90
+
+      - name: Setup Helm
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.0
+
+      - name: Package & Push Helm Chart (OCI)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          HELM_EXPERIMENTAL_OCI: 1
+        run: |
+          mkdir -p .dist
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package deploy/helm/dso --version "${GITHUB_REF_NAME#v}" --app-version "${GITHUB_REF_NAME#v}" -d .dist
+          helm push .dist/dynamic-secret-operator-*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+
