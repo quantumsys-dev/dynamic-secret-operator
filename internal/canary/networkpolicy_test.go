@@ -76,13 +76,22 @@ func TestBuildNetworkPolicy(t *testing.T) {
 			t.Errorf("expected Ingress slice to be empty [] for default-deny, got: %v", netpol.Spec.Ingress)
 		}
 
-		// 4. Validate DNS rule presence
+		// 4. Validate DNS rule presence and strict in-cluster CoreDNS restriction
 		if len(netpol.Spec.Egress) < 1 {
 			t.Fatalf("expected egress rules, got %d", len(netpol.Spec.Egress))
 		}
 		dnsRule := netpol.Spec.Egress[0]
 		if len(dnsRule.Ports) != 2 {
 			t.Errorf("expected 2 DNS ports (UDP/TCP 53), got %d", len(dnsRule.Ports))
+		}
+		if len(dnsRule.To) != 1 {
+			t.Fatalf("expected DNS egress rule to have 1 To peer (kube-system CoreDNS), got %d", len(dnsRule.To))
+		}
+		if dnsRule.To[0].NamespaceSelector == nil || dnsRule.To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" {
+			t.Errorf("expected DNS egress to restrict namespaceSelector to kube-system")
+		}
+		if dnsRule.To[0].PodSelector == nil || len(dnsRule.To[0].PodSelector.MatchExpressions) == 0 {
+			t.Errorf("expected DNS egress to restrict podSelector to CoreDNS/kube-dns pods")
 		}
 	})
 
