@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/workload"
 )
 
 const (
@@ -66,7 +67,8 @@ func DeriveProbeJobName(policyName, revisionSecretName string) string {
 }
 
 // BuildProbeJob constructs a batchv1.Job from the user-supplied JobTemplateSpec,
-// automatically injects the DSO_REVISION_SECRET_NAME environment variable into all containers,
+// automatically mutates volumes and env vars to point to the newly materialized secret,
+// injects the DSO_REVISION_SECRET_NAME environment variable into all containers,
 // and attaches an OwnerReference to the policy so garbage collection is policy-scoped.
 func BuildProbeJob(
 	policy *secretv1alpha1.DynamicSecretPolicy,
@@ -76,7 +78,10 @@ func BuildProbeJob(
 	// Copy the template to avoid mutating the spec.
 	tmpl := spec.JobTemplate.DeepCopy()
 
-	// Automatically inject the DSO_REVISION_SECRET_NAME environment variable into all containers.
+	// Mutate volumes, envs, and volumeMounts in the Job pod template to point to the new secret revision
+	workload.MutatePodTemplateSpec(&tmpl.Spec.Template, policy.Spec.WorkloadSelector.Name, policy, revisionSecretName)
+
+	// Automatically inject the DSO_REVISION_SECRET_NAME environment variable into all containers for scripting convenience.
 	injectRevisionSecretEnv(&tmpl.Spec.Template.Spec, revisionSecretName)
 
 	// Generate a deterministic but unique Job name scoped to the policy + revision.

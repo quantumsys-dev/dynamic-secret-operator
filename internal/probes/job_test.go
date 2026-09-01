@@ -115,10 +115,33 @@ func TestBuildProbeJob(t *testing.T) {
 				Template: corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						RestartPolicy: corev1.RestartPolicyNever,
+						Volumes: []corev1.Volume{
+							{
+								Name: "redis-secret",
+								VolumeSource: corev1.VolumeSource{
+									Secret: &corev1.SecretVolumeSource{
+										SecretName: "payment-api-redis-secret-rev-1",
+									},
+								},
+							},
+						},
 						Containers: []corev1.Container{
 							{
 								Name:  "probe",
 								Image: "redis:alpine",
+								Env: []corev1.EnvVar{
+									{
+										Name: "REDIS_AUTH",
+										ValueFrom: &corev1.EnvVarSource{
+											SecretKeyRef: &corev1.SecretKeySelector{
+												LocalObjectReference: corev1.LocalObjectReference{
+													Name: "payment-api-redis-secret-rev-1",
+												},
+												Key: "redis-secret",
+											},
+										},
+									},
+								},
 								Command: []string{
 									"sh", "-c", "echo $(DSO_REVISION_SECRET_NAME)",
 								},
@@ -146,9 +169,28 @@ func TestBuildProbeJob(t *testing.T) {
 		t.Errorf("expected ownerReference to redis-policy")
 	}
 
-	// Verify env var injection
+	// Verify volume mutation
+	if len(job.Spec.Template.Spec.Volumes) == 0 || job.Spec.Template.Spec.Volumes[0].Secret == nil ||
+		job.Spec.Template.Spec.Volumes[0].Secret.SecretName != revisionSecretName {
+		t.Errorf("expected Job volume secretName to be mutated to %s, got %v",
+			revisionSecretName, job.Spec.Template.Spec.Volumes[0].Secret)
+	}
+
+	// Verify secretKeyRef mutation
+	container := job.Spec.Template.Spec.Containers[0]
+	var redisAuthRef string
+	for _, env := range container.Env {
+		if env.Name == "REDIS_AUTH" && env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+			redisAuthRef = env.ValueFrom.SecretKeyRef.Name
+		}
+	}
+	if redisAuthRef != revisionSecretName {
+		t.Errorf("expected REDIS_AUTH secretKeyRef.Name to be mutated to %s, got %s", revisionSecretName, redisAuthRef)
+	}
+
+	// Verify DSO_REVISION_SECRET_NAME env var injection
 	injected := false
-	for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+	for _, env := range container.Env {
 		if env.Name == EnvRevisionSecretName && env.Value == revisionSecretName {
 			injected = true
 			break
