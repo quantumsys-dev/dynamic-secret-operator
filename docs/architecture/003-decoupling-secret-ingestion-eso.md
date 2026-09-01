@@ -53,6 +53,12 @@ We decouple secret *ingestion* from secret *delivery* and establish DSO's primar
 - DSO observes target Kubernetes Secrets (or `ExternalSecret` status).
 - When ESO updates a synced secret with a new payload, DSO detects the hash drift, derives an immutable revision, and executes the progressive canary rollout.
 - **Zero Cloud IAM Overhead:** DSO requires zero cloud provider credentials.
+- **Required label:** to keep the manager's Secret cache scoped to only the secrets DSO cares
+  about (rather than every Secret in the cluster), the ESO sync target must carry the label
+  `dso.quantumsys.dev/managed: "watch"` — for example via `target.template.metadata.labels` on
+  the `ExternalSecret`. Without this label, DSO's cache never observes the secret and rotation
+  detection silently never triggers. This label is distinct from `dso.quantumsys.dev/managed:
+  "true"`, which marks revision secrets DSO itself creates and owns.
 
 #### Mode 2: Push-Accelerated Hybrid Adapter (Azure Service Bus / EventGrid)
 - Retained as an optional event-driven adapter for environments where polling intervals are unacceptable and sub-second push notifications from Azure EventGrid &rarr; Service Bus are required.

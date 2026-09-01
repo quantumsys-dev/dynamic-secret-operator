@@ -87,11 +87,20 @@ const LabelRevision = "dso.quantumsys.dev/revision"
 // LabelPolicy identifies the DynamicSecretPolicy owning the materialized revision secret.
 const LabelPolicy = "dso.quantumsys.dev/policy"
 
-// LabelManaged identifies secrets managed by the Dynamic Secret Operator.
+// LabelManaged identifies secrets the Dynamic Secret Operator cares about, so the shared
+// manager cache (see cmd/main.go) can stay scoped to just these secrets instead of every
+// Secret in the cluster. It carries one of two values: ManagedValueTrue for secrets DSO
+// itself creates and owns (materialized revisions), or ManagedValueWatch for externally
+// owned source secrets DSO only observes (e.g. an ESO-synced intermediate secret referenced
+// by a K8sSecret source). Users must apply ManagedValueWatch to their source secret (for
+// example via ExternalSecret's target.template.metadata.labels) for DSO to detect its changes.
 const LabelManaged = "dso.quantumsys.dev/managed"
 
-// ManagedValueTrue represents the standard active value for LabelManaged.
+// ManagedValueTrue represents a secret created and owned by DSO.
 const ManagedValueTrue = "true"
+
+// ManagedValueWatch represents an externally owned source secret DSO watches but does not own.
+const ManagedValueWatch = "watch"
 
 // DynamicSecretPolicyReconciler reconciles a DynamicSecretPolicy object
 type DynamicSecretPolicyReconciler struct {

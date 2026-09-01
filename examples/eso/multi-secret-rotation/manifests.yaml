@@ -32,6 +32,12 @@ spec:
   target:
     name: db-password-synced
     creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          # Required for DSO to detect changes synced to this secret by ESO; see
+          # docs/architecture/003-decoupling-secret-ingestion-eso.md
+          dso.quantumsys.dev/managed: "watch"
   data:
     - secretKey: db-password
       remoteRef:
@@ -51,6 +57,12 @@ spec:
   target:
     name: redis-auth-token-synced
     creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          # Required for DSO to detect changes synced to this secret by ESO; see
+          # docs/architecture/003-decoupling-secret-ingestion-eso.md
+          dso.quantumsys.dev/managed: "watch"
   data:
     - secretKey: redis-auth-token
       remoteRef:
@@ -70,6 +82,12 @@ spec:
   target:
     name: payment-api-key-synced
     creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          # Required for DSO to detect changes synced to this secret by ESO; see
+          # docs/architecture/003-decoupling-secret-ingestion-eso.md
+          dso.quantumsys.dev/managed: "watch"
   data:
     - secretKey: payment-api-key
       remoteRef:

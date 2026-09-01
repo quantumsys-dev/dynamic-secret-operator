@@ -51,6 +51,12 @@ spec:
 ### 2.2 Universal Multi-Cloud via External Secrets Operator (`K8sSecret`)
 Leverages **External Secrets Operator (ESO)** to synchronize credentials from AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault, or Akeyless into intermediate Kubernetes secrets, which DSO monitors to trigger progressive delivery.
 
+> **Required label:** the intermediate secret named in `k8sSecret.name` must carry the label
+> `dso.quantumsys.dev/managed: "watch"` (for example via `target.template.metadata.labels` on
+> the `ExternalSecret`), or DSO's cache will never observe its changes and rotations will not
+> be detected. See [ADR-003](../architecture/003-decoupling-secret-ingestion-eso.md) and the
+> `examples/eso/` manifests for a working example.
+
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy

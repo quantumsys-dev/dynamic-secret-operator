@@ -27,6 +27,12 @@ spec:
   target:
     name: nginx-bg-color-synced
     creationPolicy: Owner
+    template:
+      metadata:
+        labels:
+          # Required for DSO to detect changes synced to this secret by ESO; see
+          # docs/architecture/003-decoupling-secret-ingestion-eso.md
+          dso.quantumsys.dev/managed: "watch"
   data:
     - secretKey: nginx-bg-color
       remoteRef:

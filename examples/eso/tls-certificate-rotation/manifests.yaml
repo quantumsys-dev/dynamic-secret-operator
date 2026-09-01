@@ -28,6 +28,11 @@ spec:
     name: ingress-tls-cert-synced
     template:
       type: kubernetes.io/tls
+      metadata:
+        labels:
+          # Required for DSO to detect changes synced to this secret by ESO; see
+          # docs/architecture/003-decoupling-secret-ingestion-eso.md
+          dso.quantumsys.dev/managed: "watch"
     creationPolicy: Owner
   data:
     - secretKey: tls.crt

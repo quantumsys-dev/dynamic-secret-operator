@@ -32,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -155,14 +156,26 @@ func main() {
 	}
 
 
+	// A single Kubernetes label selector can only AND requirements together, so secrets DSO
+	// owns (ManagedValueTrue) and externally owned source secrets DSO merely watches
+	// (ManagedValueWatch, e.g. an ESO sync target) must share the same label key with an
+	// In-operator selector rather than being expressed as two separate label keys.
+	secretCacheRequirement, err := labels.NewRequirement(
+		controller.LabelManaged,
+		selection.In,
+		[]string{controller.ManagedValueTrue, controller.ManagedValueWatch},
+	)
+	if err != nil {
+		setupLog.Error(err, "unable to build secret cache label selector")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Secret{}: {
-					Label: labels.SelectorFromSet(labels.Set{
-						controller.LabelManaged: controller.ManagedValueTrue,
-					}),
+					Label: labels.NewSelector().Add(*secretCacheRequirement),
 				},
 			},
 		},
