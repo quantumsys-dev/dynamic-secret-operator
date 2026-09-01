@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -205,6 +206,15 @@ func main() {
 
 	providerRegistry := sourceProvider.SetupDefaultRegistry(mgr.GetAPIReader(), secretFetcher)
 
+	// Thread-safe registry holding pending Service Bus ACK functions until secret materialization succeeds
+	type ackRegistry struct {
+		mu   sync.Mutex
+		acks map[string][]azure.AckFunc
+	}
+	pendingAcks := &ackRegistry{
+		acks: make(map[string][]azure.AckFunc),
+	}
+
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
@@ -213,6 +223,25 @@ func main() {
 		KubeClient:              kubeClient,
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 		EventsChannel:           eventsChannel,
+		OnSecretMaterialized: func(ctx context.Context, policyName, revision string) error {
+			pendingAcks.mu.Lock()
+			ackList := pendingAcks.acks[policyName]
+			delete(pendingAcks.acks, policyName)
+			pendingAcks.mu.Unlock()
+
+			setupLog.Info("secret revision materialized; completing Service Bus message transactions",
+				"policy", policyName, "revision", revision, "pendingMessages", len(ackList))
+
+			for _, ackFn := range ackList {
+				if ackFn != nil {
+					if err := ackFn(ctx); err != nil {
+						setupLog.Error(err, "failed to complete Service Bus message", "policy", policyName)
+						return err
+					}
+				}
+			}
+			return nil
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamicSecretPolicy")
 		os.Exit(1)
@@ -263,11 +292,14 @@ func main() {
 			matchedCount := 0
 			for i := range policyList.Items {
 				p := &policyList.Items[i]
-				if targetObjectName == "" || p.Spec.VaultRef.ObjectName == targetObjectName || p.Name == eventData.PolicyName {
+				if targetObjectName == "" || p.Spec.GetVaultObjectName() == targetObjectName || p.Name == eventData.PolicyName {
 					timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Second)
 					select {
 					case eventsChannel <- event.GenericEvent{Object: p}:
 						matchedCount++
+						pendingAcks.mu.Lock()
+						pendingAcks.acks[p.Name] = append(pendingAcks.acks[p.Name], ack)
+						pendingAcks.mu.Unlock()
 					case <-timeoutCtx.Done():
 						timeoutCancel()
 						handlerLog.Error(nil, "event channel full; rate limiting ingestion, NACKing message")
@@ -280,15 +312,17 @@ func main() {
 				}
 			}
 
-			handlerLog.Info("enqueued reconciliation events for matching policies",
+			handlerLog.Info("enqueued reconciliation events for matching policies; awaiting materialization for message settlement",
 				"matchedPolicies", matchedCount,
 				"objectName", targetObjectName,
 			)
 
-			// Acknowledge message only after successfully pushing to event channel
-			if err := ack(ctx); err != nil {
-				handlerLog.Error(err, "failed to complete Service Bus message")
-				return err
+			// If no matching policy exists in the cluster for this vault object, complete the message immediately
+			if matchedCount == 0 {
+				if err := ack(ctx); err != nil {
+					handlerLog.Error(err, "failed to complete unmanaged Service Bus message")
+					return err
+				}
 			}
 
 			return nil
