@@ -9,6 +9,8 @@ This directory contains production-ready examples combining **External Secrets O
 | Directory | Target Workload | Probe Strategy | Protocol Tested |
 | :--- | :--- | :--- | :--- |
 | [`argo-rollouts-blue-green/`](./argo-rollouts-blue-green) | Argo Rollouts (Blue/Green) | HTTP Probe | HTTP Endpoint Validation |
+| [`cilium-hubble-observability/`](./cilium-hubble-observability) | Payment Processor + MySQL | Native MySQL Probe + eBPF Cilium Sandbox | L3/L4/L7 Egress & Hubble Flows |
+| [`circuit-breaker-rollback/`](./circuit-breaker-rollback) | Production Orders API + Postgres | Native PostgreSQL Probe | Bad Secret Rollback & Production Protection |
 | [`fullstack-db-rotation/`](./fullstack-db-rotation) | Fullstack Go Backend + Postgres | Native PostgreSQL Probe | Real DB Query & Connection Pool |
 | [`job-based-redis-probe/`](./job-based-redis-probe) | Redis Cache + Consumer | Ephemeral Job Probe (`redis:alpine`) | Redis AUTH & PING |
 | [`multi-secret-rotation/`](./multi-secret-rotation) | Microservice with 3 Secrets | Multi-Probe (PG + Job + HTTP) | DB, Cache, and API Gateway Keys |
