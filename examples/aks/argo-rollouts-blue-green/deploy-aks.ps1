@@ -95,7 +95,12 @@ if (-not $nsCheck) {
     }
 }
 
-# 6. Apply DynamicSecretPolicy CRD (if repo root is available)
+# 6. Ensure target namespace exists and apply DynamicSecretPolicy CRD
+Write-Step "Ensuring namespace 'dso-examples' exists..."
+$nsOut = kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to ensure namespace 'dso-examples'.`nDetails: $nsOut" }
+Write-Success "Namespace 'dso-examples' ready."
+
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
 if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
     Write-Step "Applying DynamicSecretPolicy CRD from repo..."
@@ -119,9 +124,9 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to apply manifests.`nDetails: $applyOut"
 }
 
-# 7. Check and display Public LoadBalancer Service IP
+# 8. Check and display Public LoadBalancer Service IP
 Write-Step "Checking Public LoadBalancer IP for payment-service-active..."
-$svcJson = kubectl get svc payment-service-active -o json 2>$null
+$svcJson = kubectl get svc payment-service-active -n dso-examples -o json 2>$null
 $extIp = $null
 if ($svcJson) {
     $svcInfo = $svcJson | ConvertFrom-Json
@@ -132,7 +137,7 @@ if ($svcJson) {
 
 if (-not $extIp) {
     Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
-    Write-Info "Run 'kubectl get svc payment-service-active -w' to view the public IP as soon as Azure assigns it."
+    Write-Info "Run 'kubectl get svc payment-service-active -n dso-examples -w' to view the public IP as soon as Azure assigns it."
 } else {
     Write-Success "Public IP assigned: http://$extIp"
 }
@@ -148,19 +153,19 @@ Write-Host @"
 
 1️⃣ Access the Active Payment Service:
    - Public URL (LoadBalancer):
-     kubectl get svc payment-service-active
+     kubectl get svc payment-service-active -n dso-examples
      (Open http://<EXTERNAL-IP> in your browser)
 
    - Fallback (Port-Forward):
-     kubectl port-forward svc/payment-service-active 8080:80
+     kubectl port-forward svc/payment-service-active 8080:80 -n dso-examples
      (Open http://localhost:8080)
 
 2️⃣ Monitor Argo Rollouts and DSO in Real Time (in separate terminals):
    - Watch Argo Rollouts Blue/Green Progression:
-     kubectl argo rollouts get rollout rollout-payment-service --watch
+     kubectl argo rollouts get rollout rollout-payment-service -n dso-examples --watch
 
    - Watch DSO State Machine & Validation Conditions:
-     kubectl get dynamicsecretpolicy -w
+     kubectl get dynamicsecretpolicy -n dso-examples -w
 
    - Stream Operator Logs:
      kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f

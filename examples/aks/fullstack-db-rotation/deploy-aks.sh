@@ -65,9 +65,13 @@ else
     echo "ℹ️  Secret 'db-password' already exists in Key Vault."
 fi
 
-# 5. Create bootstrap secret in cluster for PostgreSQL initial startup
+# 5. Ensure target namespace exists and create bootstrap secret
+echo "📦 Ensuring namespace 'dso-examples' exists..."
+kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
 echo "🔒 Creating bootstrap secret in cluster for PostgreSQL initialization..."
 kubectl create secret generic db-status-app-db-password-initial \
+    --namespace dso-examples \
     --from-literal=db-password="InitialSecretPassword123!" \
     --dry-run=client -o yaml | kubectl apply -f - || { echo "❌ Error: Failed to create bootstrap secret in cluster."; exit 1; }
 
@@ -90,10 +94,10 @@ fi
 sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
 echo "⏳ Waiting for PostgreSQL to be ready..."
-kubectl rollout status deployment/postgres --timeout=120s || { echo "❌ Error: PostgreSQL rollout failed or timed out."; exit 1; }
+kubectl rollout status deployment/postgres -n dso-examples --timeout=120s || { echo "❌ Error: PostgreSQL rollout failed or timed out."; exit 1; }
 
 echo "⏳ Waiting for Web Dashboard to be ready..."
-kubectl rollout status deployment/db-status-app --timeout=120s || { echo "❌ Error: Web Dashboard rollout failed or timed out."; exit 1; }
+kubectl rollout status deployment/db-status-app -n dso-examples --timeout=120s || { echo "❌ Error: Web Dashboard rollout failed or timed out."; exit 1; }
 
 echo "=================================================================="
 echo "✅ Fullstack DB Rotation PoC deployed successfully on AKS!"
@@ -104,20 +108,20 @@ echo "------------------------------------------------------------------"
 echo ""
 echo "1️⃣ Open the Live PostgreSQL Status Dashboard:"
 echo "   - Public URL (LoadBalancer):"
-echo "     kubectl get svc db-status-app"
+echo "     kubectl get svc db-status-app -n dso-examples"
 echo "     (Open http://<EXTERNAL-IP> in your browser)"
 echo ""
 echo "   - Fallback (Port-Forward):"
-echo "     kubectl port-forward svc/db-status-app 8080:80"
+echo "     kubectl port-forward svc/db-status-app 8080:80 -n dso-examples"
 echo "     (Open http://localhost:8080)"
 echo ""
 echo "2️⃣ Monitor Database Connections & DSO in Real Time (in separate terminals):"
 echo "   - Watch Live Audit Log on Dashboard: The web UI displays real-time DB query status and active password hash."
 echo "   - Watch DSO State Machine & Validation Conditions:"
-echo "     kubectl get dynamicsecretpolicy aks-database-password-policy -w"
+echo "     kubectl get dynamicsecretpolicy aks-database-password-policy -n dso-examples -w"
 echo ""
 echo "   - Watch Pod Rollout:"
-echo "     kubectl get pods -l app=db-status-app -w"
+echo "     kubectl get pods -n dso-examples -l app=db-status-app -w"
 echo ""
 echo "   - Stream Operator Logs:"
 echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"

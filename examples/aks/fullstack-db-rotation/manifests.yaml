@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: postgres-init-config
-  namespace: default
+  namespace: dso-examples
 data:
   init.sql: |
     CREATE TABLE IF NOT EXISTS audit_log (
@@ -16,7 +16,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
-  namespace: default
+  namespace: dso-examples
   labels:
     app: postgres
 spec:
@@ -62,7 +62,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgres
-  namespace: default
+  namespace: dso-examples
 spec:
   selector:
     app: postgres
@@ -75,7 +75,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: db-status-app-source
-  namespace: default
+  namespace: dso-examples
 data:
   main.go: |
     package main
@@ -634,7 +634,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: db-status-app
-  namespace: default
+  namespace: dso-examples
   labels:
     app: db-status-app
 spec:
@@ -666,7 +666,7 @@ spec:
             - name: PORT
               value: "8080"
             - name: DB_HOST
-              value: "postgres.default.svc.cluster.local"
+              value: "postgres.dso-examples.svc.cluster.local"
             - name: DB_PORT
               value: "5432"
             - name: DB_USER
@@ -703,7 +703,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: db-status-app
-  namespace: default
+  namespace: dso-examples
   labels:
     app: db-status-app
 spec:
@@ -719,7 +719,7 @@ apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
   name: aks-database-password-policy
-  namespace: default
+  namespace: dso-examples
 spec:
   vaultRef:
     keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
@@ -732,7 +732,7 @@ spec:
     volumeName: "db-secret-volume"
   validationProbes:
     - type: "PostgreSQL"
-      endpoint: "postgres.default.svc.cluster.local:5432/appdb"
+      endpoint: "postgres.dso-examples.svc.cluster.local:5432/appdb"
       queryTimeout: 5
       credentials:
         passwordKey: "db-password"   # Key name materialized by DSO from objectName "db-password"

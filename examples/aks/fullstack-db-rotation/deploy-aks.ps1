@@ -73,9 +73,15 @@ if (-not $secretCheck) {
     Write-Info "Secret 'db-password' already exists in Key Vault."
 }
 
-# 5. Create bootstrap secret in cluster for PostgreSQL initial startup
+# 5. Ensure target namespace exists and create bootstrap secret
+Write-Step "Ensuring namespace 'dso-examples' exists..."
+$nsOut = kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - 2>&1
+if ($LASTEXITCODE -ne 0) { throw "Failed to ensure namespace 'dso-examples'.`nDetails: $nsOut" }
+Write-Success "Namespace 'dso-examples' ready."
+
 Write-Info "Creating bootstrap secret in cluster for PostgreSQL initialization..."
 $b1 = kubectl create secret generic db-status-app-db-password-initial `
+    --namespace dso-examples `
     --from-literal=db-password="InitialSecretPassword123!" `
     --dry-run=client -o yaml | kubectl apply -f - 2>&1
 if ($LASTEXITCODE -ne 0) { throw "Failed to create bootstrap secret.`nDetails: $b1" }
@@ -99,7 +105,7 @@ if (-not (Test-Path $manifestPath)) {
 $manifestContent = Get-Content $manifestPath -Raw
 $manifestContent = $manifestContent -replace '\$\{KEYVAULT_NAME\}', $KeyVaultName
 
-$applyOut = $manifestContent | kubectl apply -f - 2>&1
+$applyOut = $manifestContent | kubectl apply -n dso-examples -f - 2>&1
 Write-Host $applyOut
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to apply manifests.`nDetails: $applyOut"
@@ -107,18 +113,18 @@ if ($LASTEXITCODE -ne 0) {
 
 # 8. Wait for deployments to be ready
 Write-Info "Waiting for PostgreSQL deployment to become ready..."
-$r1 = kubectl rollout status deployment/postgres --timeout=120s 2>&1
+$r1 = kubectl rollout status deployment/postgres -n dso-examples --timeout=120s 2>&1
 Write-Host $r1
 if ($LASTEXITCODE -ne 0) { throw "PostgreSQL rollout failed or timed out.`nDetails: $r1" }
 
 Write-Info "Waiting for Web Dashboard deployment to become ready..."
-$r2 = kubectl rollout status deployment/db-status-app --timeout=120s 2>&1
+$r2 = kubectl rollout status deployment/db-status-app -n dso-examples --timeout=120s 2>&1
 Write-Host $r2
 if ($LASTEXITCODE -ne 0) { throw "Web Dashboard rollout failed or timed out.`nDetails: $r2" }
 
-# 8. Check and display Public LoadBalancer Service IP
+# 9. Check and display Public LoadBalancer Service IP
 Write-Step "Checking Public LoadBalancer IP for db-status-app..."
-$svcJson = kubectl get svc db-status-app -o json 2>$null
+$svcJson = kubectl get svc db-status-app -n dso-examples -o json 2>$null
 $extIp = $null
 if ($svcJson) {
     $svcInfo = $svcJson | ConvertFrom-Json
@@ -129,7 +135,7 @@ if ($svcJson) {
 
 if (-not $extIp) {
     Write-Info "LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
-    Write-Info "Run 'kubectl get svc db-status-app -w' to view the public IP as soon as Azure assigns it."
+    Write-Info "Run 'kubectl get svc db-status-app -n dso-examples -w' to view the public IP as soon as Azure assigns it."
 } else {
     Write-Success "Public IP assigned: http://$extIp"
 }
@@ -145,27 +151,27 @@ Write-Host @"
 
 1️⃣ Open the Live PostgreSQL Status Dashboard:
    - Public URL (LoadBalancer):
-     kubectl get svc db-status-app
+     kubectl get svc db-status-app -n dso-examples
      (Open http://<EXTERNAL-IP> in your browser)
 
    - Fallback (Port-Forward):
-     kubectl port-forward svc/db-status-app 8080:80
+     kubectl port-forward svc/db-status-app 8080:80 -n dso-examples
      (Open http://localhost:8080)
 
 2️⃣ Monitor Database Connections & DSO in Real Time (in separate terminals):
    - Watch Live Audit Log on Dashboard: The web UI displays real-time DB query status and active password hash.
    - Watch DSO State Machine & Validation Conditions:
-     kubectl get dynamicsecretpolicy aks-database-password-policy -w
+     kubectl get dynamicsecretpolicy aks-database-password-policy -n dso-examples -w
 
    - Watch Pod Rollout:
-     kubectl get pods -l app=db-status-app -w
+     kubectl get pods -n dso-examples -l app=db-status-app -w
 
    - Stream Operator Logs:
      kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f
 
 3️⃣ Execute Database Credential Rotation:
    🔹 Step 3.1: Update the user password directly inside PostgreSQL (simulating DBA/Rotation Engine):
-      kubectl exec deployment/postgres -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';"
+      kubectl exec deployment/postgres -n dso-examples -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';"
 
    🔹 Step 3.2: Update the secret in Azure Key Vault:
       az keyvault secret set --vault-name $KeyVaultName --name "db-password" --value "NewSecret2026_Rotated!"

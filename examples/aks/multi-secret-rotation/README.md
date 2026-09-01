@@ -30,7 +30,7 @@ flowchart TD
 
         ASB -->|"Event Stream"| DSO
 
-        subgraph DemoApp ["multi-secret-demo Namespace"]
+        subgraph DemoApp ["dso-examples Namespace"]
             APP["🌐 Orders & Payments Microservice<br/>(multi-secret-app)"]
 
             subgraph Policies ["DynamicSecretPolicy Resources"]
@@ -104,7 +104,7 @@ chmod +x deploy-aks.sh
 
 Forward the application port to your local machine:
 ```bash
-kubectl port-forward svc/multi-secret-app 8080:80 -n multi-secret-demo
+kubectl port-forward svc/multi-secret-app 8080:80 -n dso-examples
 ```
 
 Open [http://localhost:8080](http://localhost:8080) in your browser. You will see a live dashboard displaying the health, active secret mask, probe latency, and status for all three dependencies simultaneously.
@@ -165,6 +165,6 @@ az keyvault secret set --vault-name "kv-dso-dev-jc" --name "db-password" --value
 
 Check policy status:
 ```bash
-kubectl get dynamicsecretpolicies -n multi-secret-demo
-kubectl describe dynamicsecretpolicy multi-secret-db-policy -n multi-secret-demo
+kubectl get dynamicsecretpolicies -n dso-examples
+kubectl describe dynamicsecretpolicy multi-secret-db-policy -n dso-examples
 ```
