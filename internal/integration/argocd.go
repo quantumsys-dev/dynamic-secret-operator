@@ -174,30 +174,31 @@ func fetchArgoCDApplication(ctx context.Context, c client.Client, appName, workl
 // ensureIgnoreDifferences verifies and appends required JSON pointers and JQ path expressions to
 // the Application spec. Returns true if modifications were made.
 func ensureIgnoreDifferences(app *argov1alpha1.Application, group, kind string) bool {
-	requiredPointers := []string{JSONPointerRevisionAnnotation}
-	requiredJQExpressions := []string{JQPathExpressionRevisionVolumes}
+	// Remove JSONPointers for volumes, use JQ instead
+	requiredJQ := []string{
+		`.spec.template.spec.volumes[] | select(.secret.secretName | startswith("` + app.Name + `-"))`,
+		`.spec.template.spec.containers[].env[]? | select(.valueFrom.secretKeyRef.name | startswith("` + app.Name + `-"))`,
+	}
 
 	for i := range app.Spec.IgnoreDifferences {
 		item := &app.Spec.IgnoreDifferences[i]
 		if (item.Group == group || (item.Group == "" && group == "apps")) && item.Kind == kind {
-			existingPointers := make(map[string]bool, len(item.JSONPointers))
+			// Append missing JQ expressions
+			existing := make(map[string]bool)
+			for _, jq := range item.JQPathExpressions {
+				existing[jq] = true
+			}
+			existingPointers := make(map[string]bool)
 			for _, p := range item.JSONPointers {
 				existingPointers[p] = true
 			}
-			existingJQExpressions := make(map[string]bool, len(item.JQPathExpressions))
-			for _, p := range item.JQPathExpressions {
-				existingJQExpressions[p] = true
-			}
-
 			modified := false
-			for _, req := range requiredPointers {
-				if !existingPointers[req] {
-					item.JSONPointers = append(item.JSONPointers, req)
-					modified = true
-				}
+			if !existingPointers[JSONPointerRevisionAnnotation] {
+				item.JSONPointers = append(item.JSONPointers, JSONPointerRevisionAnnotation)
+				modified = true
 			}
-			for _, req := range requiredJQExpressions {
-				if !existingJQExpressions[req] {
+			for _, req := range requiredJQ {
+				if !existing[req] {
 					item.JQPathExpressions = append(item.JQPathExpressions, req)
 					modified = true
 				}
@@ -206,12 +207,11 @@ func ensureIgnoreDifferences(app *argov1alpha1.Application, group, kind string) 
 		}
 	}
 
-	// No matching group/kind entry found; create a new one
 	app.Spec.IgnoreDifferences = append(app.Spec.IgnoreDifferences, argov1alpha1.ResourceIgnoreDifferences{
 		Group:             group,
 		Kind:              kind,
-		JSONPointers:      requiredPointers,
-		JQPathExpressions: requiredJQExpressions,
+		JSONPointers:      []string{JSONPointerRevisionAnnotation},
+		JQPathExpressions: requiredJQ,
 	})
 	return true
 }

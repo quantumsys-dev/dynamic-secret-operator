@@ -176,8 +176,8 @@ func TestReconcileArgoCDIgnoreDifferences_PatchesApp(t *testing.T) {
 	if len(entry.JSONPointers) != 1 {
 		t.Errorf("expected 1 JSON pointer, got %d", len(entry.JSONPointers))
 	}
-	if len(entry.JQPathExpressions) != 1 || entry.JQPathExpressions[0] != JQPathExpressionRevisionVolumes {
-		t.Errorf("expected 1 JQ path expression for revision volumes, got %v", entry.JQPathExpressions)
+	if len(entry.JQPathExpressions) != 2 {
+		t.Errorf("expected 2 JQ path expressions (volumes + env), got %v", entry.JQPathExpressions)
 	}
 }
 
@@ -234,13 +234,13 @@ func TestReconcileArgoCDIgnoreDifferences_RolloutSupport(t *testing.T) {
 		t.Errorf("expected entry for argoproj.io/Rollout, got %s/%s", entry.Group, entry.Kind)
 	}
 
-	// Should have merged the missing JQ path expression for revision volumes, while keeping the
+	// Should have merged the missing JQ path expressions, while keeping the
 	// pre-existing revision annotation pointer intact (not duplicated).
 	if len(entry.JSONPointers) != 1 {
 		t.Errorf("expected 1 JSON pointer after merge, got %d", len(entry.JSONPointers))
 	}
-	if len(entry.JQPathExpressions) != 1 || entry.JQPathExpressions[0] != JQPathExpressionRevisionVolumes {
-		t.Errorf("expected 1 JQ path expression for revision volumes after merge, got %v", entry.JQPathExpressions)
+	if len(entry.JQPathExpressions) != 2 {
+		t.Errorf("expected 2 JQ path expressions after merge, got %v", entry.JQPathExpressions)
 	}
 }
 
@@ -309,8 +309,8 @@ func TestReconcileArgoCDIgnoreDifferences_PreservesCustomUserEntries(t *testing.
 	}
 	// Verify DSO entry was appended
 	dsoEntry := updatedApp.Spec.IgnoreDifferences[2]
-	if dsoEntry.Kind != "Deployment" || len(dsoEntry.JSONPointers) != 1 || len(dsoEntry.JQPathExpressions) != 1 {
-		t.Errorf("expected Deployment entry correctly added with 1 JSON pointer and 1 JQ path expression, got %+v", dsoEntry)
+	if dsoEntry.Kind != "Deployment" || len(dsoEntry.JSONPointers) != 1 || len(dsoEntry.JQPathExpressions) != 2 {
+		t.Errorf("expected Deployment entry correctly added with 1 JSON pointer and 2 JQ path expressions, got %+v", dsoEntry)
 	}
 }
 
