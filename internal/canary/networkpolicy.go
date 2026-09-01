@@ -18,6 +18,10 @@ package canary
 
 import (
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -35,7 +39,7 @@ const LabelTargetWorkload = "dso.quantumsys.dev/target"
 
 // BuildNetworkPolicy constructs an isolating Kubernetes NetworkPolicy around the canary workload.
 // It enforces strict zero-trust default-deny on all Ingress, and restricts Egress strictly to DNS
-// and the explicit network ports required by configured validation probes.
+// and the explicit target endpoint IP/CIDR and network ports required by configured validation probes.
 func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv1.NetworkPolicy {
 	targetName := policy.Spec.WorkloadSelector.Name
 	netpolName := fmt.Sprintf("%s-canary-netpol", targetName)
@@ -45,42 +49,50 @@ func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv
 	dnsPort := intstr.FromInt(53)
 
 	// 1. Mandatory Core DNS Egress Rules (UDP and TCP on port 53)
-	egressPorts := []networkingv1.NetworkPolicyPort{
+	egressRules := []networkingv1.NetworkPolicyEgressRule{
 		{
-			Protocol: &udpProtocol,
-			Port:     &dnsPort,
-		},
-		{
-			Protocol: &tcpProtocol,
-			Port:     &dnsPort,
+			Ports: []networkingv1.NetworkPolicyPort{
+				{
+					Protocol: &udpProtocol,
+					Port:     &dnsPort,
+				},
+				{
+					Protocol: &tcpProtocol,
+					Port:     &dnsPort,
+				},
+			},
 		},
 	}
 
-	// 2. Dynamic Probe Egress Ports (PostgreSQL: 5432, MySQL: 3306, HTTP: 80/443, TLS: 443)
-	addedPorts := make(map[int]bool)
-	addTCPPort := func(portNum int) {
-		if !addedPorts[portNum] {
+	// 2. Dynamic Probe Egress Rules with Target IP/CIDR restrictions
+	for _, probe := range policy.Spec.ValidationProbes {
+		if probe.Type == secretv1alpha1.ProbeTypeJob {
+			continue
+		}
+		cidr, ports := extractTargetCIDRAndPort(probe.Endpoint, probe.Type)
+
+		var npPorts []networkingv1.NetworkPolicyPort
+		for _, portNum := range ports {
 			p := intstr.FromInt(portNum)
-			egressPorts = append(egressPorts, networkingv1.NetworkPolicyPort{
+			npPorts = append(npPorts, networkingv1.NetworkPolicyPort{
 				Protocol: &tcpProtocol,
 				Port:     &p,
 			})
-			addedPorts[portNum] = true
 		}
-	}
 
-	for _, probe := range policy.Spec.ValidationProbes {
-		switch probe.Type {
-		case secretv1alpha1.ProbeTypePostgreSQL:
-			addTCPPort(5432)
-		case secretv1alpha1.ProbeTypeMySQL:
-			addTCPPort(3306)
-		case secretv1alpha1.ProbeTypeHTTP:
-			addTCPPort(80)
-			addTCPPort(443)
-		case secretv1alpha1.ProbeTypeTLS:
-			addTCPPort(443)
+		rule := networkingv1.NetworkPolicyEgressRule{
+			Ports: npPorts,
 		}
+		if cidr != "" {
+			rule.To = []networkingv1.NetworkPolicyPeer{
+				{
+					IPBlock: &networkingv1.IPBlock{
+						CIDR: cidr,
+					},
+				},
+			}
+		}
+		egressRules = append(egressRules, rule)
 	}
 
 	return &networkingv1.NetworkPolicy{
@@ -105,12 +117,86 @@ func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv
 			},
 			// Strict Default Deny on Ingress (empty slice)
 			Ingress: []networkingv1.NetworkPolicyIngressRule{},
-			// Strict Least-Privilege Egress (DNS + Active Probes)
-			Egress: []networkingv1.NetworkPolicyEgressRule{
-				{
-					Ports: egressPorts,
-				},
-			},
+			// Strict Least-Privilege Egress (DNS + Active Probes restricted by IP/CIDR & Port)
+			Egress: egressRules,
 		},
 	}
 }
+
+// extractTargetCIDRAndPort parses an endpoint string and resolves target IP/CIDR and port.
+func extractTargetCIDRAndPort(endpoint string, probeType secretv1alpha1.ProbeType) (string, []int) {
+	defaultPorts := map[secretv1alpha1.ProbeType][]int{
+		secretv1alpha1.ProbeTypePostgreSQL: {5432},
+		secretv1alpha1.ProbeTypeMySQL:      {3306},
+		secretv1alpha1.ProbeTypeHTTP:       {80, 443},
+		secretv1alpha1.ProbeTypeTLS:        {443},
+	}
+
+	if endpoint == "" {
+		return "", defaultPorts[probeType]
+	}
+
+	raw := endpoint
+	// Strip URL scheme if present
+	if strings.Contains(raw, "://") {
+		if u, err := url.Parse(raw); err == nil {
+			raw = u.Host
+			if u.Scheme == "https" && u.Port() == "" {
+				defaultPorts[probeType] = []int{443}
+			} else if u.Scheme == "http" && u.Port() == "" {
+				defaultPorts[probeType] = []int{80}
+			}
+		}
+	}
+
+	var ports []int
+	var host string
+
+	// Handle case: "10.240.1.0/24:3306" (CIDR with explicit port)
+	if lastColon := strings.LastIndex(raw, ":"); lastColon != -1 && strings.Contains(raw, "/") && lastColon > strings.Index(raw, "/") {
+		candidatePort := raw[lastColon+1:]
+		if portNum, err := strconv.Atoi(candidatePort); err == nil && portNum > 0 {
+			ports = []int{portNum}
+			host = raw[:lastColon]
+		}
+	}
+
+	if host == "" {
+		// Handle database path suffix: "10.240.0.5:5432/mydb"
+		clean := raw
+		if idx := strings.Index(clean, "/"); idx != -1 {
+			// Check if clean is a standalone CIDR like 10.0.0.0/16
+			if _, _, err := net.ParseCIDR(clean); err != nil {
+				clean = clean[:idx]
+			}
+		}
+
+		if h, p, err := net.SplitHostPort(clean); err == nil {
+			host = h
+			if portNum, err := strconv.Atoi(p); err == nil && portNum > 0 {
+				ports = []int{portNum}
+			}
+		} else {
+			host = clean
+		}
+	}
+
+	if len(ports) == 0 {
+		ports = defaultPorts[probeType]
+	}
+
+	// Determine if host is a valid CIDR or IP
+	var cidr string
+	if _, ipNet, err := net.ParseCIDR(host); err == nil {
+		cidr = ipNet.String()
+	} else if ip := net.ParseIP(host); ip != nil {
+		if ip.To4() != nil {
+			cidr = fmt.Sprintf("%s/32", ip.String())
+		} else {
+			cidr = fmt.Sprintf("%s/128", ip.String())
+		}
+	}
+
+	return cidr, ports
+}
+
