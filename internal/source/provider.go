@@ -18,6 +18,7 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -33,6 +34,30 @@ import (
 type SecretPayload struct {
 	Data    map[string][]byte
 	Version string
+}
+
+// ParseJSONPayload unmarshals a JSON object payload into discrete map[string][]byte keys.
+func ParseJSONPayload(raw []byte) (map[string][]byte, error) {
+	var jsonMap map[string]interface{}
+	if err := json.Unmarshal(raw, &jsonMap); err != nil {
+		return nil, fmt.Errorf("failed to parse secret JSON payload: %w", err)
+	}
+	result := make(map[string][]byte, len(jsonMap))
+	for k, v := range jsonMap {
+		switch val := v.(type) {
+		case string:
+			result[k] = []byte(val)
+		case []byte:
+			result[k] = val
+		default:
+			b, err := json.Marshal(val)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal JSON value for key %q: %w", k, err)
+			}
+			result[k] = b
+		}
+	}
+	return result, nil
 }
 
 // Provider defines the extensible abstraction interface for secret ingestion sources.
@@ -96,6 +121,17 @@ func (p *AzureKeyVaultProvider) FetchSecret(ctx context.Context, policy *secretv
 		return nil, fmt.Errorf("failed to fetch secret from Azure Key Vault %q (object %q): %w", vaultURI, objName, err)
 	}
 
+	if src.ParseJSON {
+		parsedData, err := ParseJSONPayload(payload.Value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal JSON payload for Azure Key Vault object %q: %w", objName, err)
+		}
+		return &SecretPayload{
+			Data:    parsedData,
+			Version: payload.Version,
+		}, nil
+	}
+
 	return &SecretPayload{
 		Data: map[string][]byte{
 			objName: payload.Value,
@@ -124,6 +160,24 @@ func (p *K8sSecretProvider) FetchSecret(ctx context.Context, policy *secretv1alp
 	sec := &corev1.Secret{}
 	if err := p.Reader.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, sec); err != nil {
 		return nil, fmt.Errorf("failed to fetch intermediate Kubernetes source secret %q in namespace %q: %w", secretName, policy.Namespace, err)
+	}
+
+	if src.ParseJSON {
+		mergedData := make(map[string][]byte)
+		for k, v := range sec.Data {
+			parsed, err := ParseJSONPayload(v)
+			if err != nil {
+				mergedData[k] = v
+			} else {
+				for pk, pv := range parsed {
+					mergedData[pk] = pv
+				}
+			}
+		}
+		return &SecretPayload{
+			Data:    mergedData,
+			Version: sec.ResourceVersion,
+		}, nil
 	}
 
 	// Copy secret data

@@ -166,3 +166,124 @@ func TestStubProviders(t *testing.T) {
 		}
 	}
 }
+
+func TestParseJSONPayload(t *testing.T) {
+	t.Run("valid JSON map unmarshals to discrete byte slices", func(t *testing.T) {
+		raw := []byte(`{"username":"foo","password":"bar","port":5432,"ssl":true}`)
+		parsed, err := ParseJSONPayload(raw)
+		if err != nil {
+			t.Fatalf("unexpected error parsing JSON: %v", err)
+		}
+		if string(parsed["username"]) != "foo" {
+			t.Errorf("expected username 'foo', got %s", string(parsed["username"]))
+		}
+		if string(parsed["password"]) != "bar" {
+			t.Errorf("expected password 'bar', got %s", string(parsed["password"]))
+		}
+		if string(parsed["port"]) != "5432" {
+			t.Errorf("expected port '5432', got %s", string(parsed["port"]))
+		}
+		if string(parsed["ssl"]) != "true" {
+			t.Errorf("expected ssl 'true', got %s", string(parsed["ssl"]))
+		}
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		raw := []byte(`not-json-data`)
+		_, err := ParseJSONPayload(raw)
+		if err == nil {
+			t.Errorf("expected error parsing invalid JSON, got nil")
+		}
+	})
+}
+
+func TestAzureKeyVaultProvider_ParseJSON(t *testing.T) {
+	fetcher := &mockSecretFetcher{
+		value:   []byte(`{"db_user":"appuser","db_pass":"secretpass"}`),
+		version: "v999",
+	}
+	provider := &AzureKeyVaultProvider{Fetcher: fetcher}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "json-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			Source: &secretv1alpha1.SecretSource{
+				Type:      secretv1alpha1.SourceTypeAzureKeyVault,
+				ParseJSON: true,
+				AzureKeyVault: &secretv1alpha1.AzureKeyVaultSource{
+					KeyVaultURI: "https://mykv.vault.azure.net",
+					ObjectName:  "db-credentials-json",
+				},
+			},
+		},
+	}
+
+	payload, err := provider.FetchSecret(context.Background(), policy)
+	if err != nil {
+		t.Fatalf("unexpected error fetching JSON secret: %v", err)
+	}
+
+	if len(payload.Data) != 2 {
+		t.Fatalf("expected 2 parsed keys, got %d", len(payload.Data))
+	}
+	if string(payload.Data["db_user"]) != "appuser" {
+		t.Errorf("expected db_user 'appuser', got %s", string(payload.Data["db_user"]))
+	}
+	if string(payload.Data["db_pass"]) != "secretpass" {
+		t.Errorf("expected db_pass 'secretpass', got %s", string(payload.Data["db_pass"]))
+	}
+}
+
+func TestK8sSecretProvider_ParseJSON(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = secretv1alpha1.AddToScheme(scheme)
+
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "json-secret",
+			Namespace:       "default",
+			ResourceVersion: "12345",
+		},
+		Data: map[string][]byte{
+			"json-payload": []byte(`{"apiKey":"xyz-123","apiSecret":"supersecret"}`),
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sec).Build()
+	provider := &K8sSecretProvider{Reader: c}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "json-k8s-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			Source: &secretv1alpha1.SecretSource{
+				Type:      secretv1alpha1.SourceTypeK8sSecret,
+				ParseJSON: true,
+				K8sSecret: &secretv1alpha1.K8sSecretSource{
+					Name: "json-secret",
+				},
+			},
+		},
+	}
+
+	payload, err := provider.FetchSecret(context.Background(), policy)
+	if err != nil {
+		t.Fatalf("unexpected error fetching JSON k8s secret: %v", err)
+	}
+
+	if len(payload.Data) != 2 {
+		t.Fatalf("expected 2 parsed keys, got %d", len(payload.Data))
+	}
+	if string(payload.Data["apiKey"]) != "xyz-123" {
+		t.Errorf("expected apiKey 'xyz-123', got %s", string(payload.Data["apiKey"]))
+	}
+	if string(payload.Data["apiSecret"]) != "supersecret" {
+		t.Errorf("expected apiSecret 'supersecret', got %s", string(payload.Data["apiSecret"]))
+	}
+}

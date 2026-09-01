@@ -133,6 +133,12 @@ type SecretSource struct {
 	// +kubebuilder:validation:Enum=AzureKeyVault;K8sSecret;AWSSecretsManager;GCPSecretManager;Vault
 	Type SourceType `json:"type"`
 
+	// ParseJSON indicates whether the secret payload is a JSON object that should be parsed
+	// and unmarshaled into discrete key-value pairs in the materialized Kubernetes Secret data.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	ParseJSON bool `json:"parseJSON,omitempty"`
+
 	// AzureKeyVault configures real-time event-driven ingestion from Azure Key Vault.
 	// +kubebuilder:validation:Optional
 	AzureKeyVault *AzureKeyVaultSource `json:"azureKeyVault,omitempty"`
