@@ -280,12 +280,6 @@ func main() {
 		setupLog.Info("registered Azure Service Bus peek-lock listener with manager and wired event bridge")
 	}
 
-	if os.Getenv("ENABLE_WEBHOOKS") == "true" {
-		if err = (&secretv1alpha1.DynamicSecretPolicy{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "DynamicSecretPolicy")
-			os.Exit(1)
-		}
-	}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

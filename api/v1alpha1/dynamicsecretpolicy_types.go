@@ -51,11 +51,13 @@ type VaultReference struct {
 	// KeyVaultURI is the URI of the Azure Key Vault or secret backend.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.matches('^https://[a-zA-Z0-9-]+\\\\.(?:vault\\\\.azure\\\\.net|vault\\\\.azure\\\\.cn|vault\\\\.usgovcloudapi\\\\.net)(?:/|$)?')",message="Invalid Azure Key Vault URI"
 	KeyVaultURI string `json:"keyVaultURI"`
 
 	// ObjectName is the name of the secret, certificate, or key within the vault.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.size() > 0",message="objectName must not be empty"
 	ObjectName string `json:"objectName"`
 
 	// ObjectType specifies whether the secret is a Secret, Certificate, or Key.
@@ -75,6 +77,7 @@ type WorkloadSelector struct {
 	// Name is the name of the target workload resource in the same namespace.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.size() > 0",message="target workload name must not be empty"
 	Name string `json:"name"`
 }
 
@@ -83,6 +86,8 @@ type CanaryStrategy struct {
 	// TimeoutSeconds defines the maximum duration in seconds to wait for canary health validation.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=30
+	// +kubebuilder:validation:XValidation:rule="self > 0",message="timeoutSeconds must be greater than 0"
 	TimeoutSeconds int32 `json:"timeoutSeconds"`
 }
 
@@ -127,6 +132,7 @@ type JobProbeSpec struct {
 }
 
 // ValidationProbe configures synthetic probes executed during rollout.
+// +kubebuilder:validation:XValidation:rule="self.type != 'Job' || has(self.job)",message="job specification is required when probe type is Job"
 type ValidationProbe struct {
 	// Type of probe to execute (TLS, PostgreSQL, MySQL, HTTP, Job).
 	// +kubebuilder:validation:Required
@@ -143,6 +149,7 @@ type ValidationProbe struct {
 	// Not used for Job probes (use spec.job.timeoutSeconds instead).
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:XValidation:rule="self >= 1",message="queryTimeout must be at least 1 second"
 	QueryTimeout int32 `json:"queryTimeout,omitempty"`
 
 	// Credentials explicitly maps secret keys to database credential fields.
@@ -166,6 +173,7 @@ type RollbackConfig struct {
 	// CircuitBreakerThreshold is the maximum number of consecutive failures permitted before halting reconciliations.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=3
+	// +kubebuilder:validation:XValidation:rule="self >= 1",message="circuitBreakerThreshold must be at least 1"
 	CircuitBreakerThreshold int32 `json:"circuitBreakerThreshold,omitempty"`
 }
 
