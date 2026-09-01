@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -193,15 +192,6 @@ func main() {
 
 	providerRegistry := sourceProvider.SetupDefaultRegistry(mgr.GetAPIReader(), secretFetcher)
 
-	// Thread-safe registry holding pending AckFuncs until secret materialization succeeds.
-	type ackRegistry struct {
-		mu   sync.Mutex
-		acks map[string][]events.AckFunc
-	}
-	pendingAcks := &ackRegistry{
-		acks: make(map[string][]events.AckFunc),
-	}
-
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
@@ -210,25 +200,6 @@ func main() {
 		KubeClient:              kubeClient,
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 		EventsChannel:           eventsChannel,
-		OnSecretMaterialized: func(ctx context.Context, policyName, revision string) error {
-			pendingAcks.mu.Lock()
-			ackList := pendingAcks.acks[policyName]
-			delete(pendingAcks.acks, policyName)
-			pendingAcks.mu.Unlock()
-
-			setupLog.Info("secret revision materialized; completing event ingester message transactions",
-				"policy", policyName, "revision", revision, "pendingMessages", len(ackList))
-
-			for _, ackFn := range ackList {
-				if ackFn != nil {
-					if err := ackFn(ctx); err != nil {
-						setupLog.Error(err, "failed to complete event ingester message", "policy", policyName)
-						return err
-					}
-				}
-			}
-			return nil
-		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamicSecretPolicy")
 		os.Exit(1)
@@ -284,9 +255,6 @@ func main() {
 					select {
 					case eventsChannel <- event.GenericEvent{Object: p}:
 						matchedCount++
-						pendingAcks.mu.Lock()
-						pendingAcks.acks[p.Name] = append(pendingAcks.acks[p.Name], ack)
-						pendingAcks.mu.Unlock()
 					case <-timeoutCtx.Done():
 						timeoutCancel()
 						handlerLog.Error(nil, "event channel full; rate limiting ingestion, NACKing message")
@@ -304,12 +272,12 @@ func main() {
 				"objectName", targetObjectName,
 			)
 
-			// If no matching policy exists in the cluster for this vault object, ack immediately.
-			if matchedCount == 0 {
-				if err := ack(ctx); err != nil {
-					handlerLog.Error(err, "failed to complete unmanaged event message")
-					return err
-				}
+			// The reconciler is level-triggered: once accepted into the controller-runtime work
+			// queue it will retry until success or circuit-breaker trip, so the message can be
+			// acked immediately rather than held pending eventual secret materialization.
+			if err := ack(ctx); err != nil {
+				handlerLog.Error(err, "failed to complete event ingester message after enqueueing")
+				return err
 			}
 
 			return nil
