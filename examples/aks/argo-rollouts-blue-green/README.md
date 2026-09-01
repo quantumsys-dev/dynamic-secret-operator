@@ -5,7 +5,11 @@ This enterprise example demonstrates integrating the **Dynamic Secret Operator (
 This pattern strictly adheres to [**ADR-002: Immutable Secret Revisions**](../../../docs/architecture/002-immutable-revisions-vs-mutable.md):
 - Every rotation in Azure Key Vault triggers DSO to materialize an immutable Secret (`<rollout>-rev-<hash>`).
 - DSO mutates the `Rollout` spec's secret volume reference, causing Argo Rollouts to deploy the new secret version into an isolated **Preview (Green) ReplicaSet**.
-- Synthetic validation probes test the preview environment before switching live traffic on the **Active (Blue) Service**.
+- DSO does **not** run its own synthetic canary against Rollout targets: patching the spec is
+  already what triggers Argo Rollouts' own progressive delivery, so DSO defers entirely to
+  Argo's own blue/green strategy (`autoPromotionEnabled` here, or any configured `AnalysisRun`s)
+  for validation, and simply watches `Rollout.Status.Phase` until it reports `Healthy` before
+  finalizing the promotion (garbage collecting the old secret revision).
 
 ---
 
@@ -22,13 +26,12 @@ flowchart TD
     subgraph AKS ["☸️ Azure Kubernetes Service (AKS) Cluster"]
         subgraph DSOSystem ["dso-system Namespace"]
             DSO["⚙️ Dynamic Secret Operator"]
-            PROBE["🩺 Synthetic Validation Probes"]
         end
 
         subgraph ArgoRollouts ["default Namespace"]
             ROLLOUT["📜 Rollout: rollout-payment-service"]
             ACTIVE_SVC["🌐 Active Service (Blue)<br/>(Live Ingress Traffic)"]
-            PREVIEW_SVC["🧪 Preview Service (Green)<br/>(Validation & Pre-warming)"]
+            PREVIEW_SVC["🧪 Preview Service (Green)<br/>(Argo AnalysisRuns / manual promotion)"]
             
             RS_OLD["📦 Active ReplicaSet (v1)<br/>(Secret: payment-rev-old)"]
             RS_NEW["📦 Preview ReplicaSet (v2)<br/>(Secret: payment-rev-new)"]
@@ -43,10 +46,10 @@ flowchart TD
     ROLLOUT -->|"6. Provisions Green Pods"| RS_NEW
     PREVIEW_SVC --> RS_NEW
     ACTIVE_SVC --> RS_OLD
-    DSO -->|"7. Execute Probes against Preview"| PROBE
-    PROBE -->|"Verify Health"| PREVIEW_SVC
-    ROLLOUT -->|"8. Blue/Green Traffic Cutover"| ACTIVE_SVC
+    DSO -->|"7. Poll Status.Phase"| ROLLOUT
+    ROLLOUT -->|"8. Blue/Green Traffic Cutover (once AnalysisRuns pass)"| ACTIVE_SVC
     ACTIVE_SVC -.->|"Points to new version"| RS_NEW
+    ROLLOUT -->|"9. Phase=Healthy"| DSO
 ```
 
 ---
@@ -54,9 +57,9 @@ flowchart TD
 ## 💡 How It Works on AKS
 
 1. **Secret Materialization:** When credentials rotate in Azure Key Vault, DSO creates a new immutable Secret (`rollout-payment-service-payment-db-password-rev-<hash>`).
-2. **Rollout Specification Update:** DSO updates the `Rollout` object's `spec.template.spec.volumes` with the new revision hash.
-3. **Green Environment Deployment:** Argo Rollouts creates a new preview ReplicaSet referencing the new secret revision and routes internal validation traffic to the `previewService`.
-4. **Validation & Promotion:** DSO's validation probes test the preview service. Once healthy, Argo Rollouts performs an instantaneous cutover of the `activeService` to the new ReplicaSet, draining the old blue pods gracefully.
+2. **Rollout Specification Update:** DSO updates the `Rollout` object's `spec.template.spec.volumes` with the new revision hash. DSO does not create its own canary Deployment for Rollout targets - patching the spec is what triggers Argo's own progressive delivery, so running a second, independent canary mechanism alongside it would just fight the GitOps controller.
+3. **Green Environment Deployment:** Argo Rollouts creates a new preview ReplicaSet referencing the new secret revision and routes internal validation traffic to the `previewService`, running any configured `prePromotionAnalysis`/`postPromotionAnalysis` `AnalysisRun`s itself.
+4. **Validation & Promotion:** DSO polls `Rollout.Status.Phase` rather than probing the preview service directly. This example uses `autoPromotionEnabled: true`, so Argo cuts traffic over automatically once the preview ReplicaSet is ready (a `prePromotionAnalysis`/`postPromotionAnalysis` `AnalysisRun` could be added for stricter gating). Once Argo reports the rollout `Healthy` (traffic has cut over to the `activeService`), DSO finalizes the promotion by recording the new `CurrentRevision` and garbage collecting the old secret revision. If Argo instead reports the rollout `Degraded`, DSO counts it as a failed validation attempt against the circuit breaker and leaves the old secret revision in place.
 
 ---
 

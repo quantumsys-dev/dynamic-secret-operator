@@ -334,14 +334,11 @@ func TestRolloutAdapter_Lifecycle(t *testing.T) {
 		},
 	}
 
-	// BuildCanary produces an isolated 1-replica Deployment derived from Rollout template
-	canary := adapter.BuildCanary(policy, "canary-service-database-password-rev-rev777")
-	if canary.Name != "canary-service-canary" {
-		t.Errorf("expected canary name 'canary-service-canary', got %q", canary.Name)
-	}
-	if canary.Spec.Template.Spec.Volumes[0].Secret.SecretName != "canary-service-database-password-rev-rev777" {
-		t.Errorf("expected canary volume secret 'canary-service-database-password-rev-rev777', got %q",
-			canary.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+	// BuildCanary always returns nil for Rollout targets: DSO does not provision a synthetic
+	// canary here, relying instead on Argo Rollout's own progressive delivery (see
+	// RolloutAdapter's doc comment and ConditionTypeRolloutProgressing in the controller).
+	if canary := adapter.BuildCanary(policy, "canary-service-database-password-rev-rev777"); canary != nil {
+		t.Errorf("expected BuildCanary to return nil for Rollout targets, got %v", canary)
 	}
 
 	// Promote

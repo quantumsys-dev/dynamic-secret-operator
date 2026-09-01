@@ -22,6 +22,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,9 +62,13 @@ import (
 
 // Condition Types for DynamicSecretPolicy state machine transitions.
 const (
-	ConditionTypeRevisionPrepared      = "RevisionPrepared"
-	ConditionTypeCanaryProvisioning    = "CanaryProvisioning"
-	ConditionTypeValidating            = "Validating"
+	ConditionTypeRevisionPrepared   = "RevisionPrepared"
+	ConditionTypeCanaryProvisioning = "CanaryProvisioning"
+	ConditionTypeValidating         = "Validating"
+	// ConditionTypeRolloutProgressing indicates an Argo Rollout target has been patched with the
+	// new secret revision and DSO is awaiting Rollout.Status.Phase to report Healthy before
+	// finalizing the promotion. Only reachable for Rollout targets; see RolloutAdapter.BuildCanary.
+	ConditionTypeRolloutProgressing    = "RolloutProgressing"
 	ConditionTypePromoting             = "Promoting"
 	ConditionTypeRolledBack            = "RolledBack"
 	ConditionTypeCircuitBreakerTripped = "CircuitBreakerTripped"
@@ -74,6 +79,8 @@ const (
 	ReasonPrepared                    = "Prepared"
 	ReasonProvisioning                = "Provisioning"
 	ReasonProbesRunning               = "ProbesRunning"
+	ReasonRolloutProgressing          = "RolloutProgressing"
+	ReasonRolloutDegraded             = "RolloutDegraded"
 	ReasonPromoting                   = "Promoting"
 	ReasonCompleted                   = "Completed"
 	ReasonRolledBack                  = "RolledBack"
@@ -304,6 +311,35 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 
 		// 1. Provision Canary Deployment derived polymorphically from target workload
 		canaryDeploy := adapter.BuildCanary(policy, secretName)
+		if canaryDeploy == nil {
+			// Argo Rollout targets: no DSO-managed canary is provisioned (see RolloutAdapter's
+			// doc comment). Patch the Rollout directly and let Argo's own progressive delivery
+			// (canary/blueGreen steps, AnalysisRuns) validate the change; the reconciler then
+			// waits for Rollout.Status.Phase to report Healthy before finalizing the promotion.
+			if err := integration.ReconcileArgoCDIgnoreDifferences(ctx, r.Client, adapter.TargetObject(), targetKind); err != nil {
+				logger.Error(err, "failed to reconcile Argo CD ignoreDifferences; continuing with rollout promotion", "targetWorkload", targetName)
+			}
+			if err := adapter.Promote(ctx, r.Client, policy, secretName); err != nil {
+				logger.Error(err, "failed to patch target rollout", "targetWorkload", targetName)
+				span.RecordError(err)
+				return ctrl.Result{}, err
+			}
+
+			meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeRevisionPrepared)
+			cond := metav1.Condition{
+				Type:    ConditionTypeRolloutProgressing,
+				Status:  metav1.ConditionTrue,
+				Reason:  ReasonRolloutProgressing,
+				Message: fmt.Sprintf("Rollout %q patched with secret revision %s; awaiting Argo's native progressive delivery to report Healthy", targetName, policy.Status.DesiredRevision),
+			}
+			if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
+				logger.Error(err, "failed to transition to RolloutProgressing")
+				span.RecordError(err)
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{Requeue: true}, nil
+		}
+
 		if err := controllerutil.SetControllerReference(policy, canaryDeploy, r.Scheme); err != nil {
 			logger.Error(err, "failed to set controller reference on canary deployment")
 			span.RecordError(err)
@@ -374,6 +410,86 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
+
+	case ConditionTypeRolloutProgressing:
+		// Only reachable for Argo Rollout targets (see RolloutAdapter.BuildCanary). Poll the
+		// Rollout's own status instead of running synthetic probes, since Argo's progressive
+		// delivery (canary/blueGreen steps, AnalysisRuns) is the source of truth for this change.
+		targetName := policy.Spec.WorkloadSelector.Name
+		rollout := &argorolloutsv1alpha1.Rollout{}
+		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: policy.Namespace}, rollout); err != nil {
+			logger.Error(err, "failed to fetch target Rollout while awaiting progressive delivery", "targetWorkload", targetName)
+			span.RecordError(err)
+			return ctrl.Result{}, err
+		}
+
+		// Argo Rollouts stamps status.observedGeneration with the decimal string of
+		// metadata.generation once it has processed the latest spec change; status.phase is
+		// stale until these match.
+		if rollout.Status.ObservedGeneration != strconv.FormatInt(rollout.Generation, 10) {
+			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+		}
+
+		switch rollout.Status.Phase {
+		case argorolloutsv1alpha1.RolloutPhaseHealthy:
+			policy.Status.ConsecutiveFailures = 0
+			r.gcOldSecretRevisions(ctx, policy, targetName)
+
+			policy.Status.CurrentRevision = policy.Status.DesiredRevision
+			policy.Status.DesiredRevision = ""
+
+			meta.RemoveStatusCondition(&policy.Status.Conditions, ConditionTypeRolloutProgressing)
+			cond := metav1.Condition{
+				Type:    ConditionTypePromoting,
+				Status:  metav1.ConditionTrue,
+				Reason:  ReasonCompleted,
+				Message: fmt.Sprintf("Argo Rollout %q reached Healthy phase; revision %s promoted and old secret revisions cleaned up", targetName, policy.Status.CurrentRevision),
+			}
+			if err := r.updateStatus(ctx, policy, basePolicy, cond); err != nil {
+				logger.Error(err, "failed to update status to Promoting completed")
+				span.RecordError(err)
+				return ctrl.Result{}, err
+			}
+			logger.Info("Argo Rollout reached Healthy phase; secret revision promotion finalized",
+				"targetWorkload", targetName, "secretRevision", policy.Status.CurrentRevision)
+			return ctrl.Result{Requeue: true}, nil
+
+		case argorolloutsv1alpha1.RolloutPhaseDegraded:
+			policy.Status.ConsecutiveFailures++
+			telemetry.RotationsFailed.WithLabelValues(policy.Namespace).Inc()
+			logger.Error(nil, "Argo Rollout reported Degraded phase after secret revision patch",
+				"targetWorkload", targetName,
+				"consecutiveFailures", policy.Status.ConsecutiveFailures,
+				"threshold", threshold,
+			)
+
+			if policy.Status.ConsecutiveFailures >= threshold {
+				telemetry.CircuitBreakersTripped.WithLabelValues(policy.Namespace).Inc()
+				cond := metav1.Condition{
+					Type:    ConditionTypeCircuitBreakerTripped,
+					Status:  metav1.ConditionTrue,
+					Reason:  ReasonValidationThresholdExceeded,
+					Message: fmt.Sprintf("Circuit breaker tripped after %d consecutive Argo Rollout degradations (threshold: %d)", policy.Status.ConsecutiveFailures, threshold),
+				}
+				_ = r.updateStatus(ctx, policy, basePolicy, cond)
+				return ctrl.Result{}, nil
+			}
+
+			cond := metav1.Condition{
+				Type:    ConditionTypeRolloutProgressing,
+				Status:  metav1.ConditionFalse,
+				Reason:  ReasonRolloutDegraded,
+				Message: fmt.Sprintf("Argo Rollout %q is Degraded after the secret revision patch", targetName),
+			}
+			_ = r.updateStatus(ctx, policy, basePolicy, cond)
+			return ctrl.Result{}, fmt.Errorf("argo rollout %q degraded after secret revision patch", targetName)
+
+		default:
+			// Progressing or Paused: Argo's own canary/blueGreen steps or AnalysisRuns are still
+			// running (or awaiting manual/automatic promotion) - keep polling without treating
+			// this as a validation failure.
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 
 	case ConditionTypeValidating:
 		// Execute validation probes against the canary workload in a non-blocking manner
@@ -602,7 +718,19 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 		return fmt.Errorf("failed to promote target %s %q: %w", targetKind, targetName, err)
 	}
 
-	// Garbage Collect old revisions, keeping only the Current and Desired
+	r.gcOldSecretRevisions(ctx, policy, targetName)
+
+	logger.Info("successfully patched target workload with new secret revision",
+		"targetKind", targetKind,
+		"targetWorkload", targetName,
+		"secretRevision", policy.Status.DesiredRevision,
+	)
+	return nil
+}
+
+// gcOldSecretRevisions deletes materialized revision secrets for targetName that are neither the
+// current nor the desired revision, keeping at most those two around at any time.
+func (r *DynamicSecretPolicyReconciler) gcOldSecretRevisions(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy, targetName string) {
 	secrets := &corev1.SecretList{}
 	labelSelector := client.MatchingLabels{
 		canary.LabelTargetWorkload: targetName,
@@ -616,13 +744,6 @@ func (r *DynamicSecretPolicyReconciler) promoteTargetWorkload(ctx context.Contex
 			}
 		}
 	}
-
-	logger.Info("successfully patched target workload with new secret revision",
-		"targetKind", targetKind,
-		"targetWorkload", targetName,
-		"secretRevision", policy.Status.DesiredRevision,
-	)
-	return nil
 }
 
 // materializeSecretRevision pulls the secret payload from the registered provider backend (Azure, ESO, AWS, GCP, Vault),
@@ -771,6 +892,9 @@ func (r *DynamicSecretPolicyReconciler) determineState(policy *secretv1alpha1.Dy
 	}
 	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeValidating) != nil {
 		return ConditionTypeValidating
+	}
+	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeRolloutProgressing) != nil {
+		return ConditionTypeRolloutProgressing
 	}
 	if meta.FindStatusCondition(policy.Status.Conditions, ConditionTypeCanaryProvisioning) != nil {
 		return ConditionTypeCanaryProvisioning

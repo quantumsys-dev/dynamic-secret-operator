@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -41,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	argorolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/canary"
@@ -497,6 +499,255 @@ func TestDynamicSecretPolicyReconciler_SecretMaterializationAndProgression(t *te
 	}
 	if res.Requeue {
 		t.Errorf("expected step 5 (terminal) not to requeue")
+	}
+}
+
+// TestDynamicSecretPolicyReconciler_RolloutProgressiveDelivery verifies that Rollout targets skip
+// DSO's own canary Deployment/NetworkPolicy provisioning entirely and instead patch the Rollout
+// directly, then poll Rollout.Status.Phase until it reports Healthy before finalizing the
+// promotion (flipping CurrentRevision and garbage collecting the old secret revision).
+func TestDynamicSecretPolicyReconciler_RolloutProgressiveDelivery(t *testing.T) {
+	scheme := setupTestScheme(t)
+	if err := argorolloutsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add argo rollouts scheme: %v", err)
+	}
+
+	targetRollout := &argorolloutsv1alpha1.Rollout{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkout-rollout",
+			Namespace: "default",
+		},
+		Spec: argorolloutsv1alpha1.RolloutSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "app", Image: "checkout:1.0.0"},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "secret-vol",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{SecretName: "checkout-rollout-rev-old"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkout-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			VaultRef: secretv1alpha1.VaultReference{
+				KeyVaultURI: "https://my-vault.vault.azure.net",
+				ObjectName:  "db-pass",
+				ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+			},
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Rollout",
+				Name: "checkout-rollout",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy, targetRollout).
+		Build()
+
+	reconciler := &DynamicSecretPolicyReconciler{
+		Client:        fakeClient,
+		Scheme:        scheme,
+		SecretFetcher: &mockSecretFetcher{},
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "checkout-policy", Namespace: "default"}}
+	ctx := context.Background()
+
+	// Step 1: Materialize -> RevisionPrepared
+	if _, err := reconciler.Reconcile(ctx, req); err != nil {
+		t.Fatalf("step 1 reconcile failed: %v", err)
+	}
+	updated := &secretv1alpha1.DynamicSecretPolicy{}
+	if err := fakeClient.Get(ctx, req.NamespacedName, updated); err != nil {
+		t.Fatalf("failed to get policy after step 1: %v", err)
+	}
+	desiredRevision := updated.Status.DesiredRevision
+	if desiredRevision == "" {
+		t.Fatalf("expected DesiredRevision to be populated")
+	}
+
+	// Step 2: RevisionPrepared -> patches the Rollout directly and transitions to
+	// RolloutProgressing, WITHOUT provisioning any canary Deployment or NetworkPolicy.
+	res, err := reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("step 2 reconcile failed: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("expected step 2 to requeue")
+	}
+
+	deployList := &appsv1.DeploymentList{}
+	if err := fakeClient.List(ctx, deployList); err != nil {
+		t.Fatalf("failed to list deployments: %v", err)
+	}
+	if len(deployList.Items) != 0 {
+		t.Errorf("expected no canary Deployment to be provisioned for Rollout targets, got %d", len(deployList.Items))
+	}
+	netpolList := &networkingv1.NetworkPolicyList{}
+	if err := fakeClient.List(ctx, netpolList); err != nil {
+		t.Fatalf("failed to list network policies: %v", err)
+	}
+	if len(netpolList.Items) != 0 {
+		t.Errorf("expected no canary NetworkPolicy to be provisioned for Rollout targets, got %d", len(netpolList.Items))
+	}
+
+	patchedRollout := &argorolloutsv1alpha1.Rollout{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "checkout-rollout", Namespace: "default"}, patchedRollout); err != nil {
+		t.Fatalf("failed to get patched rollout: %v", err)
+	}
+	expectedSecretName := fmt.Sprintf("checkout-rollout-db-pass-rev-%s", desiredRevision)
+	if patchedRollout.Spec.Template.Spec.Volumes[0].Secret.SecretName != expectedSecretName {
+		t.Errorf("expected rollout volume secretName %q, got %q", expectedSecretName, patchedRollout.Spec.Template.Spec.Volumes[0].Secret.SecretName)
+	}
+
+	if err := fakeClient.Get(ctx, req.NamespacedName, updated); err != nil {
+		t.Fatalf("failed to get policy after step 2: %v", err)
+	}
+	if !meta.IsStatusConditionTrue(updated.Status.Conditions, ConditionTypeRolloutProgressing) {
+		t.Errorf("expected RolloutProgressing condition to be True after step 2")
+	}
+	if updated.Status.CurrentRevision != "" {
+		t.Errorf("expected CurrentRevision to remain empty while Argo Rollout is still progressing, got %q", updated.Status.CurrentRevision)
+	}
+
+	// Step 3: RolloutProgressing, but Argo hasn't caught its observedGeneration up to the latest
+	// spec change yet -> keep polling without treating this as a failure or finalizing.
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("step 3 reconcile failed: %v", err)
+	}
+	if res.RequeueAfter <= 0 {
+		t.Errorf("expected step 3 to schedule a RequeueAfter poll, got %+v", res)
+	}
+	if err := fakeClient.Get(ctx, req.NamespacedName, updated); err != nil {
+		t.Fatalf("failed to get policy after step 3: %v", err)
+	}
+	if updated.Status.CurrentRevision != "" {
+		t.Errorf("expected CurrentRevision to remain empty while awaiting Argo's observedGeneration, got %q", updated.Status.CurrentRevision)
+	}
+
+	// Simulate Argo Rollouts finishing its own progressive delivery: catch status up to the
+	// latest generation and report Healthy.
+	patchedRollout.Status.ObservedGeneration = strconv.FormatInt(patchedRollout.Generation, 10)
+	patchedRollout.Status.Phase = argorolloutsv1alpha1.RolloutPhaseHealthy
+	if err := fakeClient.Update(ctx, patchedRollout); err != nil {
+		t.Fatalf("failed to simulate rollout becoming healthy: %v", err)
+	}
+
+	// Step 4: RolloutProgressing (Healthy) -> finalizes the promotion.
+	res, err = reconciler.Reconcile(ctx, req)
+	if err != nil {
+		t.Fatalf("step 4 reconcile failed: %v", err)
+	}
+	if !res.Requeue {
+		t.Errorf("expected step 4 to requeue")
+	}
+
+	if err := fakeClient.Get(ctx, req.NamespacedName, updated); err != nil {
+		t.Fatalf("failed to get policy after step 4: %v", err)
+	}
+	if updated.Status.CurrentRevision != desiredRevision {
+		t.Errorf("expected CurrentRevision to be %q, got %q", desiredRevision, updated.Status.CurrentRevision)
+	}
+	if updated.Status.DesiredRevision != "" {
+		t.Errorf("expected DesiredRevision to be cleared, got %q", updated.Status.DesiredRevision)
+	}
+	if !meta.IsStatusConditionTrue(updated.Status.Conditions, ConditionTypePromoting) {
+		t.Errorf("expected Promoting condition to be True after finalization")
+	}
+	if meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeRolloutProgressing) != nil {
+		t.Errorf("expected RolloutProgressing condition to be removed after finalization")
+	}
+}
+
+// TestDynamicSecretPolicyReconciler_RolloutDegradedDoesNotFinalizePromotion verifies that a
+// Degraded Argo Rollout phase counts as a validation failure (incrementing ConsecutiveFailures
+// towards the circuit breaker) rather than finalizing the promotion.
+func TestDynamicSecretPolicyReconciler_RolloutDegradedDoesNotFinalizePromotion(t *testing.T) {
+	scheme := setupTestScheme(t)
+	if err := argorolloutsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add argo rollouts scheme: %v", err)
+	}
+
+	rollout := &argorolloutsv1alpha1.Rollout{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "checkout-rollout",
+			Namespace:  "default",
+			Generation: 5,
+		},
+		Status: argorolloutsv1alpha1.RolloutStatus{
+			ObservedGeneration: "5",
+			Phase:              argorolloutsv1alpha1.RolloutPhaseDegraded,
+		},
+	}
+
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkout-policy",
+			Namespace: "default",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Rollout",
+				Name: "checkout-rollout",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "rev123",
+			Conditions: []metav1.Condition{
+				{
+					Type:   ConditionTypeRolloutProgressing,
+					Status: metav1.ConditionTrue,
+					Reason: ReasonRolloutProgressing,
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&secretv1alpha1.DynamicSecretPolicy{}).
+		WithObjects(policy, rollout).
+		Build()
+
+	reconciler := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "checkout-policy", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err == nil {
+		t.Fatalf("expected an error to trigger backoff when Argo Rollout reports Degraded")
+	}
+
+	updated := &secretv1alpha1.DynamicSecretPolicy{}
+	if err := fakeClient.Get(context.Background(), req.NamespacedName, updated); err != nil {
+		t.Fatalf("failed to get policy: %v", err)
+	}
+	if updated.Status.ConsecutiveFailures != 1 {
+		t.Errorf("expected ConsecutiveFailures to be 1, got %d", updated.Status.ConsecutiveFailures)
+	}
+	if updated.Status.CurrentRevision != "" {
+		t.Errorf("expected CurrentRevision to remain empty after a Degraded rollout, got %q", updated.Status.CurrentRevision)
+	}
+	if updated.Status.DesiredRevision != "rev123" {
+		t.Errorf("expected DesiredRevision to be preserved for retry, got %q", updated.Status.DesiredRevision)
 	}
 }
 

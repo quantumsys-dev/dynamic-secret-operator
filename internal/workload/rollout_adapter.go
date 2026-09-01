@@ -26,15 +26,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
-	"github.com/quantumsys-dev/dynamic-secret-operator/internal/canary"
 )
 
 var _ WorkloadAdapter = &RolloutAdapter{}
 
 // RolloutAdapter manages progressive secret rotation for Argo Rollout objects (argoproj.io/v1alpha1).
-// For canary validation, it derives an isolated 1-replica ephemeral Deployment using the
-// Rollout's PodTemplateSpec to safely validate the new secret revision without interfering
-// with active Argo Rollout canary/blue-green steps or analysis templates.
+// Unlike the other adapters, it does not provision a DSO-managed synthetic canary: patching
+// spec.template already triggers Argo Rollout's own canary/blueGreen progressive delivery and
+// AnalysisRuns, so running a second, independent canary mechanism alongside it would fight the
+// GitOps controller rather than cooperate with it. DSO instead patches the Rollout directly and
+// relies on the reconciler to watch Rollout.Status.Phase for a Healthy result (see
+// ConditionTypeRolloutProgressing in the controller) before finalizing the promotion.
 type RolloutAdapter struct {
 	rollout *argorolloutsv1alpha1.Rollout
 }
@@ -62,8 +64,11 @@ func (a *RolloutAdapter) Fetch(ctx context.Context, c client.Client, key types.N
 	return nil
 }
 
+// BuildCanary always returns nil for Rollout targets: DSO does not provision a synthetic canary
+// here (see the RolloutAdapter doc comment for why), so callers must check for a nil result and
+// patch the Rollout directly instead of provisioning a canary Deployment.
 func (a *RolloutAdapter) BuildCanary(policy *secretv1alpha1.DynamicSecretPolicy, newSecretName string) *appsv1.Deployment {
-	return canary.BuildCanaryFromTemplate(a.rollout.Name, &a.rollout.Spec.Template, policy, newSecretName)
+	return nil
 }
 
 func (a *RolloutAdapter) Promote(ctx context.Context, c client.Client, policy *secretv1alpha1.DynamicSecretPolicy, newSecretName string) error {

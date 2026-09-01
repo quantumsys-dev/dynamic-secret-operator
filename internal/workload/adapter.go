@@ -46,6 +46,8 @@ type WorkloadAdapter interface {
 	// Fetch retrieves the target workload from the Kubernetes API server.
 	Fetch(ctx context.Context, c client.Client, key types.NamespacedName) error
 	// BuildCanary constructs an isolated 1-replica canary Deployment derived from the target workload.
+	// May return nil for workload kinds that rely on their own native progressive delivery instead
+	// of a DSO-managed canary (e.g. RolloutAdapter); callers must handle a nil result.
 	BuildCanary(policy *secretv1alpha1.DynamicSecretPolicy, newSecretName string) *appsv1.Deployment
 	// Promote applies the new secret revision to the target production workload.
 	Promote(ctx context.Context, c client.Client, policy *secretv1alpha1.DynamicSecretPolicy, newSecretName string) error
