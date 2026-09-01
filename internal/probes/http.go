@@ -53,11 +53,13 @@ func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.Validatio
 		return err
 	}
 
+	timeout := 15 * time.Second
 	if config.QueryTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(config.QueryTimeout)*time.Second)
-		defer cancel()
+		timeout = time.Duration(config.QueryTimeout) * time.Second
 	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	client := p.Client
 	if client == nil {
@@ -82,7 +84,9 @@ func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.Validatio
 		}
 		client = &http.Client{
 			Transport: otelhttp.NewTransport(baseTransport),
-			Timeout:   0, // Rely on ctx for timeout enforcement
+			// Hard fallback matching the ctx deadline above, in case ctx cancellation isn't
+			// honored by a custom transport.
+			Timeout: timeout,
 		}
 	}
 
