@@ -48,17 +48,15 @@ func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv
 	tcpProtocol := corev1.ProtocolTCP
 	dnsPort := intstr.FromInt(53)
 
-	// 1. Mandatory Core DNS Egress Rules strictly locked down to in-cluster DNS pods (kube-system)
-	// to prevent DNS tunneling data exfiltration to arbitrary external nameservers.
+	// 1. Mandatory Core DNS Egress Rules locked down to in-cluster DNS pods by the standard
+	// k8s-app label, matched across all namespaces since the DNS namespace name varies by
+	// distribution (kube-system, openshift-dns, etc). This still prevents DNS tunneling
+	// exfiltration to arbitrary external nameservers.
 	egressRules := []networkingv1.NetworkPolicyEgressRule{
 		{
 			To: []networkingv1.NetworkPolicyPeer{
 				{
-					NamespaceSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{
-							"kubernetes.io/metadata.name": "kube-system",
-						},
-					},
+					NamespaceSelector: &metav1.LabelSelector{},
 					PodSelector: &metav1.LabelSelector{
 						MatchExpressions: []metav1.LabelSelectorRequirement{
 							{

@@ -85,10 +85,10 @@ func TestBuildNetworkPolicy(t *testing.T) {
 			t.Errorf("expected 2 DNS ports (UDP/TCP 53), got %d", len(dnsRule.Ports))
 		}
 		if len(dnsRule.To) != 1 {
-			t.Fatalf("expected DNS egress rule to have 1 To peer (kube-system CoreDNS), got %d", len(dnsRule.To))
+			t.Fatalf("expected DNS egress rule to have 1 To peer (CoreDNS), got %d", len(dnsRule.To))
 		}
-		if dnsRule.To[0].NamespaceSelector == nil || dnsRule.To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" {
-			t.Errorf("expected DNS egress to restrict namespaceSelector to kube-system")
+		if dnsRule.To[0].NamespaceSelector == nil || len(dnsRule.To[0].NamespaceSelector.MatchLabels) != 0 || len(dnsRule.To[0].NamespaceSelector.MatchExpressions) != 0 {
+			t.Errorf("expected DNS egress namespaceSelector to match all namespaces (empty selector), since the DNS namespace name varies by distribution")
 		}
 		if dnsRule.To[0].PodSelector == nil || len(dnsRule.To[0].PodSelector.MatchExpressions) == 0 {
 			t.Errorf("expected DNS egress to restrict podSelector to CoreDNS/kube-dns pods")
