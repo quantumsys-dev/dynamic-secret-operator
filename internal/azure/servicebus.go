@@ -25,19 +25,13 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/events"
 	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
-var _ manager.Runnable = &ServiceBusListener{}
-var _ manager.LeaderElectionRunnable = &ServiceBusListener{}
-
-// AckFunc acknowledges and completes a message in Azure Service Bus.
-type AckFunc func(ctx context.Context) error
-
-// MessageHandler processes an ingested Service Bus event and receives an Ack callback.
-type MessageHandler func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack AckFunc) error
+// Compile-time assertion: ServiceBusListener must satisfy events.EventIngester.
+var _ events.EventIngester = &ServiceBusListener{}
 
 // Receiver defines the interface for receiving messages, allowing unit test mocking.
 type Receiver interface {
@@ -46,14 +40,14 @@ type Receiver interface {
 	Close(ctx context.Context) error
 }
 
-// ServiceBusListener implements manager.Runnable to listen to Azure Service Bus queue events
-// via Peek-Lock mode and provides transactional message completion.
+// ServiceBusListener implements events.EventIngester for Azure Service Bus.
+// It operates in Peek-Lock mode and provides transactional message completion.
 type ServiceBusListener struct {
 	Namespace   string
 	QueueName   string
 	Cred        azcore.TokenCredential
 	MaxMessages int
-	Handler     MessageHandler
+	handler     events.EventHandler
 
 	// customReceiver allows injecting a mock receiver for testing.
 	customReceiver Receiver
@@ -79,9 +73,10 @@ func NewServiceBusListener(namespace, queueName string, cred azcore.TokenCredent
 	}, nil
 }
 
-// SetHandler sets the callback handler for received messages.
-func (l *ServiceBusListener) SetHandler(h MessageHandler) {
-	l.Handler = h
+// SetEventHandler registers the provider-agnostic handler for received events.
+// Satisfies events.EventIngester. Must be called before Start.
+func (l *ServiceBusListener) SetEventHandler(h events.EventHandler) {
+	l.handler = h
 }
 
 // NeedLeaderElection ensures this listener only runs on the active leader manager.
@@ -180,8 +175,8 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 				"bodySize", len(msg.Body),
 			)
 
-			// Construct transactional Ack function for the message
-			ackFunc := func(ackCtx context.Context) error {
+			// Construct a provider-agnostic AckFunc that wraps CompleteMessage.
+			ackFunc := events.AckFunc(func(ackCtx context.Context) error {
 				log.Info("completing Service Bus message after successful reconciliation", "messageID", msg.MessageID)
 				if err := receiver.CompleteMessage(ackCtx, msg, nil); err != nil {
 					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
@@ -189,10 +184,11 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 				}
 				telemetry.ServiceBusMessagesTotal.WithLabelValues("ack").Inc()
 				return nil
-			}
+			})
 
-			if l.Handler != nil {
-				if err := l.Handler(ctx, msg, ackFunc); err != nil {
+			// Deliver the raw message body to the provider-agnostic handler.
+			if l.handler != nil {
+				if err := l.handler(ctx, msg.Body, ackFunc); err != nil {
 					log.Error(err, "handler failed to process message", "messageID", msg.MessageID)
 					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
 				}

@@ -30,7 +30,6 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,6 +49,7 @@ import (
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/controller"
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/events"
 	sourceProvider "github.com/quantumsys-dev/dynamic-secret-operator/internal/source"
 	//+kubebuilder:scaffold:imports
 )
@@ -148,6 +148,13 @@ func main() {
 		}
 	}
 
+	// eventIngester is the provider-agnostic handle; currently backed by Azure Service Bus.
+	// Replace with a different events.EventIngester implementation for AWS/GCP/Vault.
+	var eventIngester events.EventIngester
+	if sbListener != nil {
+		eventIngester = sbListener
+	}
+
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
@@ -186,13 +193,13 @@ func main() {
 
 	providerRegistry := sourceProvider.SetupDefaultRegistry(mgr.GetAPIReader(), secretFetcher)
 
-	// Thread-safe registry holding pending Service Bus ACK functions until secret materialization succeeds
+	// Thread-safe registry holding pending AckFuncs until secret materialization succeeds.
 	type ackRegistry struct {
 		mu   sync.Mutex
-		acks map[string][]azure.AckFunc
+		acks map[string][]events.AckFunc
 	}
 	pendingAcks := &ackRegistry{
-		acks: make(map[string][]azure.AckFunc),
+		acks: make(map[string][]events.AckFunc),
 	}
 
 	if err = (&controller.DynamicSecretPolicyReconciler{
@@ -209,13 +216,13 @@ func main() {
 			delete(pendingAcks.acks, policyName)
 			pendingAcks.mu.Unlock()
 
-			setupLog.Info("secret revision materialized; completing Service Bus message transactions",
+			setupLog.Info("secret revision materialized; completing event ingester message transactions",
 				"policy", policyName, "revision", revision, "pendingMessages", len(ackList))
 
 			for _, ackFn := range ackList {
 				if ackFn != nil {
 					if err := ackFn(ctx); err != nil {
-						setupLog.Error(err, "failed to complete Service Bus message", "policy", policyName)
+						setupLog.Error(err, "failed to complete event ingester message", "policy", policyName)
 						return err
 					}
 				}
@@ -227,11 +234,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if sbListener != nil {
-		// Wire Service Bus message callback handler to forward events to controller-runtime
-		sbListener.SetHandler(func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack azure.AckFunc) error {
-			handlerLog := ctrl.LoggerFrom(ctx).WithName("servicebus-handler").WithValues("messageID", msg.MessageID)
-			handlerLog.Info("processing Service Bus event for secret rotation")
+	if eventIngester != nil {
+		// Wire provider-agnostic EventHandler to forward rotation events to controller-runtime.
+		eventIngester.SetEventHandler(func(ctx context.Context, body []byte, ack events.AckFunc) error {
+			handlerLog := ctrl.LoggerFrom(ctx).WithName("event-ingester-handler")
+			handlerLog.Info("processing rotation event")
 
 			var eventData struct {
 				Subject   string `json:"subject"`
@@ -245,7 +252,7 @@ func main() {
 				Namespace  string `json:"namespace"`
 			}
 
-			_ = json.Unmarshal(msg.Body, &eventData)
+			_ = json.Unmarshal(body, &eventData)
 
 			targetObjectName := eventData.Data.ObjectName
 			if targetObjectName == "" && eventData.Subject != "" {
@@ -265,7 +272,7 @@ func main() {
 			}
 
 			if err := mgr.GetClient().List(ctx, policyList, listOpts...); err != nil {
-				handlerLog.Error(err, "failed to list DynamicSecretPolicies for Service Bus event")
+				handlerLog.Error(err, "failed to list DynamicSecretPolicies for rotation event")
 				return err
 			}
 
@@ -292,15 +299,15 @@ func main() {
 				}
 			}
 
-			handlerLog.Info("enqueued reconciliation events for matching policies; awaiting materialization for message settlement",
+			handlerLog.Info("enqueued reconciliation events for matching policies; awaiting materialization for settlement",
 				"matchedPolicies", matchedCount,
 				"objectName", targetObjectName,
 			)
 
-			// If no matching policy exists in the cluster for this vault object, complete the message immediately
+			// If no matching policy exists in the cluster for this vault object, ack immediately.
 			if matchedCount == 0 {
 				if err := ack(ctx); err != nil {
-					handlerLog.Error(err, "failed to complete unmanaged Service Bus message")
+					handlerLog.Error(err, "failed to complete unmanaged event message")
 					return err
 				}
 			}
@@ -308,11 +315,11 @@ func main() {
 			return nil
 		})
 
-		if err := mgr.Add(sbListener); err != nil {
-			setupLog.Error(err, "unable to register ServiceBusListener with manager")
+		if err := mgr.Add(eventIngester); err != nil {
+			setupLog.Error(err, "unable to register EventIngester with manager")
 			os.Exit(1)
 		}
-		setupLog.Info("registered Azure Service Bus peek-lock listener with manager and wired event bridge")
+		setupLog.Info("registered EventIngester with manager and wired event bridge")
 	}
 
 	//+kubebuilder:scaffold:builder

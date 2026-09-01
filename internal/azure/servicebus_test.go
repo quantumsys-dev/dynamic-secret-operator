@@ -25,6 +25,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
+
+	"github.com/quantumsys-dev/dynamic-secret-operator/internal/events"
 )
 
 type mockTokenCredential struct{}
@@ -186,7 +188,7 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 	}
 	listener.customReceiver = mock
 
-	listener.SetHandler(func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack AckFunc) error {
+	listener.SetEventHandler(func(ctx context.Context, body []byte, ack events.AckFunc) error {
 		return ack(ctx)
 	})
 
@@ -221,7 +223,7 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 			},
 		}
 		listener.customReceiver = mock
-		listener.SetHandler(func(ctx context.Context, msg *azservicebus.ReceivedMessage, ack AckFunc) error {
+		listener.SetEventHandler(func(ctx context.Context, body []byte, ack events.AckFunc) error {
 			cancel()
 			return errors.New("handler failure")
 		})
