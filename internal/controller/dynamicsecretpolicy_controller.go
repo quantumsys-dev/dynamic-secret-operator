@@ -124,8 +124,11 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	defer span.End()
 
 	logger := log.FromContext(ctx).WithValues(
+		"policy_name", req.Name,
+		"namespace", req.Namespace,
 		"dynamicSecretPolicy", req.NamespacedName,
 	)
+	ctx = log.IntoContext(ctx, logger)
 
 	// Fetch the DynamicSecretPolicy instance
 	policy := &secretv1alpha1.DynamicSecretPolicy{}
@@ -134,6 +137,16 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	basePolicy := policy.DeepCopy()
+
+	// Enrich logger context with current or desired revision hash
+	activeRevision := policy.Status.DesiredRevision
+	if activeRevision == "" {
+		activeRevision = policy.Status.CurrentRevision
+	}
+	if activeRevision != "" {
+		logger = logger.WithValues("revision_hash", activeRevision)
+		ctx = log.IntoContext(ctx, logger)
+	}
 
 	// Evaluate Circuit Breaker threshold
 	var threshold int32 = 3
@@ -158,6 +171,11 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			logger.Error(err, "failed to materialize secret revision from Key Vault")
 			span.RecordError(err)
 			return ctrl.Result{}, err
+		}
+
+		if revisionHash != "" && revisionHash != activeRevision {
+			logger = logger.WithValues("revision_hash", revisionHash)
+			ctx = log.IntoContext(ctx, logger)
 		}
 
 		// If the upstream secret has changed, reset the circuit breaker and state
