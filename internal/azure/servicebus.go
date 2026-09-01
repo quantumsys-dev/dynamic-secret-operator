@@ -218,7 +218,7 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 			// Construct a provider-agnostic AckFunc that wraps CompleteMessage.
 			// The ACK network call uses a detached, short-lived context with timeout so that
 			// message completion succeeds reliably even if the caller's context timed out or was canceled.
-			ackFunc := events.AckFunc(func(ackCtx context.Context) error {
+			ackFunc := events.AckFunc(func(_ context.Context) error {
 				log.Info("completing Service Bus message after successful reconciliation", "messageID", msg.MessageID)
 				completeCtx, completeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer completeCancel()

@@ -41,13 +41,13 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Install setup-envtest and download k8s control-plane binaries
-        run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19
-          K8S_ASSETS_DIR="$(setup-envtest use 1.31.0 -p path)"
-          echo "KUBEBUILDER_ASSETS=${K8S_ASSETS_DIR}" >> $GITHUB_ENV
+      - name: Setup Envtest
+        uses: kubernetes-sigs/controller-runtime/envtest-setup-action@v1.2.0
+        with:
+          version: '1.31.x'
 
       - name: Run Tests
+        # The envtest action automatically exports KUBEBUILDER_ASSETS
         run: go test -v -race -count=1 ./api/... ./internal/... ./pkg/...
 
   e2e:

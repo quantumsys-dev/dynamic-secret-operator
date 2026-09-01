@@ -136,6 +136,32 @@ stringData:
 EOF
 ```
 
+> **Using real Cloud Vaults (AWS, GCP, Vault, Azure)?** Configure ESO's `ExternalSecret` resource to synchronize the secret and attach the watch label in its `target.template`:
+>
+> ```yaml
+> apiVersion: external-secrets.io/v1beta1
+> kind: ExternalSecret
+> metadata:
+>   name: db-pass-eso
+>   namespace: dso-demo
+> spec:
+>   refreshInterval: "1h"
+>   secretStoreRef:
+>     name: vault-backend
+>     kind: SecretStore
+>   target:
+>     name: eso-synced-db-pass
+>     template:
+>       metadata:
+>         labels:
+>           dso.quantumsys.dev/managed: "watch" # Tells DSO to monitor this secret
+>   data:
+>     - secretKey: password
+>       remoteRef:
+>         key: database/production
+>         property: password
+> ```
+
 ---
 
 ### Step 4: Apply the DynamicSecretPolicy
