@@ -14,7 +14,7 @@ spec:
     - name: {{ include "dso.fullname" . }}.rules
       rules:
         - alert: DsoCircuitBreakerTripped
-          expr: dso_circuit_breakers_tripped > 0
+          expr: dso_circuit_breakers_tripped_total > 0
           for: 1m
           labels:
             severity: critical
@@ -27,7 +27,7 @@ spec:
             runbook_url: "https://github.com/quantumsys-dev/dynamic-secret-operator/blob/main/docs/troubleshooting.md#circuit-breaker-tripped"
 
         - alert: DsoRotationHighFailureRate
-          expr: rate(dso_rotations_failed[5m]) > 0
+          expr: rate(dso_rotations_failed_total[5m]) > 0
           for: 2m
           labels:
             severity: warning

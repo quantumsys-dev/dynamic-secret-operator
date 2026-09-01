@@ -34,7 +34,7 @@ var (
 	// RotationsFailed tracks failed validation probe cycles.
 	RotationsFailed = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "dso_rotations_failed",
+			Name: "dso_rotations_failed_total",
 			Help: "Total number of failed canary validation probe runs",
 		},
 		[]string{"namespace"},
@@ -43,7 +43,7 @@ var (
 	// CircuitBreakersTripped tracks when a policy trips its consecutive failure threshold.
 	CircuitBreakersTripped = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "dso_circuit_breakers_tripped",
+			Name: "dso_circuit_breakers_tripped_total",
 			Help: "Total number of times a circuit breaker has tripped and halted reconciliations",
 		},
 		[]string{"namespace"},
