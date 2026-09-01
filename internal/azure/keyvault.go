@@ -72,7 +72,7 @@ func (f *AzureKeyVaultFetcher) GetSecret(ctx context.Context, vaultURI, secretNa
 	start := time.Now()
 	status := "success"
 	defer func() {
-		telemetry.KeyVaultFetchLatency.WithLabelValues(vaultURI, secretName, status).Observe(time.Since(start).Seconds())
+		telemetry.KeyVaultFetchLatency.WithLabelValues(vaultURI, status).Observe(time.Since(start).Seconds())
 	}()
 
 	if vaultURI == "" {

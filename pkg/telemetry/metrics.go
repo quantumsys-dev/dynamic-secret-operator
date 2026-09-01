@@ -69,13 +69,15 @@ var (
 	)
 
 	// KeyVaultFetchLatency records latency in seconds for fetching secrets/certificates from Azure Key Vault.
+	// Deliberately excludes secret_name: with dynamically generated secrets or many policies, a per-secret
+	// label would cause unbounded cardinality growth and risk OOMing Prometheus scrapers.
 	KeyVaultFetchLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "dso_keyvault_fetch_latency_seconds",
 			Help:    "Latency in seconds for fetching secrets/certificates from Azure Key Vault.",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"vault_name", "secret_name", "status"},
+		[]string{"vault_name", "status"},
 	)
 )
 
