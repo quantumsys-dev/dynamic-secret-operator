@@ -424,14 +424,6 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, secret); err != nil {
 		return fmt.Errorf("failed to fetch secret revision %q for probe validation: %w", secretName, err)
 	}
-	defer func() {
-		if secret != nil && secret.Data != nil {
-			for k, v := range secret.Data {
-				azure.ZeroBytes(v)
-				delete(secret.Data, k)
-			}
-		}
-	}()
 
 	runner := r.ProbeRunner
 	if runner == nil {
@@ -557,9 +549,6 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 		return "", fmt.Errorf("failed to fetch secret from vault: %w", err)
 	}
 
-	// Ensure secret payload memory is zeroed out as soon as materialization completes
-	defer payload.Wipe()
-
 	// Compute deterministic short hash (first 12 characters of SHA-256)
 	hasher := sha256.New()
 	hasher.Write(payload.Value)
@@ -609,14 +598,6 @@ func (r *DynamicSecretPolicyReconciler) materializeSecretRevision(ctx context.Co
 
 	// Execute Kubernetes API call
 	createErr := r.Create(ctx, secret)
-
-	// Memory Security: Overwrite and purge secret data in the Kubernetes struct immediately
-	if secret.Data != nil {
-		for k, v := range secret.Data {
-			azure.ZeroBytes(v)
-			delete(secret.Data, k)
-		}
-	}
 
 	// Idempotency: If secret already exists, treat materialization as successful
 	if createErr != nil {

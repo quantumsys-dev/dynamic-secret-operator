@@ -21,31 +21,6 @@ import (
 	"testing"
 )
 
-func TestZeroBytes(t *testing.T) {
-	data := []byte("super-sensitive-secret-payload-12345")
-	ZeroBytes(data)
-
-	for i, b := range data {
-		if b != 0 {
-			t.Errorf("byte at index %d was not zeroed, got: %d", i, b)
-		}
-	}
-}
-
-func TestSecretPayload_Wipe(t *testing.T) {
-	payload := &SecretPayload{
-		Value:   []byte("password123"),
-		Version: "v1",
-		ID:      "https://my-vault.vault.azure.net/secrets/db/v1",
-	}
-
-	payload.Wipe()
-
-	if payload.Value != nil {
-		t.Errorf("expected payload.Value to be nil after Wipe, got %v", payload.Value)
-	}
-}
-
 func TestNewKeyVaultFetcher(t *testing.T) {
 	t.Run("fails when cred is nil", func(t *testing.T) {
 		_, err := NewKeyVaultFetcher(nil)

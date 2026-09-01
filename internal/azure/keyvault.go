@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -32,24 +31,6 @@ type SecretPayload struct {
 	Value   []byte
 	Version string
 	ID      string
-}
-
-// Wipe zeroes out the in-memory byte slice to prevent cold-boot memory dumps.
-func (p *SecretPayload) Wipe() {
-	if p == nil || p.Value == nil {
-		return
-	}
-	ZeroBytes(p.Value)
-	p.Value = nil
-}
-
-// ZeroBytes overwrites a byte slice with zeros in-place and enforces runtime.KeepAlive
-// to prevent compiler Dead Store Elimination (DSE) optimizations from stripping the wipe.
-func ZeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-	runtime.KeepAlive(b)
 }
 
 // SecretFetcher defines the contract for retrieving secrets from external vault backends.
