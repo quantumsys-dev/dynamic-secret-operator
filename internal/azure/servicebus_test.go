@@ -308,5 +308,44 @@ func TestServiceBusListener_Start_ProcessesMessages(t *testing.T) {
 			t.Errorf("expected abandoned message ID %q, got %q", "msg-err", abandonedMessageID)
 		}
 	})
+
+	t.Run("completes message using detached context even if caller context is already canceled", func(t *testing.T) {
+		listener, err := NewServiceBusListener("sb.servicebus.windows.net", "my-queue", cred)
+		if err != nil {
+			t.Fatalf("failed to create listener: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var completedWithContextErr error
+		mock := &mockReceiver{
+			receiveFunc: func(c context.Context, maxMessages int, options *azservicebus.ReceiveMessagesOptions) ([]*azservicebus.ReceivedMessage, error) {
+				return []*azservicebus.ReceivedMessage{
+					{
+						MessageID: "msg-canceled-ctx",
+						Body:      []byte(`{"eventType": "Test"}`),
+					},
+				}, nil
+			},
+			completeFunc: func(c context.Context, message *azservicebus.ReceivedMessage, options *azservicebus.CompleteMessageOptions) error {
+				completedWithContextErr = c.Err()
+				cancel()
+				return nil
+			},
+		}
+		listener.customReceiver = mock
+		listener.SetEventHandler(func(ctx context.Context, body []byte, ack events.AckFunc) error {
+			canceledCtx, cancelNow := context.WithCancel(context.Background())
+			cancelNow() // cancel immediately
+			return ack(canceledCtx)
+		})
+
+		_ = listener.Start(ctx)
+
+		if completedWithContextErr != nil {
+			t.Errorf("expected CompleteMessage to receive a non-canceled detached context, but got ctx error: %v", completedWithContextErr)
+		}
+	})
 }
 
