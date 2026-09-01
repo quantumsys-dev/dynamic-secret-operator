@@ -1,0 +1,220 @@
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: eso-redis-store
+  namespace: dso-examples
+spec:
+  provider:
+    vault:
+      server: "http://vault.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "eso-role"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: redis-auth-password-eso
+  namespace: dso-examples
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: eso-redis-store
+    kind: SecretStore
+  target:
+    name: redis-auth-password-synced
+    creationPolicy: Owner
+  data:
+    - secretKey: redis-auth-password
+      remoteRef:
+        key: secret/redis
+        property: password
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-master
+  namespace: dso-examples
+  labels:
+    app: redis-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-master
+  template:
+    metadata:
+      labels:
+        app: redis-master
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-master-redis-auth-password-initial
+                  key: redis-auth-password
+                  optional: true
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - --no-auth-warning
+                - PING
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-consumer
+  namespace: dso-examples
+  labels:
+    app: redis-consumer
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: redis-consumer
+  template:
+    metadata:
+      labels:
+        app: redis-consumer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: app
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              while true; do
+                RESULT=$(redis-cli -h redis-master.dso-examples.svc.cluster.local \
+                  -a "$REDIS_AUTH_PASSWORD" --no-auth-warning PING 2>/dev/null || echo "ERROR")
+                echo "$(date -u): redis-ping=$RESULT"
+                sleep 15
+              done
+          env:
+            - name: REDIS_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-consumer-redis-auth-password-initial
+                  key: redis-auth-password
+                  optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master
+  namespace: dso-examples
+spec:
+  selector:
+    app: redis-master
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: redis-cache-rotation
+  namespace: dso-examples
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "redis-auth-password-synced"
+  workloadSelector:
+    kind: Deployment
+    name: redis-consumer
+  targetRef:
+    containerName: app
+    envName: REDIS_AUTH_PASSWORD
+  canaryStrategy:
+    timeoutSeconds: 60
+  validationProbes:
+    - type: Job
+      job:
+        timeoutSeconds: 30
+        jobTemplate:
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 65534
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: redis-ping
+                    image: redis:7-alpine
+                    imagePullPolicy: IfNotPresent
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      capabilities:
+                        drop: ["ALL"]
+                      readOnlyRootFilesystem: true
+                    env:
+                      - name: REDIS_HOST
+                        value: "redis-master.dso-examples.svc.cluster.local"
+                      - name: REDIS_PORT
+                        value: "6379"
+                    command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        set -e
+                        echo "DSO Job Probe: validating Redis AUTH with secret revision: $DSO_REVISION_SECRET_NAME"
+                        RESULT=$(redis-cli \
+                          -h "$REDIS_HOST" \
+                          -p "$REDIS_PORT" \
+                          --no-auth-warning \
+                          PING)
+                        if [ "$RESULT" != "PONG" ]; then
+                          echo "ERROR: Redis PING returned unexpected result: '$RESULT'" >&2
+                          exit 1
+                        fi
+                        echo "SUCCESS: Redis PING returned PONG — new credentials are valid."
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

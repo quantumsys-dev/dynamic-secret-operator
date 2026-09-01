@@ -1,0 +1,132 @@
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: eso-vault-store
+  namespace: dso-examples
+spec:
+  provider:
+    # Pluggable across AWS Secrets Manager, GCP Secret Manager, Vault, or Azure Key Vault
+    vault:
+      server: "http://vault.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "eso-role"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: payment-db-password-eso
+  namespace: dso-examples
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: eso-vault-store
+    kind: SecretStore
+  target:
+    name: payment-db-password-synced
+    creationPolicy: Owner
+  data:
+    - secretKey: payment-db-password
+      remoteRef:
+        key: secret/payment
+        property: password
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service-active
+  namespace: dso-examples
+spec:
+  selector:
+    app: payment-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5678
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-service-preview
+  namespace: dso-examples
+spec:
+  selector:
+    app: payment-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5678
+  type: ClusterIP
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rollout-payment-service
+  namespace: dso-examples
+  labels:
+    app: payment-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payment-service
+  strategy:
+    blueGreen:
+      activeService: payment-service-active
+      previewService: payment-service-preview
+      autoPromotionEnabled: true
+      scaleDownDelaySeconds: 30
+  template:
+    metadata:
+      labels:
+        app: payment-service
+    spec:
+      containers:
+        - name: payment-api
+          image: hashicorp/http-echo:latest
+          args: ["-text=Payment API live with ESO + DSO progressive canary secret delivery\n"]
+          ports:
+            - containerPort: 5678
+              name: http
+          volumeMounts:
+            - name: db-secret-volume
+              mountPath: /etc/secrets
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5678
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: db-secret-volume
+          secret:
+            secretName: rollout-payment-service-payment-db-password-initial
+            optional: true
+---
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: eso-rollout-payment-policy
+  namespace: dso-examples
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "payment-db-password-synced"
+  workloadSelector:
+    kind: "Rollout"
+    name: "rollout-payment-service"
+  targetRef:
+    volumeName: "db-secret-volume"
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://payment-service-active.dso-examples.svc.cluster.local:80/"
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

@@ -1,0 +1,150 @@
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: eso-color-store
+  namespace: dso-examples
+spec:
+  provider:
+    vault:
+      server: "http://vault.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "eso-role"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: nginx-bg-color-eso
+  namespace: dso-examples
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: eso-color-store
+    kind: SecretStore
+  target:
+    name: nginx-bg-color-synced
+    creationPolicy: Owner
+  data:
+    - secretKey: nginx-bg-color
+      remoteRef:
+        key: secret/ui
+        property: color
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-color-template
+  namespace: dso-examples
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name localhost;
+      
+      location / {
+        default_type text/html;
+        return 200 '<!DOCTYPE html><html><body style="background-color: {{BG_COLOR}}; color: white; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif;"><h1>Dynamic Secret Operator – ESO Color Rotation Demo</h1></body></html>\n';
+      }
+
+      location /health {
+        default_type text/plain;
+        return 200 'healthy\n';
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-color-app
+  namespace: dso-examples
+  labels:
+    app: nginx-color-app
+    app.kubernetes.io/instance: dso-color-demo
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: nginx-color-app
+  template:
+    metadata:
+      labels:
+        app: nginx-color-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              COLOR=$(cat /mnt/secrets/nginx-bg-color 2>/dev/null || echo "#3b82f6")
+              sed "s/{{BG_COLOR}}/$COLOR/g" /etc/nginx/templates/default.conf > /etc/nginx/conf.d/default.conf
+              exec nginx -g "daemon off;"
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: template-volume
+              mountPath: /etc/nginx/templates
+            - name: color-secret-volume
+              mountPath: /mnt/secrets
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: template-volume
+          configMap:
+            name: nginx-color-template
+        - name: color-secret-volume
+          secret:
+            secretName: nginx-color-app-nginx-bg-color-initial
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-color-app
+  namespace: dso-examples
+spec:
+  selector:
+    app: nginx-color-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  type: LoadBalancer
+---
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: eso-nginx-color-policy
+  namespace: dso-examples
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "nginx-bg-color-synced"
+  workloadSelector:
+    kind: "Deployment"
+    name: "nginx-color-app"
+  targetRef:
+    volumeName: "color-secret-volume"
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://nginx-color-app.dso-examples.svc.cluster.local:80/health"
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

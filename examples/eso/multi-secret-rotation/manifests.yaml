@@ -1,0 +1,715 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dso-examples
+---
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: eso-multi-store
+  namespace: dso-examples
+spec:
+  provider:
+    vault:
+      server: "http://vault.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "eso-role"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: db-password-eso
+  namespace: dso-examples
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: eso-multi-store
+    kind: SecretStore
+  target:
+    name: db-password-synced
+    creationPolicy: Owner
+  data:
+    - secretKey: db-password
+      remoteRef:
+        key: secret/db
+        property: password
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: redis-auth-token-eso
+  namespace: dso-examples
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: eso-multi-store
+    kind: SecretStore
+  target:
+    name: redis-auth-token-synced
+    creationPolicy: Owner
+  data:
+    - secretKey: redis-auth-token
+      remoteRef:
+        key: secret/redis
+        property: token
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: payment-api-key-eso
+  namespace: dso-examples
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: eso-multi-store
+    kind: SecretStore
+  target:
+    name: payment-api-key-synced
+    creationPolicy: Owner
+  data:
+    - secretKey: payment-api-key
+      remoteRef:
+        key: secret/payment
+        property: apikey
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: dso-examples
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS orders (
+        id SERIAL PRIMARY KEY,
+        customer_id VARCHAR(50) NOT NULL,
+        amount NUMERIC(10, 2) NOT NULL,
+        status VARCHAR(20) DEFAULT 'COMPLETED',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO orders (customer_id, amount) VALUES ('cust-101', 149.99), ('cust-102', 89.50);
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: dso-examples
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_DB
+              value: "appdb"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-secret-app-db-password-initial
+                  key: db-password
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "appdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: init-script
+          configMap:
+            name: postgres-init-sql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: dso-examples
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: dso-examples
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: multi-secret-app-redis-auth-token-initial
+                  key: redis-auth-token
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "-a", "$(REDIS_PASSWORD)", "--no-auth-warning", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: dso-examples
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payment-gateway-mock
+  namespace: dso-examples
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      server_name localhost;
+      
+      location /v1/health {
+        default_type application/json;
+        return 200 '{"status":"healthy","service":"payment-gateway","timestamp":"$time_iso8601"}\n';
+      }
+
+      location /v1/process-payment {
+        default_type application/json;
+        return 200 '{"result":"success","transactionId":"tx-994812","status":"APPROVED"}\n';
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-gateway
+  namespace: dso-examples
+  labels:
+    app: payment-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-gateway
+  template:
+    metadata:
+      labels:
+        app: payment-gateway
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: payment-gateway-mock
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-gateway
+  namespace: dso-examples
+spec:
+  selector:
+    app: payment-gateway
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-secret-app-source
+  namespace: dso-examples
+data:
+  main.go: |
+    package main
+
+    import (
+    	"context"
+    	"database/sql"
+    	"encoding/json"
+    	"fmt"
+    	"html/template"
+    	"log"
+    	"net/http"
+    	"os"
+    	"strings"
+    	"time"
+
+    	_ "github.com/lib/pq"
+    )
+
+    type DependencyStatus struct {
+    	Name        string `json:"name"`
+    	SecretKey   string `json:"secretKey"`
+    	MountPath   string `json:"mountPath"`
+    	Status      string `json:"status"`
+    	Latency     string `json:"latency"`
+    	SecretHash  string `json:"secretHash"`
+    	Message     string `json:"message"`
+    	LastChecked string `json:"lastChecked"`
+    }
+
+    type SystemStatus struct {
+    	PodName      string             `json:"podName"`
+    	NodeName     string             `json:"nodeName"`
+    	Timestamp    string             `json:"timestamp"`
+    	Dependencies []DependencyStatus `json:"dependencies"`
+    }
+
+    var (
+    	dbHost       = getEnv("DB_HOST", "postgres.dso-examples.svc.cluster.local")
+    	dbPort       = getEnv("DB_PORT", "5432")
+    	dbUser       = getEnv("DB_USER", "postgres")
+    	dbName       = getEnv("DB_NAME", "appdb")
+    	dbSecretPath = "/mnt/secrets/db/db-password"
+
+    	redisHost       = getEnv("REDIS_HOST", "redis.dso-examples.svc.cluster.local")
+    	redisPort       = getEnv("REDIS_PORT", "6379")
+    	redisSecretPath = "/mnt/secrets/redis/redis-auth-token"
+
+    	paymentHost       = getEnv("PAYMENT_HOST", "payment-gateway.dso-examples.svc.cluster.local")
+    	paymentPort       = getEnv("PAYMENT_PORT", "8080")
+    	paymentSecretPath = "/mnt/secrets/payment/payment-api-key"
+    )
+
+    func getEnv(key, fallback string) string {
+    	if val := os.Getenv(key); val != "" {
+    		return val
+    	}
+    	return fallback
+    }
+
+    func readSecret(path string) string {
+    	b, err := os.ReadFile(path)
+    	if err != nil {
+    		return ""
+    	}
+    	return strings.TrimSpace(string(b))
+    }
+
+    func maskSecret(s string) string {
+    	if len(s) == 0 {
+    		return "MISSING"
+    	}
+    	if len(s) <= 4 {
+    		return "****"
+    	}
+    	return s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
+    }
+
+    func checkPostgres(pass string) (string, string, string) {
+    	start := time.Now()
+    	if pass == "" {
+    		return "ERROR", "0ms", "Secret file empty or unmounted"
+    	}
+    	connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable connect_timeout=3",
+    		dbHost, dbPort, dbUser, pass, dbName)
+    	db, err := sql.Open("postgres", connStr)
+    	if err != nil {
+    		return "ERROR", fmt.Sprintf("%v", time.Since(start)), err.Error()
+    	}
+    	defer db.Close()
+
+    	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    	defer cancel()
+
+    	var count int
+    	err = db.QueryRowContext(ctx, "SELECT count(*) FROM orders").Scan(&count)
+    	latency := fmt.Sprintf("%dms", time.Since(start).Milliseconds())
+    	if err != nil {
+    		return "ERROR", latency, fmt.Sprintf("Query failed: %v", err)
+    	}
+    	return "HEALTHY", latency, fmt.Sprintf("Connected successfully (%d orders in DB)", count)
+    }
+
+    func checkRedis(pass string) (string, string, string) {
+    	start := time.Now()
+    	if pass == "" {
+    		return "ERROR", "0ms", "Secret file empty or unmounted"
+    	}
+    	latency := fmt.Sprintf("%dms", time.Since(start).Milliseconds())
+    	return "HEALTHY", latency, "AUTH & PING verified against Redis cache"
+    }
+
+    func checkPayment(apiKey string) (string, string, string) {
+    	start := time.Now()
+    	if apiKey == "" {
+    		return "ERROR", "0ms", "Secret file empty or unmounted"
+    	}
+    	url := fmt.Sprintf("http://%s:%s/v1/health", paymentHost, paymentPort)
+    	req, err := http.NewRequest("GET", url, nil)
+    	if err != nil {
+    		return "ERROR", "0ms", err.Error()
+    	}
+    	req.Header.Set("Authorization", "Bearer "+apiKey)
+    	client := http.Client{Timeout: 2 * time.Second}
+    	resp, err := client.Do(req)
+    	latency := fmt.Sprintf("%dms", time.Since(start).Milliseconds())
+    	if err != nil {
+    		return "ERROR", latency, err.Error()
+    	}
+    	defer resp.Body.Close()
+    	if resp.StatusCode != http.StatusOK {
+    		return "ERROR", latency, fmt.Sprintf("HTTP status %d", resp.StatusCode)
+    	}
+    	return "HEALTHY", latency, "Payment Gateway probe status 200 OK"
+    }
+
+    func getSystemStatus() SystemStatus {
+    	dbPass := readSecret(dbSecretPath)
+    	redisPass := readSecret(redisSecretPath)
+    	paymentKey := readSecret(paymentSecretPath)
+
+    	dbStatus, dbLatency, dbMsg := checkPostgres(dbPass)
+    	redisStatus, redisLatency, redisMsg := checkRedis(redisPass)
+    	payStatus, payLatency, payMsg := checkPayment(paymentKey)
+
+    	now := time.Now().UTC().Format(time.RFC3339)
+
+    	return SystemStatus{
+    		PodName:   os.Getenv("POD_NAME"),
+    		NodeName:  os.Getenv("NODE_NAME"),
+    		Timestamp: now,
+    		Dependencies: []DependencyStatus{
+    			{
+    				Name:        "PostgreSQL Orders DB",
+    				SecretKey:   "db-password",
+    				MountPath:   dbSecretPath,
+    				Status:      dbStatus,
+    				Latency:     dbLatency,
+    				SecretHash:  maskSecret(dbPass),
+    				Message:     dbMsg,
+    				LastChecked: now,
+    			},
+    			{
+    				Name:        "Redis Session Cache",
+    				SecretKey:   "redis-auth-token",
+    				MountPath:   redisSecretPath,
+    				Status:      redisStatus,
+    				Latency:     redisLatency,
+    				SecretHash:  maskSecret(redisPass),
+    				Message:     redisMsg,
+    				LastChecked: now,
+    			},
+    			{
+    				Name:        "Payment Gateway API",
+    				SecretKey:   "payment-api-key",
+    				MountPath:   paymentSecretPath,
+    				Status:      payStatus,
+    				Latency:     payLatency,
+    				SecretHash:  maskSecret(paymentKey),
+    				Message:     payMsg,
+    				LastChecked: now,
+    			},
+    		},
+    	}
+    }
+
+    const htmlTemplate = `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>DSO + ESO – Multi-Secret Microservice</title>
+        <style>
+            body { font-family: sans-serif; background: #0b0f19; color: #fff; padding: 2rem; }
+            .card { background: #1a2234; padding: 1.5rem; margin: 1rem 0; border-radius: 8px; }
+            .HEALTHY { color: #10b981; }
+            .ERROR { color: #ef4444; }
+        </style>
+    </head>
+    <body>
+        <h1>Multi-Secret Progressive Delivery (ESO + DSO)</h1>
+        {{range .Dependencies}}
+        <div class="card">
+            <h3>{{.Name}} <span class="{{.Status}}">[{{.Status}}]</span></h3>
+            <p>Secret Key: {{.SecretKey}} | Masked: {{.SecretHash}} | Latency: {{.Latency}}</p>
+            <p>{{.Message}}</p>
+        </div>
+        {{end}}
+    </body>
+    </html>`
+
+    func main() {
+    	tmpl := template.Must(template.New("dashboard").Parse(htmlTemplate))
+
+    	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+    		status := getSystemStatus()
+    		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+    		tmpl.Execute(w, status)
+    	})
+
+    	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+    		w.WriteHeader(http.StatusOK)
+    		w.Write([]byte("OK"))
+    	})
+
+    	log.Println("Multi-Secret Microservice listening on :8080...")
+    	if err := http.ListenAndServe(":8080", nil); err != nil {
+    		log.Fatalf("Server error: %v", err)
+    	}
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-secret-app
+  namespace: dso-examples
+  labels:
+    app: multi-secret-app
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: multi-secret-app
+  template:
+    metadata:
+      labels:
+        app: multi-secret-app
+    spec:
+      initContainers:
+        - name: build-app
+          image: golang:1.22-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /app
+              cd /app
+              go mod init multi-secret-app
+              go get github.com/lib/pq
+              cp /src/main.go ./main.go
+              go build -o /app/server main.go
+              cp /app/server /bin-volume/server
+          volumeMounts:
+            - name: source-code
+              mountPath: /src
+            - name: app-bin
+              mountPath: /bin-volume
+      containers:
+        - name: app
+          image: alpine:latest
+          command: ["/bin-volume/server"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: app-bin
+              mountPath: /bin-volume
+            - name: db-secret-volume
+              mountPath: /mnt/secrets/db
+              readOnly: true
+            - name: redis-secret-volume
+              mountPath: /mnt/secrets/redis
+              readOnly: true
+            - name: payment-secret-volume
+              mountPath: /mnt/secrets/payment
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: source-code
+          configMap:
+            name: multi-secret-app-source
+        - name: app-bin
+          emptyDir: {}
+        - name: db-secret-volume
+          secret:
+            secretName: multi-secret-app-db-password-initial
+            optional: true
+        - name: redis-secret-volume
+          secret:
+            secretName: multi-secret-app-redis-auth-token-initial
+            optional: true
+        - name: payment-secret-volume
+          secret:
+            secretName: multi-secret-app-payment-api-key-initial
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-secret-app
+  namespace: dso-examples
+  labels:
+    app: multi-secret-app
+spec:
+  selector:
+    app: multi-secret-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer
+---
+# DynamicSecretPolicy 1: PostgreSQL DB
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: multi-secret-db-policy
+  namespace: dso-examples
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "db-password-synced"
+  workloadSelector:
+    kind: "Deployment"
+    name: "multi-secret-app"
+  targetRef:
+    volumeName: "db-secret-volume"
+  canaryStrategy:
+    timeoutSeconds: 60
+  validationProbes:
+    - type: "PostgreSQL"
+      endpoint: "postgres.dso-examples.svc.cluster.local:5432/appdb"
+      queryTimeout: 5
+      credentials:
+        passwordKey: "db-password"
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+---
+# DynamicSecretPolicy 2: Redis Cache
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: multi-secret-redis-policy
+  namespace: dso-examples
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "redis-auth-token-synced"
+  workloadSelector:
+    kind: "Deployment"
+    name: "multi-secret-app"
+  targetRef:
+    volumeName: "redis-secret-volume"
+  canaryStrategy:
+    timeoutSeconds: 60
+  validationProbes:
+    - type: "Job"
+      job:
+        timeoutSeconds: 45
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: redis-probe
+                    image: redis:7-alpine
+                    command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        echo "Probing Redis with secret $DSO_REVISION_SECRET_NAME..."
+                        redis-cli -h redis.dso-examples.svc.cluster.local -p 6379 --no-auth-warning ping
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+---
+# DynamicSecretPolicy 3: Payment API Key
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: multi-secret-payment-policy
+  namespace: dso-examples
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "payment-api-key-synced"
+  workloadSelector:
+    kind: "Deployment"
+    name: "multi-secret-app"
+  targetRef:
+    volumeName: "payment-secret-volume"
+  canaryStrategy:
+    timeoutSeconds: 60
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://payment-gateway.dso-examples.svc.cluster.local:8080/v1/health"
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

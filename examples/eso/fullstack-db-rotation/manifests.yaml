@@ -1,0 +1,440 @@
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: eso-db-store
+  namespace: dso-examples
+spec:
+  provider:
+    vault:
+      server: "http://vault.vault.svc.cluster.local:8200"
+      path: "secret"
+      version: "v2"
+      auth:
+        kubernetes:
+          mountPath: "kubernetes"
+          role: "eso-role"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: db-password-eso
+  namespace: dso-examples
+spec:
+  refreshInterval: 15s
+  secretStoreRef:
+    name: eso-db-store
+    kind: SecretStore
+  target:
+    name: db-password-synced
+    creationPolicy: Owner
+  data:
+    - secretKey: db-password
+      remoteRef:
+        key: secret/db
+        property: password
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-config
+  namespace: dso-examples
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        event_name VARCHAR(100)
+    );
+    INSERT INTO audit_log (event_name) VALUES ('ESO Cluster Initialized');
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: dso-examples
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_DB
+              value: "appdb"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-status-app-db-password-initial
+                  key: db-password
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "appdb"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: init-script
+          configMap:
+            name: postgres-init-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: dso-examples
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-status-app-source
+  namespace: dso-examples
+data:
+  main.go: |
+    package main
+
+    import (
+    	"database/sql"
+    	"encoding/json"
+    	"fmt"
+    	"log"
+    	"net/http"
+    	"os"
+    	"strings"
+    	"sync"
+    	"time"
+
+    	_ "github.com/lib/pq"
+    )
+
+    type StatusResponse struct {
+    	Status       string `json:"status"`
+    	Database     string `json:"database,omitempty"`
+    	User         string `json:"user,omitempty"`
+    	ServerTime   string `json:"server_time,omitempty"`
+    	LatencyMs    int64  `json:"latency_ms"`
+    	PasswordHint string `json:"password_hint,omitempty"`
+    	PodName      string `json:"pod_name"`
+    	SecretFile   string `json:"secret_file"`
+    	Error        string `json:"error,omitempty"`
+    }
+
+    var (
+    	db      *sql.DB
+    	dbMu    sync.RWMutex
+    	lastPw  string
+    	lastErr error
+    )
+
+    func getEnv(key, fallback string) string {
+    	if v := os.Getenv(key); v != "" {
+    		return v
+    	}
+    	return fallback
+    }
+
+    func readPasswordFromDisk() (string, error) {
+    	pwFile := getEnv("DB_PASSWORD_FILE", "/mnt/secrets/db-password/db-password")
+    	data, err := os.ReadFile(pwFile)
+    	if err != nil {
+    		if fallback := os.Getenv("DB_PASSWORD"); fallback != "" {
+    			return strings.TrimSpace(fallback), nil
+    		}
+    		return "", fmt.Errorf("failed to read password file %s: %w", pwFile, err)
+    	}
+    	return strings.TrimSpace(string(data)), nil
+    }
+
+    func updateDBConnection(pw string) error {
+    	host := getEnv("DB_HOST", "postgres")
+    	port := getEnv("DB_PORT", "5432")
+    	user := getEnv("DB_USER", "postgres")
+    	dbname := getEnv("DB_NAME", "appdb")
+    	sslmode := getEnv("DB_SSLMODE", "disable")
+
+    	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s connect_timeout=3",
+    		host, port, user, pw, dbname, sslmode)
+
+    	newDB, err := sql.Open("postgres", dsn)
+    	if err != nil {
+    		return fmt.Errorf("sql.Open failed: %w", err)
+    	}
+    	newDB.SetMaxOpenConns(5)
+    	newDB.SetMaxIdleConns(2)
+    	newDB.SetConnMaxLifetime(1 * time.Minute)
+
+    	dbMu.Lock()
+    	defer dbMu.Unlock()
+
+    	if db != nil {
+    		_ = db.Close()
+    	}
+    	db = newDB
+    	lastPw = pw
+    	lastErr = nil
+    	log.Printf("Updated in-memory database connection pool (target: %s:%s/%s, user: %s)", host, port, dbname, user)
+    	return nil
+    }
+
+    func startSecretWatcher(interval time.Duration) {
+    	go func() {
+    		ticker := time.NewTicker(interval)
+    		defer ticker.Stop()
+
+    		for range ticker.C {
+    			pw, err := readPasswordFromDisk()
+    			if err != nil {
+    				dbMu.Lock()
+    				lastErr = err
+    				dbMu.Unlock()
+    				continue
+    			}
+
+    			dbMu.RLock()
+    			currentPw := lastPw
+    			dbMu.RUnlock()
+
+    			if pw != currentPw {
+    				log.Printf("Detected secret rotation in mounted volume; reloading connection pool")
+    				if err := updateDBConnection(pw); err != nil {
+    					log.Printf("Failed to update connection pool on rotation: %v", err)
+    					dbMu.Lock()
+    					lastErr = err
+    					dbMu.Unlock()
+    				}
+    			}
+    		}
+    	}()
+    }
+
+    func getDB() (*sql.DB, string, error) {
+    	dbMu.RLock()
+    	defer dbMu.RUnlock()
+
+    	if db == nil {
+    		if lastErr != nil {
+    			return nil, "", lastErr
+    		}
+    		return nil, "", fmt.Errorf("database connection pool not initialized")
+    	}
+
+    	return db, lastPw, nil
+    }
+
+    func maskPassword(pw string) string {
+    	if len(pw) <= 4 {
+    		return "****"
+    	}
+    	return pw[:2] + strings.Repeat("*", len(pw)-4) + pw[len(pw)-2:]
+    }
+
+    func healthzHandler(w http.ResponseWriter, r *http.Request) {
+    	w.WriteHeader(http.StatusOK)
+    	_, _ = w.Write([]byte("OK"))
+    }
+
+    func statusHandler(w http.ResponseWriter, r *http.Request) {
+    	w.Header().Set("Content-Type", "application/json")
+    	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+    	podName, _ := os.Hostname()
+    	pwFile := getEnv("DB_PASSWORD_FILE", "/mnt/secrets/db-password/db-password")
+
+    	start := time.Now()
+    	conn, pw, err := getDB()
+    	if err != nil {
+    		_ = json.NewEncoder(w).Encode(StatusResponse{
+    			Status:     "disconnected",
+    			PodName:    podName,
+    			SecretFile: pwFile,
+    			LatencyMs:  time.Since(start).Milliseconds(),
+    			Error:      err.Error(),
+    		})
+    		return
+    	}
+
+    	var serverTime, dbName, dbUser string
+    	queryErr := conn.QueryRowContext(r.Context(), "SELECT NOW()::text, current_database(), current_user;").Scan(&serverTime, &dbName, &dbUser)
+    	latency := time.Since(start).Milliseconds()
+
+    	if queryErr != nil {
+    		_ = json.NewEncoder(w).Encode(StatusResponse{
+    			Status:       "disconnected",
+    			PodName:      podName,
+    			SecretFile:   pwFile,
+    			PasswordHint: maskPassword(pw),
+    			LatencyMs:    latency,
+    			Error:        fmt.Sprintf("Query failed: %v", queryErr),
+    		})
+    		return
+    	}
+
+    	_ = json.NewEncoder(w).Encode(StatusResponse{
+    		Status:       "connected",
+    		Database:     dbName,
+    		User:         dbUser,
+    		ServerTime:   serverTime,
+    		LatencyMs:    latency,
+    		PasswordHint: maskPassword(pw),
+    		PodName:      podName,
+    		SecretFile:   pwFile,
+    	})
+    }
+
+    func rootHandler(w http.ResponseWriter, r *http.Request) {
+    	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+    	_, _ = w.Write([]byte("DSO + ESO Database Auto-Rotation PoC Live"))
+    }
+
+    func main() {
+    	port := getEnv("PORT", "8080")
+
+    	if initialPw, err := readPasswordFromDisk(); err == nil {
+    		if err := updateDBConnection(initialPw); err != nil {
+    			log.Printf("Warning: initial DB connection setup failed: %v", err)
+    		}
+    	}
+
+    	startSecretWatcher(1 * time.Second)
+
+    	http.HandleFunc("/healthz", healthzHandler)
+    	http.HandleFunc("/api/status", statusHandler)
+    	http.HandleFunc("/", rootHandler)
+
+    	log.Printf("Starting Fullstack DB Rotation Backend on port :%s", port)
+    	if err := http.ListenAndServe(":"+port, nil); err != nil {
+    		log.Fatalf("Server failed: %v", err)
+    	}
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-status-app
+  namespace: dso-examples
+  labels:
+    app: db-status-app
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: db-status-app
+  template:
+    metadata:
+      labels:
+        app: db-status-app
+    spec:
+      containers:
+        - name: app
+          image: golang:1.24-alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              mkdir -p /workspace && cd /workspace
+              go mod init app
+              go get github.com/lib/pq@v1.10.9
+              go run /app/main.go
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: "postgres.dso-examples.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              value: "postgres"
+            - name: DB_NAME
+              value: "appdb"
+            - name: DB_PASSWORD_FILE
+              value: "/mnt/secrets/db-password/db-password"
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: app-source
+              mountPath: /app
+            - name: db-secret-volume
+              mountPath: /mnt/secrets/db-password
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+      volumes:
+        - name: app-source
+          configMap:
+            name: db-status-app-source
+        - name: db-secret-volume
+          secret:
+            secretName: db-status-app-db-password-initial
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db-status-app
+  namespace: dso-examples
+  labels:
+    app: db-status-app
+spec:
+  selector:
+    app: db-status-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer
+---
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: eso-database-password-policy
+  namespace: dso-examples
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "db-password-synced"
+  workloadSelector:
+    kind: "Deployment"
+    name: "db-status-app"
+  targetRef:
+    volumeName: "db-secret-volume"
+  validationProbes:
+    - type: "PostgreSQL"
+      endpoint: "postgres.dso-examples.svc.cluster.local:5432/appdb"
+      queryTimeout: 5
+      credentials:
+        passwordKey: "db-password"
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
