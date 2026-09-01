@@ -232,6 +232,7 @@ We actively welcome community contributions, PRs, and provider plugin developmen
 
 <div align="center">
   <b>Built with 🩵 by the QuantumSys Architecture Team.</b><br>
-  For troubleshooting, runbooks, and DLQ management, refer to the <a href="docs/troubleshooting.md">Troubleshooting Guide</a>.<br>
+  For runtime flags and enterprise concurrency tuning, see the <a href="docs/configuration.md">Configuration Guide</a>.<br>
+  For operational runbooks and DLQ management, refer to the <a href="docs/troubleshooting.md">Troubleshooting Guide</a>.<br>
   To report vulnerabilities, please read our <a href="SECURITY.md">Security Policy</a>.
 </div>
