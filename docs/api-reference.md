@@ -137,7 +137,7 @@ Configures the ephemeral `batch/v1.Job` launched by the operator as a validation
 | `timeoutSeconds` | `*int32` | `60` | Maximum seconds to wait for the Job to reach a terminal state. The Job is deleted and the probe fails if this duration is exceeded. |
 | `jobTemplate` | `batchv1.JobTemplateSpec` | — | Standard Kubernetes `batch/v1` Job template. The operator sets `backoffLimit: 0` if unset. |
 
-**Placeholder substitution**: embed `{{REVISION_SECRET_NAME}}` anywhere inside the `jobTemplate` (env values, `secretKeyRef.name`, `args`, `command`). The operator replaces all occurrences with the name of the materialized Kubernetes `Secret` holding the new credentials before creating the Job.
+**Secret Name Injection**: The operator automatically injects the `DSO_REVISION_SECRET_NAME` environment variable into all `initContainers` and `containers` in the `jobTemplate`. Users reference `$(DSO_REVISION_SECRET_NAME)` in container `command`, `args`, or environment variable definitions to access the materialized Kubernetes `Secret` holding the new credentials.
 
 **Lifecycle**: the probe Job is always deleted after execution (success or failure) by the operator, preventing resource leaks in the target namespace.
 

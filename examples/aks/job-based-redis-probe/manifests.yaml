@@ -170,8 +170,8 @@ spec:
     timeoutSeconds: 60
 
   # 5. Job-based validation probe using the official redis:alpine image.
-  #    The operator substitutes {{REVISION_SECRET_NAME}} with the name of the
-  #    materialized Kubernetes Secret before creating the Job.
+  #    The operator automatically injects DSO_REVISION_SECRET_NAME into all
+  #    containers in the Job template.
   validationProbes:
     - type: Job
       job:
@@ -202,22 +202,15 @@ spec:
                         value: "redis-master.dso-examples.svc.cluster.local"
                       - name: REDIS_PORT
                         value: "6379"
-                      - name: REDIS_PASSWORD
-                        valueFrom:
-                          secretKeyRef:
-                            # {{REVISION_SECRET_NAME}} is replaced at runtime by the operator.
-                            name: "{{REVISION_SECRET_NAME}}"
-                            key: redis-auth-password
                     command:
                       - /bin/sh
                       - -c
                       - |
                         set -e
-                        echo "DSO Job Probe: validating Redis AUTH with new secret revision…"
+                        echo "DSO Job Probe: validating Redis AUTH with secret revision: $DSO_REVISION_SECRET_NAME"
                         RESULT=$(redis-cli \
                           -h "$REDIS_HOST" \
                           -p "$REDIS_PORT" \
-                          -a "$REDIS_PASSWORD" \
                           --no-auth-warning \
                           PING)
                         if [ "$RESULT" != "PONG" ]; then

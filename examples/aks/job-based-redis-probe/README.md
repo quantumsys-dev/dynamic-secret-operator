@@ -35,7 +35,7 @@ flowchart TD
     ASB -->|"3. Peek-Lock Event"| DSO
     DSO -->|"4. Materialize Revision"| SEC
     DSO -->|"5. Provision Isolated Canary"| CANARY
-    DSO -->|"6. Create Probe Job\n({{REVISION_SECRET_NAME}} substituted)"| JOB
+    DSO -->|"6. Create Probe Job\n(DSO_REVISION_SECRET_NAME injected)"| JOB
     JOB -->|"7. redis-cli PING via new secret"| REDIS
     DSO -->|"8. Promote on PING success"| APP
     APP -->|"Mounts"| SEC
@@ -48,7 +48,7 @@ flowchart TD
 1. **Event Ingestion:** Azure Key Vault notifies Azure Service Bus via Event Grid when `redis-auth-password` is rotated.
 2. **Secret Materialization:** DSO fetches the new password and materializes an immutable `Secret` in the `dso-examples` namespace (e.g., `redis-consumer-redis-auth-password-rev-a1b2c3`).
 3. **Canary Provisioning:** DSO spins up an isolated 1-replica canary pod with strict `NetworkPolicy`.
-4. **Job Probe:** DSO creates an ephemeral `batch/v1.Job` using the `redis:7-alpine` image. The placeholder `{{REVISION_SECRET_NAME}}` in the Job template is substituted with the actual new secret name. The probe container runs `redis-cli PING` authenticating with the new password.
+4. **Job Probe:** DSO creates an ephemeral `batch/v1.Job` using the `redis:7-alpine` image. The operator automatically injects the `DSO_REVISION_SECRET_NAME` environment variable into container environments with the actual new secret name. The probe container references `$(DSO_REVISION_SECRET_NAME)` or its materialized secret to run `redis-cli PING` and validate connectivity.
 5. **Pass / Fail:** If `PING` returns `PONG`, DSO promotes `redis-consumer` to use the new secret (zero downtime rolling update). If it fails, DSO captures the container logs, surfaces them as a `Condition` on the `DynamicSecretPolicy`, and (if configured) rolls back.
 6. **Cleanup:** The probe Job is **always deleted** immediately after completion — success or failure — preventing resource accumulation.
 

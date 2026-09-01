@@ -124,9 +124,10 @@ type JobProbeSpec struct {
 
 	// JobTemplate is the batch/v1 job template spec to instantiate.
 	// The operator will set an OwnerReference on the created Job.
-	// Use the placeholder "{{REVISION_SECRET_NAME}}" anywhere within the template
-	// (env values, args, command) and the operator will substitute it with the
-	// name of the materialized Kubernetes Secret holding the new credentials.
+	// The operator automatically injects the environment variable DSO_REVISION_SECRET_NAME
+	// containing the name of the materialized Kubernetes Secret holding the new credentials
+	// into all initContainers and containers in the Job template. Reference $(DSO_REVISION_SECRET_NAME)
+	// in command, args, or env definitions.
 	// +kubebuilder:validation:Required
 	JobTemplate batchv1.JobTemplateSpec `json:"jobTemplate"`
 }

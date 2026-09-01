@@ -855,17 +855,8 @@ spec:
                       - /bin/sh
                       - -c
                       - |
-                        AUTH_PASS=$(cat /mnt/secrets/redis-auth-token)
-                        echo "Probing Redis with materialized credential from secret {{REVISION_SECRET_NAME}}..."
-                        redis-cli -h redis.dso-examples.svc.cluster.local -p 6379 -a "$AUTH_PASS" --no-auth-warning ping
-                    volumeMounts:
-                      - name: secret-vol
-                        mountPath: /mnt/secrets
-                        readOnly: true
-                volumes:
-                  - name: secret-vol
-                    secret:
-                      secretName: "{{REVISION_SECRET_NAME}}"
+                        echo "Probing Redis with materialized credential from secret $DSO_REVISION_SECRET_NAME..."
+                        redis-cli -h redis.dso-examples.svc.cluster.local -p 6379 --no-auth-warning ping
   rollbackConfig:
     autoRollback: true
     circuitBreakerThreshold: 3
