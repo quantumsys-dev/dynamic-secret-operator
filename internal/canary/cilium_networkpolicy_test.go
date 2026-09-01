@@ -17,6 +17,7 @@ limitations under the License.
 package canary
 
 import (
+	"context"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,7 +49,7 @@ func TestBuildCiliumNetworkPolicy(t *testing.T) {
 		},
 	}
 
-	cnp := BuildCiliumNetworkPolicy(policy)
+	cnp := BuildCiliumNetworkPolicy(context.Background(), policy)
 
 	if cnp.GetAPIVersion() != "cilium.io/v2" {
 		t.Errorf("expected apiVersion cilium.io/v2, got %s", cnp.GetAPIVersion())
@@ -105,5 +106,37 @@ func TestBuildCiliumNetworkPolicy(t *testing.T) {
 	values, ok := expr["values"].([]interface{})
 	if !ok || len(values) != 2 || values[0] != "kube-dns" || values[1] != "coredns" {
 		t.Errorf("expected matchExpressions values [kube-dns, coredns], got %v", expr["values"])
+	}
+}
+
+func TestBuildCiliumNetworkPolicy_FailsClosedOnUnresolvableEndpoint(t *testing.T) {
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "unresolvable-dsp",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "unresolvable-api",
+			},
+			ValidationProbes: []secretv1alpha1.ValidationProbe{
+				{
+					Type: secretv1alpha1.ProbeTypePostgreSQL,
+					// RFC 2606 reserves the .invalid TLD to always fail to resolve.
+					Endpoint: "this-host-does-not-exist.invalid:5432",
+				},
+			},
+		},
+	}
+
+	cnp := BuildCiliumNetworkPolicy(context.Background(), policy)
+	spec, ok := cnp.Object["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected spec map in unstructured CiliumNetworkPolicy")
+	}
+	egress, ok := spec["egress"].([]interface{})
+	if !ok || len(egress) != 1 {
+		t.Fatalf("expected only the DNS egress rule (unresolvable probe endpoint skipped), got %d rules: %+v", len(egress), egress)
 	}
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package canary
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -29,7 +30,7 @@ import (
 // BuildCiliumNetworkPolicy constructs an eBPF-powered CiliumNetworkPolicy (cilium.io/v2)
 // to provide rich L3/L4/L7 egress visibility and packet telemetry via Hubble.
 // It enforces default-deny ingress and restricts egress to in-cluster CoreDNS and probe endpoints.
-func BuildCiliumNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *unstructured.Unstructured {
+func BuildCiliumNetworkPolicy(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) *unstructured.Unstructured {
 	targetName := policy.Spec.WorkloadSelector.Name
 	netpolName := fmt.Sprintf("%s-canary-cilium-netpol", targetName)
 
@@ -70,7 +71,14 @@ func BuildCiliumNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *unstr
 		if probe.Type == secretv1alpha1.ProbeTypeJob {
 			continue
 		}
-		cidr, ports := extractTargetCIDRAndPort(probe.Endpoint, probe.Type)
+		cidrs, ports := extractTargetCIDRAndPort(ctx, probe.Endpoint, probe.Type)
+		if len(cidrs) == 0 {
+			// Neither a literal IP/CIDR nor a resolvable DNS name: fail closed by skipping this
+			// rule entirely, rather than omitting toCIDRSet, which Cilium would otherwise treat
+			// as unrestricted egress on these ports.
+			continue
+		}
+
 		var ciliumPorts []interface{}
 		for _, p := range ports {
 			ciliumPorts = append(ciliumPorts, map[string]interface{}{
@@ -79,19 +87,19 @@ func BuildCiliumNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *unstr
 			})
 		}
 
-		rule := map[string]interface{}{
+		var cidrSet []interface{}
+		for _, cidr := range cidrs {
+			cidrSet = append(cidrSet, map[string]interface{}{"cidr": cidr})
+		}
+
+		egressRules = append(egressRules, map[string]interface{}{
 			"toPorts": []interface{}{
 				map[string]interface{}{
 					"ports": ciliumPorts,
 				},
 			},
-		}
-		if cidr != "" {
-			rule["toCIDRSet"] = []interface{}{
-				map[string]interface{}{"cidr": cidr},
-			}
-		}
-		egressRules = append(egressRules, rule)
+			"toCIDRSet": cidrSet,
+		})
 	}
 
 	u := &unstructured.Unstructured{

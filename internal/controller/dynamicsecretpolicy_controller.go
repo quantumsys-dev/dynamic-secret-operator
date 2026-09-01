@@ -356,7 +356,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		// 2. Provision Canary NetworkPolicy (Standard or eBPF CiliumNetworkPolicy)
 		netpolName := ""
 		if policy.Spec.NetworkPolicy != nil && policy.Spec.NetworkPolicy.Provider == secretv1alpha1.NetworkPolicyProviderCilium {
-			ciliumNetpol := canary.BuildCiliumNetworkPolicy(policy)
+			ciliumNetpol := canary.BuildCiliumNetworkPolicy(ctx, policy)
 			if err := r.Create(ctx, ciliumNetpol); err != nil && !apierrors.IsAlreadyExists(err) {
 				logger.Error(err, "failed to create canary cilium network policy")
 				span.RecordError(err)
@@ -365,7 +365,7 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			netpolName = ciliumNetpol.GetName()
 			logger.Info("enforced eBPF canary CiliumNetworkPolicy isolation", "ciliumNetworkPolicy", netpolName)
 		} else {
-			netpol := canary.BuildNetworkPolicy(policy)
+			netpol := canary.BuildNetworkPolicy(ctx, policy)
 			if err := controllerutil.SetControllerReference(policy, netpol, r.Scheme); err != nil {
 				logger.Error(err, "failed to set controller reference on canary network policy")
 				span.RecordError(err)

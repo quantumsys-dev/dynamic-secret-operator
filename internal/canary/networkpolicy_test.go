@@ -17,6 +17,7 @@ limitations under the License.
 package canary
 
 import (
+	"context"
 	"testing"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -46,7 +47,7 @@ func TestBuildNetworkPolicy(t *testing.T) {
 			},
 		}
 
-		netpol := BuildNetworkPolicy(policy)
+		netpol := BuildNetworkPolicy(context.Background(), policy)
 
 		// 1. Validate Metadata and Selectors
 		expectedName := "orders-api-canary-netpol"
@@ -123,7 +124,7 @@ func TestBuildNetworkPolicy(t *testing.T) {
 			},
 		}
 
-		netpol := BuildNetworkPolicy(policy)
+		netpol := BuildNetworkPolicy(context.Background(), policy)
 
 		// Rule 0 is DNS
 		// Rule 1 is PostgreSQL with IPBlock 10.240.0.5/32 and port 5432
@@ -153,6 +154,73 @@ func TestBuildNetworkPolicy(t *testing.T) {
 		}
 		if len(httpRule.Ports) != 1 || httpRule.Ports[0].Port.IntValue() != 8443 {
 			t.Errorf("expected HTTP port 8443, got: %v", httpRule.Ports)
+		}
+	})
+
+	t.Run("fails closed instead of open when a probe endpoint cannot be resolved to an address", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "unresolvable-dsp",
+				Namespace: "default",
+			},
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{
+					Kind: "Deployment",
+					Name: "unresolvable-api",
+				},
+				ValidationProbes: []secretv1alpha1.ValidationProbe{
+					{
+						Type: secretv1alpha1.ProbeTypePostgreSQL,
+						// RFC 2606 reserves the .invalid TLD to always fail to resolve.
+						Endpoint: "this-host-does-not-exist.invalid:5432",
+					},
+				},
+			},
+		}
+
+		netpol := BuildNetworkPolicy(context.Background(), policy)
+
+		// Only the DNS rule should be present: the unresolvable probe endpoint must be skipped
+		// entirely rather than produce a Ports-only rule with no "To" restriction, which
+		// Kubernetes would interpret as unrestricted egress (0.0.0.0/0) on that port.
+		if len(netpol.Spec.Egress) != 1 {
+			t.Fatalf("expected only the DNS egress rule (unresolvable probe endpoint skipped), got %d rules: %+v", len(netpol.Spec.Egress), netpol.Spec.Egress)
+		}
+	})
+
+	t.Run("resolves a DNS hostname endpoint to a concrete address instead of failing open", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "dns-dsp",
+				Namespace: "default",
+			},
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{
+					Kind: "Deployment",
+					Name: "dns-api",
+				},
+				ValidationProbes: []secretv1alpha1.ValidationProbe{
+					{
+						Type:     secretv1alpha1.ProbeTypePostgreSQL,
+						Endpoint: "localhost:5432",
+					},
+				},
+			},
+		}
+
+		netpol := BuildNetworkPolicy(context.Background(), policy)
+
+		if len(netpol.Spec.Egress) != 2 {
+			t.Fatalf("expected DNS rule + 1 resolved probe rule, got %d rules: %+v", len(netpol.Spec.Egress), netpol.Spec.Egress)
+		}
+		probeRule := netpol.Spec.Egress[1]
+		if len(probeRule.To) == 0 {
+			t.Fatalf("expected the resolved endpoint to produce at least one IPBlock peer, got none")
+		}
+		for _, peer := range probeRule.To {
+			if peer.IPBlock == nil || peer.IPBlock.CIDR == "" {
+				t.Errorf("expected every peer to carry a concrete IPBlock CIDR, got %+v", peer)
+			}
 		}
 	})
 }

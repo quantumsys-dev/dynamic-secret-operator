@@ -17,11 +17,13 @@ limitations under the License.
 package canary
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -40,7 +42,7 @@ const LabelTargetWorkload = "dso.quantumsys.dev/target"
 // BuildNetworkPolicy constructs an isolating Kubernetes NetworkPolicy around the canary workload.
 // It enforces strict zero-trust default-deny on all Ingress, and restricts Egress strictly to DNS
 // and the explicit target endpoint IP/CIDR and network ports required by configured validation probes.
-func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv1.NetworkPolicy {
+func BuildNetworkPolicy(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) *networkingv1.NetworkPolicy {
 	targetName := policy.Spec.WorkloadSelector.Name
 	netpolName := fmt.Sprintf("%s-canary-netpol", targetName)
 
@@ -86,7 +88,13 @@ func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv
 		if probe.Type == secretv1alpha1.ProbeTypeJob {
 			continue
 		}
-		cidr, ports := extractTargetCIDRAndPort(probe.Endpoint, probe.Type)
+		cidrs, ports := extractTargetCIDRAndPort(ctx, probe.Endpoint, probe.Type)
+		if len(cidrs) == 0 {
+			// Neither a literal IP/CIDR nor a resolvable DNS name: fail closed by skipping this
+			// rule entirely rather than omitting the "To" restriction, which Kubernetes would
+			// otherwise interpret as unrestricted egress (0.0.0.0/0) on these ports.
+			continue
+		}
 
 		var npPorts []networkingv1.NetworkPolicyPort
 		for _, portNum := range ports {
@@ -97,19 +105,19 @@ func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv
 			})
 		}
 
-		rule := networkingv1.NetworkPolicyEgressRule{
-			Ports: npPorts,
-		}
-		if cidr != "" {
-			rule.To = []networkingv1.NetworkPolicyPeer{
-				{
-					IPBlock: &networkingv1.IPBlock{
-						CIDR: cidr,
-					},
+		var peers []networkingv1.NetworkPolicyPeer
+		for _, cidr := range cidrs {
+			peers = append(peers, networkingv1.NetworkPolicyPeer{
+				IPBlock: &networkingv1.IPBlock{
+					CIDR: cidr,
 				},
-			}
+			})
 		}
-		egressRules = append(egressRules, rule)
+
+		egressRules = append(egressRules, networkingv1.NetworkPolicyEgressRule{
+			Ports: npPorts,
+			To:    peers,
+		})
 	}
 
 	return &networkingv1.NetworkPolicy{
@@ -140,8 +148,12 @@ func BuildNetworkPolicy(policy *secretv1alpha1.DynamicSecretPolicy) *networkingv
 	}
 }
 
-// extractTargetCIDRAndPort parses an endpoint string and resolves target IP/CIDR and port.
-func extractTargetCIDRAndPort(endpoint string, probeType secretv1alpha1.ProbeType) (string, []int) {
+// extractTargetCIDRAndPort parses an endpoint string and resolves target IP/CIDR(s) and port.
+// If the host portion is neither a literal IP nor a CIDR, it is resolved as a DNS name (e.g. an
+// in-cluster Service hostname) so egress can still be scoped to concrete addresses. If that
+// resolution also fails, it returns no CIDRs (fail closed) rather than letting the caller treat
+// an empty restriction as unrestricted egress.
+func extractTargetCIDRAndPort(ctx context.Context, endpoint string, probeType secretv1alpha1.ProbeType) ([]string, []int) {
 	defaultPorts := map[secretv1alpha1.ProbeType][]int{
 		secretv1alpha1.ProbeTypePostgreSQL: {5432},
 		secretv1alpha1.ProbeTypeMySQL:      {3306},
@@ -150,7 +162,7 @@ func extractTargetCIDRAndPort(endpoint string, probeType secretv1alpha1.ProbeTyp
 	}
 
 	if endpoint == "" {
-		return "", defaultPorts[probeType]
+		return nil, defaultPorts[probeType]
 	}
 
 	raw := endpoint
@@ -203,17 +215,33 @@ func extractTargetCIDRAndPort(endpoint string, probeType secretv1alpha1.ProbeTyp
 	}
 
 	// Determine if host is a valid CIDR or IP
-	var cidr string
 	if _, ipNet, err := net.ParseCIDR(host); err == nil {
-		cidr = ipNet.String()
-	} else if ip := net.ParseIP(host); ip != nil {
+		return []string{ipNet.String()}, ports
+	}
+	if ip := net.ParseIP(host); ip != nil {
 		if ip.To4() != nil {
-			cidr = fmt.Sprintf("%s/32", ip.String())
-		} else {
-			cidr = fmt.Sprintf("%s/128", ip.String())
+			return []string{fmt.Sprintf("%s/32", ip.String())}, ports
 		}
+		return []string{fmt.Sprintf("%s/128", ip.String())}, ports
 	}
 
-	return cidr, ports
+	// Not a literal IP/CIDR: resolve as a DNS name. A bounded timeout keeps a slow or broken
+	// resolver from stalling reconciliation; failure to resolve returns no CIDRs (fail closed).
+	resolveCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(resolveCtx, host)
+	if err != nil || len(addrs) == 0 {
+		return nil, ports
+	}
+
+	cidrs := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if ip4 := addr.IP.To4(); ip4 != nil {
+			cidrs = append(cidrs, fmt.Sprintf("%s/32", ip4.String()))
+		} else {
+			cidrs = append(cidrs, fmt.Sprintf("%s/128", addr.IP.String()))
+		}
+	}
+	return cidrs, ports
 }
 
