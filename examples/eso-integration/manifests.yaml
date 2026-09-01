@@ -1,0 +1,82 @@
+---
+# 1. External Secrets Operator: Store definition
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: vault-backend
+  namespace: production
+spec:
+  provider:
+    azurekv:
+      authType: WorkloadIdentity
+      vaultUrl: "https://mykeyvault.vault.azure.net"
+      serviceAccountRef:
+        name: eso-serviceaccount
+---
+# 2. External Secrets Operator: Sync upstream secret into cluster Secret
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: orders-db-sync
+  namespace: production
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: SecretStore
+  target:
+    name: orders-db-synced-secret
+    creationPolicy: Owner
+  data:
+    - secretKey: DB_PASSWORD
+      remoteRef:
+        key: production-orders-db-password
+---
+# 3. Dynamic Secret Operator: Progressive Canary Rollout Policy
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: orders-api-progressive-rotation
+  namespace: production
+spec:
+  workloadSelector:
+    kind: Deployment
+    name: orders-api
+  vaultRef:
+    objectName: DB_PASSWORD
+    keyVaultURI: "https://mykeyvault.vault.azure.net"
+  validationProbes:
+    - type: PostgreSQL
+      endpoint: "postgres.production.svc.cluster.local:5432"
+      queryTimeout: 5
+  consecutiveFailureThreshold: 3
+---
+# 4. Production Application Workload
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+  namespace: production
+  labels:
+    app: orders-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: orders-api
+  template:
+    metadata:
+      labels:
+        app: orders-api
+    spec:
+      containers:
+        - name: orders-api
+          image: ghcr.io/org/orders-api:v1.4.0
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: orders-api-DB_PASSWORD-rev-initial
+                  key: DB_PASSWORD
+          ports:
+            - containerPort: 8080
