@@ -180,11 +180,14 @@ func TestBuildNetworkPolicy(t *testing.T) {
 
 		netpol := BuildNetworkPolicy(context.Background(), policy)
 
-		// Only the DNS rule should be present: the unresolvable probe endpoint must be skipped
-		// entirely rather than produce a Ports-only rule with no "To" restriction, which
-		// Kubernetes would interpret as unrestricted egress (0.0.0.0/0) on that port.
-		if len(netpol.Spec.Egress) != 1 {
-			t.Fatalf("expected only the DNS egress rule (unresolvable probe endpoint skipped), got %d rules: %+v", len(netpol.Spec.Egress), netpol.Spec.Egress)
+		// When a probe endpoint cannot be resolved to a CIDR, the rule restricts egress to in-cluster
+		// pods (PodSelector) rather than producing an unrestricted 0.0.0.0/0 rule.
+		if len(netpol.Spec.Egress) != 2 {
+			t.Fatalf("expected 2 egress rules (DNS + fallback podSelector probe rule), got %d rules: %+v", len(netpol.Spec.Egress), netpol.Spec.Egress)
+		}
+		fallbackRule := netpol.Spec.Egress[1]
+		if len(fallbackRule.To) != 1 || fallbackRule.To[0].PodSelector == nil {
+			t.Errorf("expected fallback rule to have PodSelector restriction, got %+v", fallbackRule.To)
 		}
 	})
 

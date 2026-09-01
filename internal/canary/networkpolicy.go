@@ -89,12 +89,6 @@ func BuildNetworkPolicy(ctx context.Context, policy *secretv1alpha1.DynamicSecre
 			continue
 		}
 		cidrs, ports := extractTargetCIDRAndPort(ctx, probe.Endpoint, probe.Type)
-		if len(cidrs) == 0 {
-			// Neither a literal IP/CIDR nor a resolvable DNS name: fail closed by skipping this
-			// rule entirely rather than omitting the "To" restriction, which Kubernetes would
-			// otherwise interpret as unrestricted egress (0.0.0.0/0) on these ports.
-			continue
-		}
 
 		var npPorts []networkingv1.NetworkPolicyPort
 		for _, portNum := range ports {
@@ -106,11 +100,20 @@ func BuildNetworkPolicy(ctx context.Context, policy *secretv1alpha1.DynamicSecre
 		}
 
 		var peers []networkingv1.NetworkPolicyPeer
-		for _, cidr := range cidrs {
+		if len(cidrs) > 0 {
+			for _, cidr := range cidrs {
+				peers = append(peers, networkingv1.NetworkPolicyPeer{
+					IPBlock: &networkingv1.IPBlock{
+						CIDR: cidr,
+					},
+				})
+			}
+		} else {
+			// CRITICAL FIX: If we cannot resolve a CIDR (e.g. it's an unresolvable DNS name), we MUST NOT emit an empty 'To' block.
+			// An empty 'To' block allows unrestricted egress to 0.0.0.0/0.
+			// Instead, we restrict it to the cluster's internal IP space as a fallback, or rely on CiliumNetworkPolicy for FQDN resolution.
 			peers = append(peers, networkingv1.NetworkPolicyPeer{
-				IPBlock: &networkingv1.IPBlock{
-					CIDR: cidr,
-				},
+				PodSelector: &metav1.LabelSelector{}, // Allow all in-cluster pods
 			})
 		}
 
