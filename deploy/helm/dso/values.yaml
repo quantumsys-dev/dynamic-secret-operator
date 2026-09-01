@@ -44,6 +44,11 @@ argoCD:
   # to prevent Self-Heal drift loops on operator-managed secret revisions.
   autoPatch: false
 
+# Controller tuning & configuration
+controller:
+  # Buffer capacity for the internal event channel bridging Azure Service Bus to the controller watch queue
+  eventBufferSize: 1000
+
 # Pod Security Admission (PSA) Restricted compliant security contexts
 podSecurityContext:
   runAsNonRoot: true

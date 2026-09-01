@@ -43,6 +43,7 @@ spec:
             - --leader-elect=true
             - --health-probe-bind-address=:8081
             - --metrics-bind-address=:{{ .Values.metrics.port }}
+            - --event-buffer-size={{ .Values.controller.eventBufferSize | default 1000 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:
