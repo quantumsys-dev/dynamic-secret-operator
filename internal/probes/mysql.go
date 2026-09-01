@@ -26,7 +26,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XSAM/otelsql"
 	_ "github.com/go-sql-driver/mysql"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -95,7 +97,9 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 
 	connector := p.DBConnector
 	if connector == nil {
-		connector = sql.Open
+		connector = func(driverName, dataSourceName string) (*sql.DB, error) {
+			return otelsql.Open(driverName, dataSourceName, otelsql.WithTracerProvider(otel.GetTracerProvider()))
+		}
 	}
 
 	db, err := connector("mysql", dsn)

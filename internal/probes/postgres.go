@@ -27,7 +27,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/XSAM/otelsql"
 	_ "github.com/lib/pq"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -133,7 +135,9 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 
 	connector := p.DBConnector
 	if connector == nil {
-		connector = sql.Open
+		connector = func(driverName, dataSourceName string) (*sql.DB, error) {
+			return otelsql.Open(driverName, dataSourceName, otelsql.WithTracerProvider(otel.GetTracerProvider()))
+		}
 	}
 
 	db, err := connector("postgres", dsn)

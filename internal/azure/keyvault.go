@@ -25,6 +25,8 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
@@ -58,6 +60,15 @@ func NewKeyVaultFetcher(cred azcore.TokenCredential) (*AzureKeyVaultFetcher, err
 
 // GetSecret fetches a secret by name and optional version from the specified Azure Key Vault URI.
 func (f *AzureKeyVaultFetcher) GetSecret(ctx context.Context, vaultURI, secretName, version string) (*SecretPayload, error) {
+	ctx, span := telemetry.Tracer.Start(ctx, "AzureKeyVault.GetSecret",
+		trace.WithAttributes(
+			attribute.String("vault.uri", vaultURI),
+			attribute.String("secret.name", secretName),
+			attribute.String("secret.version", version),
+		),
+	)
+	defer span.End()
+
 	start := time.Now()
 	status := "success"
 	defer func() {
@@ -66,28 +77,38 @@ func (f *AzureKeyVaultFetcher) GetSecret(ctx context.Context, vaultURI, secretNa
 
 	if vaultURI == "" {
 		status = "error"
-		return nil, errors.New("vaultURI must not be empty")
+		err := errors.New("vaultURI must not be empty")
+		span.RecordError(err)
+		return nil, err
 	}
 	if secretName == "" {
 		status = "error"
-		return nil, errors.New("secretName must not be empty")
+		err := errors.New("secretName must not be empty")
+		span.RecordError(err)
+		return nil, err
 	}
 
 	client, err := azsecrets.NewClient(vaultURI, f.cred, nil)
 	if err != nil {
 		status = "error"
-		return nil, fmt.Errorf("failed to create azsecrets client for %q: %w", vaultURI, err)
+		clientErr := fmt.Errorf("failed to create azsecrets client for %q: %w", vaultURI, err)
+		span.RecordError(clientErr)
+		return nil, clientErr
 	}
 
 	resp, err := client.GetSecret(ctx, secretName, version, nil)
 	if err != nil {
 		status = "error"
-		return nil, fmt.Errorf("failed to retrieve secret %q from vault %q: %w", secretName, vaultURI, err)
+		fetchErr := fmt.Errorf("failed to retrieve secret %q from vault %q: %w", secretName, vaultURI, err)
+		span.RecordError(fetchErr)
+		return nil, fetchErr
 	}
 
 	if resp.Value == nil {
 		status = "error"
-		return nil, fmt.Errorf("retrieved secret %q has nil value", secretName)
+		valErr := fmt.Errorf("retrieved secret %q has nil value", secretName)
+		span.RecordError(valErr)
+		return nil, valErr
 	}
 
 	var secretVersion string
