@@ -931,11 +931,14 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 			handler.EnqueueRequestsFromMapFunc(r.findPoliciesForSourceSecret),
 		)
 
-	if r.MaxConcurrentReconciles > 0 {
-		builder = builder.WithOptions(controller.Options{
-			MaxConcurrentReconciles: r.MaxConcurrentReconciles,
-		})
+	recoverPanic := true
+	ctrlOptions := controller.Options{
+		RecoverPanic: &recoverPanic,
 	}
+	if r.MaxConcurrentReconciles > 0 {
+		ctrlOptions.MaxConcurrentReconciles = r.MaxConcurrentReconciles
+	}
+	builder = builder.WithOptions(ctrlOptions)
 
 	// Check if optional Argo Rollouts CRD is actually installed in the cluster via API discovery
 	if discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig()); err == nil {
