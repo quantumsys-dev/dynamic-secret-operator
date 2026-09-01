@@ -254,7 +254,6 @@ data:
     	"net/http"
     	"os"
     	"strings"
-    	"sync"
     	"time"
 
     	_ "github.com/lib/pq"
