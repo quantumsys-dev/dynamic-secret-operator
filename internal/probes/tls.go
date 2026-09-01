@@ -60,9 +60,25 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 		defer cancel()
 	}
 
+	// If secretData provides a pinned thumbprint or certificate payload (tls.crt/cert),
+	// we skip standard PKI verification and perform strict cryptographic pinning below.
+	// Otherwise, we enforce strict PKI chain validation against root CAs to prevent MITM attacks.
+	hasPinnedSecret := false
+	if secretData != nil {
+		if tBytes, ok := secretData["thumbprint"]; ok && len(tBytes) > 0 {
+			hasPinnedSecret = true
+		}
+		if cBytes, ok := secretData["tls.crt"]; ok && len(cBytes) > 0 {
+			hasPinnedSecret = true
+		}
+		if cBytes, ok := secretData["cert"]; ok && len(cBytes) > 0 {
+			hasPinnedSecret = true
+		}
+	}
+
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
-			InsecureSkipVerify: true, // Verification is performed explicitly below
+			InsecureSkipVerify: hasPinnedSecret,
 		},
 	}
 

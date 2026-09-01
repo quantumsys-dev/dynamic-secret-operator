@@ -115,7 +115,7 @@ func TestTLSProbe_Execute(t *testing.T) {
 	})
 
 	t.Run("fails on expired certificate", func(t *testing.T) {
-		tlsCert, _, err := generateTestCert(time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+		tlsCert, derBytes, err := generateTestCert(time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
 		if err != nil {
 			t.Fatalf("failed to generate expired cert: %v", err)
 		}
@@ -130,6 +130,7 @@ func TestTLSProbe_Execute(t *testing.T) {
 		defer ts.Close()
 
 		endpoint := strings.TrimPrefix(ts.URL, "https://")
+		thumbprint := fmt.Sprintf("%x", sha256.Sum256(derBytes))
 
 		probe := &TLSProbe{}
 		cfg := secretv1alpha1.ValidationProbe{
@@ -137,7 +138,11 @@ func TestTLSProbe_Execute(t *testing.T) {
 			Endpoint: endpoint,
 		}
 
-		err = probe.Execute(context.Background(), cfg, nil)
+		secretData := map[string][]byte{
+			"thumbprint": []byte(thumbprint),
+		}
+
+		err = probe.Execute(context.Background(), cfg, secretData)
 		if err == nil {
 			t.Fatalf("expected error for expired certificate, got nil")
 		}
@@ -147,9 +152,43 @@ func TestTLSProbe_Execute(t *testing.T) {
 	})
 
 	t.Run("fails on certificate not yet valid", func(t *testing.T) {
-		tlsCert, _, err := generateTestCert(time.Now().Add(24*time.Hour), time.Now().Add(48*time.Hour))
+		tlsCert, derBytes, err := generateTestCert(time.Now().Add(24*time.Hour), time.Now().Add(48*time.Hour))
 		if err != nil {
 			t.Fatalf("failed to generate future cert: %v", err)
+		}
+
+		ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		ts.TLS = &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+		}
+		ts.StartTLS()
+		defer ts.Close()
+
+		endpoint := strings.TrimPrefix(ts.URL, "https://")
+		thumbprint := fmt.Sprintf("%x", sha256.Sum256(derBytes))
+
+		probe := &TLSProbe{}
+		cfg := secretv1alpha1.ValidationProbe{
+			Type:     secretv1alpha1.ProbeTypeTLS,
+			Endpoint: endpoint,
+		}
+
+		secretData := map[string][]byte{
+			"thumbprint": []byte(thumbprint),
+		}
+
+		err = probe.Execute(context.Background(), cfg, secretData)
+		if err == nil {
+			t.Fatalf("expected error for future certificate, got nil")
+		}
+	})
+
+	t.Run("security: fails on untrusted certificate when no pinned secret is provided (MITM defense)", func(t *testing.T) {
+		tlsCert, _, err := generateTestCert(time.Now().Add(-1*time.Hour), time.Now().Add(24*time.Hour))
+		if err != nil {
+			t.Fatalf("failed to generate cert: %v", err)
 		}
 
 		ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -169,9 +208,10 @@ func TestTLSProbe_Execute(t *testing.T) {
 			Endpoint: endpoint,
 		}
 
+		// When secretData is nil/empty, probe must enforce strict PKI chain validation and reject untrusted certs
 		err = probe.Execute(context.Background(), cfg, nil)
 		if err == nil {
-			t.Fatalf("expected error for future certificate, got nil")
+			t.Fatalf("expected error rejecting untrusted certificate during MITM attack, got nil")
 		}
 	})
 

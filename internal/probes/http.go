@@ -61,9 +61,22 @@ func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.Validatio
 
 	client := p.Client
 	if client == nil {
+		hasPinnedSecret := false
+		if secretData != nil {
+			if tBytes, ok := secretData["thumbprint"]; ok && len(tBytes) > 0 {
+				hasPinnedSecret = true
+			}
+			if cBytes, ok := secretData["tls.crt"]; ok && len(cBytes) > 0 {
+				hasPinnedSecret = true
+			}
+			if cBytes, ok := secretData["cert"]; ok && len(cBytes) > 0 {
+				hasPinnedSecret = true
+			}
+		}
+
 		baseTransport := &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, // Allow canary internal probes with self-signed cluster certificates
+				InsecureSkipVerify: hasPinnedSecret,
 			},
 			ResponseHeaderTimeout: 10 * time.Second,
 		}
