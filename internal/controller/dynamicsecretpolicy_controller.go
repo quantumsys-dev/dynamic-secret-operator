@@ -133,7 +133,7 @@ type DynamicSecretPolicyReconciler struct {
 // +kubebuilder:rbac:groups=dso.quantumsys.dev,resources=dynamicsecretpolicies/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get;list
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=argoproj.io,resources=rollouts;applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
@@ -737,10 +737,11 @@ func (r *DynamicSecretPolicyReconciler) gcOldSecretRevisions(ctx context.Context
 		LabelPolicy:                policy.Name,
 	}
 	if err := r.List(ctx, secrets, client.InNamespace(policy.Namespace), labelSelector); err == nil {
-		for _, s := range secrets.Items {
+		for i := range secrets.Items {
+			s := &secrets.Items[i]
 			rev := s.Labels[LabelRevision]
 			if rev != policy.Status.DesiredRevision && rev != policy.Status.CurrentRevision {
-				_ = r.Delete(ctx, &s)
+				_ = r.Delete(ctx, s)
 			}
 		}
 	}
