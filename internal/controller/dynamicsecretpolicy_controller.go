@@ -941,7 +941,12 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 		if resources, err := discoveryClient.ServerResourcesForGroupVersion("argoproj.io/v1alpha1"); err == nil && resources != nil {
 			for _, res := range resources.APIResources {
 				if res.Kind == "Rollout" {
-					builder = builder.Owns(&argorolloutsv1alpha1.Rollout{})
+					// Watches(), not Owns(): a production Rollout has no OwnerReference to the
+					// DynamicSecretPolicy (see findPoliciesForRollout), so Owns() would never fire.
+					builder = builder.Watches(
+						&argorolloutsv1alpha1.Rollout{},
+						handler.EnqueueRequestsFromMapFunc(r.findPoliciesForRollout),
+					)
 					ctrl.Log.Info("Argo Rollouts CRD detected; enabling Rollout watch")
 					break
 				}
@@ -977,6 +982,33 @@ func (r *DynamicSecretPolicyReconciler) findPoliciesForSourceSecret(ctx context.
 	for _, p := range policies.Items {
 		src := p.Spec.GetResolvedSource()
 		if src.Type == secretv1alpha1.SourceTypeK8sSecret && src.K8sSecret != nil && src.K8sSecret.Name == secret.Name {
+			reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Name: p.Name, Namespace: p.Namespace}})
+		}
+	}
+	return reqs
+}
+
+// findPoliciesForRollout maps Argo Rollout status changes (e.g. Progressing -> Healthy) back to
+// the DynamicSecretPolicy resources targeting them. A production Rollout is owned by GitOps/Helm,
+// not DSO - Promote only patches it, it never sets an OwnerReference, since doing so would let
+// deleting the DynamicSecretPolicy garbage-collect a resource DSO doesn't own. That means Owns()
+// (which requires an OwnerReference to fire) can never trigger for Rollouts; this Watches()
+// mapper is what makes ConditionTypeRolloutProgressing react promptly instead of relying solely
+// on its own polling fallback.
+func (r *DynamicSecretPolicyReconciler) findPoliciesForRollout(ctx context.Context, obj client.Object) []ctrl.Request {
+	rollout, ok := obj.(*argorolloutsv1alpha1.Rollout)
+	if !ok {
+		return nil
+	}
+
+	var policies secretv1alpha1.DynamicSecretPolicyList
+	if err := r.List(ctx, &policies, client.InNamespace(rollout.Namespace)); err != nil {
+		return nil
+	}
+
+	var reqs []ctrl.Request
+	for _, p := range policies.Items {
+		if p.Spec.WorkloadSelector.Kind == workload.KindRollout && p.Spec.WorkloadSelector.Name == rollout.Name {
 			reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Name: p.Name, Namespace: p.Namespace}})
 		}
 	}

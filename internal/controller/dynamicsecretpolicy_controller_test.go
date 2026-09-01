@@ -2516,4 +2516,97 @@ func TestFindPoliciesForSourceSecret(t *testing.T) {
 	}
 }
 
+// TestFindPoliciesForRollout verifies the Watches() mapper used in place of Owns() for Argo
+// Rollout targets, since production Rollouts have no OwnerReference to the DynamicSecretPolicy
+// (Owns() would never fire for them).
+func TestFindPoliciesForRollout(t *testing.T) {
+	scheme := setupTestScheme(t)
+	if err := argorolloutsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add argo rollouts scheme: %v", err)
+	}
+	ctx := context.Background()
+
+	policyMatching := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rollout-policy-matching",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Rollout",
+				Name: "checkout-rollout",
+			},
+		},
+	}
+
+	policyOtherRollout := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rollout-policy-other",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Rollout",
+				Name: "unrelated-rollout",
+			},
+		},
+	}
+
+	policyDeployment := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "deployment-policy-same-name",
+			Namespace: "production",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "checkout-rollout", // same name, different kind - must NOT match
+			},
+		},
+	}
+
+	policyDifferentNS := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rollout-policy-diff-ns",
+			Namespace: "staging",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Rollout",
+				Name: "checkout-rollout",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(policyMatching, policyOtherRollout, policyDeployment, policyDifferentNS).
+		Build()
+
+	r := &DynamicSecretPolicyReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	rollout := &argorolloutsv1alpha1.Rollout{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkout-rollout",
+			Namespace: "production",
+		},
+	}
+
+	reqs := r.findPoliciesForRollout(ctx, rollout)
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 mapped request, got %d: %v", len(reqs), reqs)
+	}
+	if reqs[0].Name != "rollout-policy-matching" || reqs[0].Namespace != "production" {
+		t.Errorf("expected request for rollout-policy-matching in production, got %v", reqs[0])
+	}
+
+	// A non-Rollout object must be ignored entirely.
+	if reqs := r.findPoliciesForRollout(ctx, &corev1.Secret{}); len(reqs) != 0 {
+		t.Errorf("expected 0 mapped requests for a non-Rollout object, got %d", len(reqs))
+	}
+}
+
 
