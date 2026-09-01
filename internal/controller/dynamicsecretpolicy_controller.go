@@ -527,10 +527,10 @@ func (r *DynamicSecretPolicyReconciler) reconcileValidationProbes(ctx context.Co
 				_ = r.Delete(ctx, currentJob, &client.DeleteOptions{PropagationPolicy: &bg})
 				telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(probe.Type)).Observe(time.Since(currentJob.CreationTimestamp.Time).Seconds())
 				// Continue to next probe
-				continue
 			case probes.ProbeJobStateFailed, probes.ProbeJobStateTimedOut:
-				bg := metav1.DeletePropagationBackground
-				_ = r.Delete(ctx, currentJob, &client.DeleteOptions{PropagationPolicy: &bg})
+				// Do not delete the Job here to prevent an infinite recreation loop.
+				// Returning the error allows the main loop to record the failure condition and increment ConsecutiveFailures.
+				// The Job will be cleaned up by canary.CleanupCanaryResources when the circuit breaker trips or upon rollback.
 				return ctrl.Result{}, evalErr
 			default:
 				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil

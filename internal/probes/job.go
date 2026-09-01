@@ -24,19 +24,13 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
-	"github.com/quantumsys-dev/dynamic-secret-operator/pkg/telemetry"
 )
 
 const (
@@ -45,136 +39,9 @@ const (
 	// Users reference $(DSO_REVISION_SECRET_NAME) in commands, args, or env definitions.
 	EnvRevisionSecretName = "DSO_REVISION_SECRET_NAME"
 
-	// jobPollInterval controls how frequently the operator polls for Job completion.
-	jobPollInterval = 3 * time.Second
-
 	// maxFailureLogBytes caps the amount of failure log retrieved from failed pods.
 	maxFailureLogBytes = 4096
 )
-
-// JobProbe implements ProbeExecutor by launching an ephemeral batch/v1.Job in the
-// target namespace. It automatically injects the DSO_REVISION_SECRET_NAME environment
-// variable into all containers, polls until the Job reaches a terminal state, captures
-// failure logs for diagnostics, and guarantees cleanup regardless of outcome.
-type JobProbe struct {
-	// KubeClient is an optional kubernetes.Interface used to retrieve pod logs.
-	// If nil, log retrieval is skipped (only job status is reported).
-	KubeClient kubernetes.Interface
-}
-
-// Execute creates a probe Job, waits for it to complete or time out, populates
-// the returned error with failure logs, and deletes the Job.
-//
-// The ctx passed in must already carry the policy's desired timeout via
-// context.WithTimeout; additionally, if probe.Job.TimeoutSeconds is set, a
-// tighter deadline is derived and used instead.
-func (p *JobProbe) Execute(
-	ctx context.Context,
-	k8sClient client.Client,
-	policy *secretv1alpha1.DynamicSecretPolicy,
-	config secretv1alpha1.ValidationProbe,
-	_ map[string][]byte, // secretData is not needed; secret name is injected via DSO_REVISION_SECRET_NAME env var
-) error {
-	ctx, span := telemetry.Tracer.Start(ctx, "ExecuteJobProbe",
-		trace.WithAttributes(
-			attribute.String("probe.type", string(secretv1alpha1.ProbeTypeJob)),
-			attribute.String("policy.name", policy.Name),
-			attribute.String("policy.namespace", policy.Namespace),
-		),
-	)
-	defer span.End()
-
-	if config.Job == nil {
-		err := fmt.Errorf("job probe spec is required when probe type is Job")
-		span.RecordError(err)
-		return err
-	}
-
-	// Determine effective timeout: probe-level config wins over context deadline.
-	timeout := 60 * time.Second
-	if config.Job.TimeoutSeconds != nil && *config.Job.TimeoutSeconds > 0 {
-		timeout = time.Duration(*config.Job.TimeoutSeconds) * time.Second
-	}
-	jobCtx, jobCancel := context.WithTimeout(ctx, timeout)
-	defer jobCancel()
-
-	// Derive the materialized revision secret name following the same convention
-	// used in runValidationProbes: "<workload>-<objectName>-rev-<desiredRevision>".
-	revisionSecretName := fmt.Sprintf("%s-%s-rev-%s",
-		policy.Spec.WorkloadSelector.Name,
-		policy.Spec.VaultRef.ObjectName,
-		policy.Status.DesiredRevision,
-	)
-
-	// Build the Job object from the template.
-	job := buildProbeJob(policy, config.Job, revisionSecretName)
-
-	// Create the Job; defer cleanup so probe Jobs never litter the cluster.
-	if err := k8sClient.Create(jobCtx, job); err != nil {
-		createErr := fmt.Errorf("failed to create probe job %q in namespace %q: %w",
-			job.Name, job.Namespace, err)
-		span.RecordError(createErr)
-		return createErr
-	}
-
-	defer func() {
-		deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		bg := metav1.DeletePropagationBackground
-		_ = k8sClient.Delete(deleteCtx, job, &client.DeleteOptions{
-			PropagationPolicy: &bg,
-		})
-	}()
-
-	// Poll until the Job reaches a terminal state.
-	var terminalJob *batchv1.Job
-	err := wait.PollUntilContextCancel(jobCtx, jobPollInterval, true, func(ctx context.Context) (bool, error) {
-		current := &batchv1.Job{}
-		if gErr := k8sClient.Get(ctx, types.NamespacedName{
-			Name:      job.Name,
-			Namespace: job.Namespace,
-		}, current); gErr != nil {
-			if apierrors.IsNotFound(gErr) {
-				return false, nil // transient; keep polling
-			}
-			return false, gErr
-		}
-		terminalJob = current
-
-		for _, cond := range current.Status.Conditions {
-			if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
-				return true, nil
-			}
-			if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-				return true, nil
-			}
-		}
-		return false, nil
-	})
-
-	if err != nil {
-		// Context deadline / timeout exceeded.
-		timeoutErr := fmt.Errorf("job probe %q timed out after %s waiting for terminal state: %w",
-			job.Name, timeout, err)
-		span.RecordError(timeoutErr)
-		return timeoutErr
-	}
-
-	// Inspect terminal status.
-	if terminalJob != nil {
-		for _, cond := range terminalJob.Status.Conditions {
-			if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-				logs := p.retrieveFailureLogs(ctx, k8sClient, job.Namespace, job.Name)
-				failErr := fmt.Errorf("job probe %q failed (reason: %s): %s\n%s",
-					job.Name, cond.Reason, cond.Message, logs)
-				span.RecordError(failErr)
-				return failErr
-			}
-		}
-	}
-
-	return nil
-}
 
 type ProbeJobState string
 
@@ -376,10 +243,6 @@ func RetrieveFailureLogs(ctx context.Context, k8sClient client.Client, kubeClien
 		return fmt.Sprintf("(error reading pod logs: %v)", err)
 	}
 	return buf.String()
-}
-
-func (p *JobProbe) retrieveFailureLogs(ctx context.Context, k8sClient client.Client, namespace, jobName string) string {
-	return RetrieveFailureLogs(ctx, k8sClient, p.KubeClient, namespace, jobName)
 }
 
 // sanitizeName lowercases and truncates a string so it is safe to embed in
