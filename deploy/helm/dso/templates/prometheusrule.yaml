@@ -1,0 +1,54 @@
+{{- if and .Values.metrics.serviceMonitor.enabled .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "dso.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dso.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ include "dso.fullname" . }}.rules
+      rules:
+        - alert: DsoCircuitBreakerTripped
+          expr: dso_circuit_breakers_tripped > 0
+          for: 1m
+          labels:
+            severity: critical
+            {{- with .Values.metrics.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "Dynamic Secret Operator circuit breaker tripped in namespace {{ "{{ $labels.namespace }}" }}"
+            description: "A DynamicSecretPolicy in namespace {{ "{{ $labels.namespace }}" }} has tripped its consecutive failure threshold and halted reconciliations."
+            runbook_url: "https://github.com/quantumsys-dev/dynamic-secret-operator/blob/main/docs/troubleshooting.md#circuit-breaker-tripped"
+
+        - alert: DsoRotationHighFailureRate
+          expr: rate(dso_rotations_failed[5m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+            {{- with .Values.metrics.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "High secret rotation probe failure rate in namespace {{ "{{ $labels.namespace }}" }}"
+            description: "Dynamic secret rotation canary validation probes are failing in namespace {{ "{{ $labels.namespace }}" }}."
+            runbook_url: "https://github.com/quantumsys-dev/dynamic-secret-operator/blob/main/docs/troubleshooting.md#validation-probe-failures"
+
+        - alert: DsoServiceBusDLQMessages
+          expr: dso_servicebus_messages_total{status="dlq"} > 0 or increase(dso_servicebus_messages_total{status="dlq"}[5m]) > 0
+          for: 1m
+          labels:
+            severity: warning
+            {{- with .Values.metrics.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            summary: "Azure Service Bus messages sent to Dead-Letter Queue (DLQ)"
+            description: "Dynamic Secret Operator encountered unprocessable Service Bus messages routed to DLQ."
+            runbook_url: "https://github.com/quantumsys-dev/dynamic-secret-operator/blob/main/docs/troubleshooting.md#service-bus-dlq"
+{{- end }}

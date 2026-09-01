@@ -75,6 +75,10 @@ metrics:
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
+  prometheusRule:
+    enabled: false
+    labels: {}
+    additionalRuleLabels: {}
 
 podAnnotations: {}
 podLabels: {}
@@ -82,3 +86,4 @@ podLabels: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
