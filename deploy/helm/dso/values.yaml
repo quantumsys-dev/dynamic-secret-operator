@@ -48,6 +48,8 @@ argoCD:
 controller:
   # Buffer capacity for the internal event channel bridging Azure Service Bus to the controller watch queue
   eventBufferSize: 1000
+  # Maximum number of concurrent reconciliation workers for high-throughput secret rollouts
+  maxConcurrentReconciles: 5
 
 # Pod Security Admission (PSA) Restricted compliant security contexts
 podSecurityContext:

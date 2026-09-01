@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,8 +37,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -93,6 +96,10 @@ type DynamicSecretPolicyReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
 	SecretFetcher azure.SecretFetcher
+	// KubeClient allows retrieving pod failure logs from Job probes
+	KubeClient kubernetes.Interface
+	// MaxConcurrentReconciles controls worker parallelism in controller-runtime
+	MaxConcurrentReconciles int
 	// EventsChannel allows external event streams (like Azure Service Bus) to trigger reconciliations
 	EventsChannel <-chan event.GenericEvent
 	// ProbeRunner allows executing or mocking validation probes
@@ -342,8 +349,9 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 
 	case ConditionTypeValidating:
-		// Execute validation probes against the canary workload
-		if err := r.runValidationProbes(ctx, policy); err != nil {
+		// Execute validation probes against the canary workload in a non-blocking manner
+		result, err := r.reconcileValidationProbes(ctx, policy)
+		if err != nil {
 			policy.Status.ConsecutiveFailures++
 			telemetry.RotationsFailed.WithLabelValues(policy.Namespace).Inc()
 			span.RecordError(err)
@@ -378,6 +386,11 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 			}
 			_ = r.updateStatus(ctx, policy, basePolicy, cond)
 			return ctrl.Result{}, err
+		}
+
+		if result.Requeue || result.RequeueAfter > 0 {
+			// Async Job probe is currently executing in cluster; release worker goroutine
+			return result, nil
 		}
 
 		// Validation succeeded: reset failure counter and promote
@@ -427,12 +440,12 @@ func (r *DynamicSecretPolicyReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 }
 
-// runValidationProbes iterates over configured probes and executes them sequentially against the canary workload.
-// Job-type probes are dispatched directly via probes.JobProbe.Execute (which needs the k8s client and
-// the owning policy); all other probe types go through the ProbeRunner/ProbeExecutor pipeline.
-func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) error {
+// reconcileValidationProbes executes configured validation probes against the canary workload in a non-blocking manner.
+// For Job probes, it creates or inspects ephemeral Jobs asynchronously, returning ctrl.Result{RequeueAfter: ...}
+// without holding the reconciler worker goroutine.
+func (r *DynamicSecretPolicyReconciler) reconcileValidationProbes(ctx context.Context, policy *secretv1alpha1.DynamicSecretPolicy) (ctrl.Result, error) {
 	if len(policy.Spec.ValidationProbes) == 0 {
-		return nil
+		return ctrl.Result{}, nil
 	}
 
 	targetName := policy.Spec.WorkloadSelector.Name
@@ -440,7 +453,7 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 
 	secret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: policy.Namespace}, secret); err != nil {
-		return fmt.Errorf("failed to fetch secret revision %q for probe validation: %w", secretName, err)
+		return ctrl.Result{}, fmt.Errorf("failed to fetch secret revision %q for probe validation: %w", secretName, err)
 	}
 
 	runner := r.ProbeRunner
@@ -451,38 +464,78 @@ func (r *DynamicSecretPolicyReconciler) runValidationProbes(ctx context.Context,
 				return err
 			}
 			if executor == nil {
-				// executor == nil signals a Job probe — dispatch through JobProbe directly.
-				return (&probes.JobProbe{}).Execute(pCtx, r.Client, policy, probe, secretData)
+				return fmt.Errorf("executor is nil for probe type %s", probe.Type)
 			}
 			return executor.Execute(pCtx, probe, secretData)
 		}
 	}
 
 	for _, probe := range policy.Spec.ValidationProbes {
-		var probeCtx context.Context
-		var probeCancel context.CancelFunc
-
 		if probe.Type == secretv1alpha1.ProbeTypeJob {
-			// Job probes manage their own timeout via spec.job.timeoutSeconds.
-			// Pass the parent ctx without an additional timeout layer here.
-			probeCtx, probeCancel = context.WithCancel(ctx)
-		} else {
-			timeout := 15 * time.Second
-			if probe.QueryTimeout > 0 {
-				timeout = time.Duration(probe.QueryTimeout) * time.Second
+			if probe.Job == nil {
+				return ctrl.Result{}, fmt.Errorf("job probe spec is required when probe type is Job")
 			}
-			probeCtx, probeCancel = context.WithTimeout(ctx, timeout)
+
+			jobName := probes.DeriveProbeJobName(policy.Name, secretName)
+			currentJob := &batchv1.Job{}
+			err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: policy.Namespace}, currentJob)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					// 1. Create the probe Job asynchronously
+					newJob := probes.BuildProbeJob(policy, probe.Job, secretName)
+					if refErr := controllerutil.SetControllerReference(policy, newJob, r.Scheme); refErr != nil {
+						return ctrl.Result{}, fmt.Errorf("failed to set controller reference on probe job: %w", refErr)
+					}
+					if createErr := r.Create(ctx, newJob); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
+						return ctrl.Result{}, fmt.Errorf("failed to create probe job %q: %w", jobName, createErr)
+					}
+					// Return non-blocking requeue (also watched via Owns(Job))
+					return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf("failed to inspect probe job %q: %w", jobName, err)
+			}
+
+			// 2. Evaluate active Job state without blocking
+			timeoutSecs := int32(60)
+			if probe.Job.TimeoutSeconds != nil && *probe.Job.TimeoutSeconds > 0 {
+				timeoutSecs = *probe.Job.TimeoutSeconds
+			}
+
+			state, evalErr := probes.EvaluateJobStatus(ctx, r.Client, r.KubeClient, currentJob, timeoutSecs)
+			switch state {
+			case probes.ProbeJobStateRunning:
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			case probes.ProbeJobStateSucceeded:
+				bg := metav1.DeletePropagationBackground
+				_ = r.Delete(ctx, currentJob, &client.DeleteOptions{PropagationPolicy: &bg})
+				telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(probe.Type)).Observe(time.Since(currentJob.CreationTimestamp.Time).Seconds())
+				// Continue to next probe
+				continue
+			case probes.ProbeJobStateFailed, probes.ProbeJobStateTimedOut:
+				bg := metav1.DeletePropagationBackground
+				_ = r.Delete(ctx, currentJob, &client.DeleteOptions{PropagationPolicy: &bg})
+				return ctrl.Result{}, evalErr
+			default:
+				return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+			}
 		}
 
+		// Synchronous network probes (HTTP, TLS, MySQL, PostgreSQL)
+		timeout := 15 * time.Second
+		if probe.QueryTimeout > 0 {
+			timeout = time.Duration(probe.QueryTimeout) * time.Second
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, timeout)
 		start := time.Now()
 		err := runner(probeCtx, probe, secret.Data)
 		probeCancel()
 		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(probe.Type)).Observe(time.Since(start).Seconds())
 		if err != nil {
-			return err
+			return ctrl.Result{}, err
 		}
 	}
-	return nil
+
+	return ctrl.Result{}, nil
 }
 
 // promoteTargetWorkload patches the production target workload (Deployment, StatefulSet, DaemonSet)
@@ -682,7 +735,14 @@ func (r *DynamicSecretPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
-		Owns(&appsv1.DaemonSet{})
+		Owns(&appsv1.DaemonSet{}).
+		Owns(&batchv1.Job{})
+
+	if r.MaxConcurrentReconciles > 0 {
+		builder = builder.WithOptions(controller.Options{
+			MaxConcurrentReconciles: r.MaxConcurrentReconciles,
+		})
+	}
 
 	// Check if optional Argo Rollouts CRD is actually installed in the cluster via API discovery
 	if discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig()); err == nil {

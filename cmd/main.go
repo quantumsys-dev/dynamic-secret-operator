@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -88,6 +89,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var eventBufferSize int
+	var maxConcurrentReconciles int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -99,6 +101,8 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics server")
 	flag.IntVar(&eventBufferSize, "event-buffer-size", 1000,
 		"The buffer capacity of the internal event channel bridging Azure Service Bus to the controller.")
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 5,
+		"The maximum number of concurrent Reconciles which can be run.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -193,11 +197,18 @@ func main() {
 	}
 	eventsChannel := make(chan event.GenericEvent, eventBufferSize)
 
+	kubeClient, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes clientset for log retrieval")
+	}
+
 	if err = (&controller.DynamicSecretPolicyReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		SecretFetcher: secretFetcher,
-		EventsChannel: eventsChannel,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		SecretFetcher:           secretFetcher,
+		KubeClient:              kubeClient,
+		MaxConcurrentReconciles: maxConcurrentReconciles,
+		EventsChannel:           eventsChannel,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamicSecretPolicy")
 		os.Exit(1)

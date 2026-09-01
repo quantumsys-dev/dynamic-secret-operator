@@ -27,6 +27,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -811,7 +812,7 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 	t.Run("returns nil immediately when no probes configured", func(t *testing.T) {
 		policy := &secretv1alpha1.DynamicSecretPolicy{}
 		r := &DynamicSecretPolicyReconciler{}
-		if err := r.runValidationProbes(context.Background(), policy); err != nil {
+		if _, err := r.reconcileValidationProbes(context.Background(), policy); err != nil {
 			t.Fatalf("expected nil error for empty probes")
 		}
 	})
@@ -855,7 +856,7 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 			Client: c,
 			Scheme: scheme,
 		}
-		err := r.runValidationProbes(context.Background(), policy)
+		_, err := r.reconcileValidationProbes(context.Background(), policy)
 		if err == nil {
 			t.Fatalf("expected error from empty probe endpoint")
 		}
@@ -915,9 +916,12 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 			},
 		}
 
-		err := r.runValidationProbes(context.Background(), policy)
+		res, err := r.reconcileValidationProbes(context.Background(), policy)
 		if err != nil {
 			t.Fatalf("unexpected error running validation probes: %v", err)
+		}
+		if res.Requeue || res.RequeueAfter > 0 {
+			t.Errorf("expected synchronous probe to complete without requeue")
 		}
 
 		if receivedNil {
@@ -925,6 +929,84 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 		}
 		if capturedValue != "super-secret-password" {
 			t.Errorf("expected 'super-secret-password' during probe execution, got %q", capturedValue)
+		}
+	})
+
+	t.Run("creates Job asynchronously and returns RequeueAfter without blocking", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "job-probe-policy",
+				Namespace: "default",
+			},
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{
+					Name: "worker-app",
+				},
+				VaultRef: secretv1alpha1.VaultReference{
+					ObjectName: "api-key",
+				},
+				ValidationProbes: []secretv1alpha1.ValidationProbe{
+					{
+						Type: secretv1alpha1.ProbeTypeJob,
+						Job: &secretv1alpha1.JobProbeSpec{
+							JobTemplate: batchv1.JobTemplateSpec{
+								Spec: batchv1.JobSpec{
+									Template: corev1.PodTemplateSpec{
+										Spec: corev1.PodSpec{
+											RestartPolicy: corev1.RestartPolicyNever,
+											Containers: []corev1.Container{
+												{
+													Name:  "probe",
+													Image: "busybox:latest",
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				DesiredRevision: "rev-job-789",
+			},
+		}
+
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "worker-app-api-key-rev-rev-job-789",
+				Namespace: "default",
+			},
+			Data: map[string][]byte{"api-key": []byte("tok123")},
+		}
+
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(sec).
+			Build()
+
+		r := &DynamicSecretPolicyReconciler{
+			Client: c,
+			Scheme: scheme,
+		}
+
+		// First call: creates Job asynchronously and returns non-blocking RequeueAfter
+		res, err := r.reconcileValidationProbes(context.Background(), policy)
+		if err != nil {
+			t.Fatalf("unexpected error creating job probe: %v", err)
+		}
+		if res.RequeueAfter != 2*time.Second {
+			t.Errorf("expected RequeueAfter 2s for async job probe, got %v", res.RequeueAfter)
+		}
+
+		// Verify Job was created in fake client
+		jobList := &batchv1.JobList{}
+		if err := c.List(context.Background(), jobList, client.InNamespace("default")); err != nil {
+			t.Fatalf("failed to list jobs: %v", err)
+		}
+		if len(jobList.Items) != 1 {
+			t.Fatalf("expected 1 job created, found %d", len(jobList.Items))
 		}
 	})
 }

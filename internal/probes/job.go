@@ -176,10 +176,32 @@ func (p *JobProbe) Execute(
 	return nil
 }
 
-// buildProbeJob constructs a batchv1.Job from the user-supplied JobTemplateSpec,
+type ProbeJobState string
+
+const (
+	// ProbeJobStateRunning indicates the probe Job is actively executing in the cluster.
+	ProbeJobStateRunning ProbeJobState = "Running"
+	// ProbeJobStateSucceeded indicates the probe Job completed with exit code 0.
+	ProbeJobStateSucceeded ProbeJobState = "Succeeded"
+	// ProbeJobStateFailed indicates the probe Job encountered an error or failed container.
+	ProbeJobStateFailed ProbeJobState = "Failed"
+	// ProbeJobStateTimedOut indicates the probe Job exceeded its configured timeout.
+	ProbeJobStateTimedOut ProbeJobState = "TimedOut"
+)
+
+// DeriveProbeJobName calculates the deterministic name for an ephemeral probe Job.
+func DeriveProbeJobName(policyName, revisionSecretName string) string {
+	jobName := fmt.Sprintf("dso-probe-%s-%s", policyName, sanitizeName(revisionSecretName))
+	if len(jobName) > 63 {
+		jobName = jobName[:63]
+	}
+	return jobName
+}
+
+// BuildProbeJob constructs a batchv1.Job from the user-supplied JobTemplateSpec,
 // automatically injects the DSO_REVISION_SECRET_NAME environment variable into all containers,
 // and attaches an OwnerReference to the policy so garbage collection is policy-scoped.
-func buildProbeJob(
+func BuildProbeJob(
 	policy *secretv1alpha1.DynamicSecretPolicy,
 	spec *secretv1alpha1.JobProbeSpec,
 	revisionSecretName string,
@@ -191,10 +213,7 @@ func buildProbeJob(
 	injectRevisionSecretEnv(&tmpl.Spec.Template.Spec, revisionSecretName)
 
 	// Generate a deterministic but unique Job name scoped to the policy + revision.
-	jobName := fmt.Sprintf("dso-probe-%s-%s", policy.Name, sanitizeName(revisionSecretName))
-	if len(jobName) > 63 {
-		jobName = jobName[:63]
-	}
+	jobName := DeriveProbeJobName(policy.Name, revisionSecretName)
 
 	// Ensure backoffLimit is 0 — probe Jobs must fail fast; no retries.
 	zero := int32(0)
@@ -222,6 +241,51 @@ func buildProbeJob(
 		},
 		Spec: tmpl.Spec,
 	}
+}
+
+// EvaluateJobStatus inspects the status conditions and timeout deadline of an active
+// probe Job without blocking the reconciler thread.
+func EvaluateJobStatus(
+	ctx context.Context,
+	k8sClient client.Client,
+	kubeClient kubernetes.Interface,
+	job *batchv1.Job,
+	timeoutSeconds int32,
+) (ProbeJobState, error) {
+	if job == nil {
+		return ProbeJobStateFailed, fmt.Errorf("probe job is nil")
+	}
+
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+			return ProbeJobStateSucceeded, nil
+		}
+		if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+			logs := RetrieveFailureLogs(ctx, k8sClient, kubeClient, job.Namespace, job.Name)
+			return ProbeJobStateFailed, fmt.Errorf("job probe %q failed (reason: %s): %s\n%s",
+				job.Name, cond.Reason, cond.Message, logs)
+		}
+	}
+
+	if timeoutSeconds > 0 && !job.CreationTimestamp.IsZero() {
+		deadline := job.CreationTimestamp.Add(time.Duration(timeoutSeconds) * time.Second)
+		if time.Now().After(deadline) {
+			logs := RetrieveFailureLogs(ctx, k8sClient, kubeClient, job.Namespace, job.Name)
+			return ProbeJobStateTimedOut, fmt.Errorf("job probe %q timed out after %ds waiting for completion\n%s",
+				job.Name, timeoutSeconds, logs)
+		}
+	}
+
+	return ProbeJobStateRunning, nil
+}
+
+// buildProbeJob is retained as an internal alias for BuildProbeJob.
+func buildProbeJob(
+	policy *secretv1alpha1.DynamicSecretPolicy,
+	spec *secretv1alpha1.JobProbeSpec,
+	revisionSecretName string,
+) *batchv1.Job {
+	return BuildProbeJob(policy, spec, revisionSecretName)
 }
 
 // injectRevisionSecretEnv injects or updates the DSO_REVISION_SECRET_NAME environment
@@ -255,11 +319,11 @@ func setOrAppendEnv(containers []corev1.Container, key, value string) []corev1.C
 	return containers
 }
 
-// retrieveFailureLogs attempts to fetch the tail of logs from the first failed
+// RetrieveFailureLogs attempts to fetch the tail of logs from the first failed
 // pod created by the Job. Returns an empty string on any error so failure
 // diagnostics are always best-effort and never block the probe result.
-func (p *JobProbe) retrieveFailureLogs(ctx context.Context, k8sClient client.Client, namespace, jobName string) string {
-	if p.KubeClient == nil {
+func RetrieveFailureLogs(ctx context.Context, k8sClient client.Client, kubeClient kubernetes.Interface, namespace, jobName string) string {
+	if kubeClient == nil {
 		return "(log retrieval unavailable: kubernetes client not configured)"
 	}
 
@@ -291,11 +355,11 @@ func (p *JobProbe) retrieveFailureLogs(ctx context.Context, k8sClient client.Cli
 	}
 
 	limit := int64(maxFailureLogBytes)
-	req := p.KubeClient.CoreV1().Pods(namespace).GetLogs(targetPod.Name, &corev1.PodLogOptions{
-		Container:    containerName,
-		LimitBytes:   &limit,
-		Previous:     false,
-		Timestamps:   false,
+	req := kubeClient.CoreV1().Pods(namespace).GetLogs(targetPod.Name, &corev1.PodLogOptions{
+		Container:  containerName,
+		LimitBytes: &limit,
+		Previous:   false,
+		Timestamps: false,
 	})
 
 	logCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -312,6 +376,10 @@ func (p *JobProbe) retrieveFailureLogs(ctx context.Context, k8sClient client.Cli
 		return fmt.Sprintf("(error reading pod logs: %v)", err)
 	}
 	return buf.String()
+}
+
+func (p *JobProbe) retrieveFailureLogs(ctx context.Context, k8sClient client.Client, namespace, jobName string) string {
+	return RetrieveFailureLogs(ctx, k8sClient, p.KubeClient, namespace, jobName)
 }
 
 // sanitizeName lowercases and truncates a string so it is safe to embed in
