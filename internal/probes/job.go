@@ -40,10 +40,10 @@ import (
 )
 
 const (
-	// RevisionSecretNamePlaceholder is substituted with the materialized Kubernetes Secret
-	// name before the ephemeral probe Job is created. Users embed this token anywhere
-	// inside their JobTemplate (env values, args, command).
-	RevisionSecretNamePlaceholder = "{{REVISION_SECRET_NAME}}"
+	// EnvRevisionSecretName is the standard environment variable injected by the operator
+	// into all initContainers and containers of the ephemeral probe Job.
+	// Users reference $(DSO_REVISION_SECRET_NAME) in commands, args, or env definitions.
+	EnvRevisionSecretName = "DSO_REVISION_SECRET_NAME"
 
 	// jobPollInterval controls how frequently the operator polls for Job completion.
 	jobPollInterval = 3 * time.Second
@@ -53,9 +53,9 @@ const (
 )
 
 // JobProbe implements ProbeExecutor by launching an ephemeral batch/v1.Job in the
-// target namespace. It substitutes the revision secret name placeholder, polls until
-// the Job reaches a terminal state, captures failure logs for diagnostics, and
-// guarantees cleanup regardless of outcome.
+// target namespace. It automatically injects the DSO_REVISION_SECRET_NAME environment
+// variable into all containers, polls until the Job reaches a terminal state, captures
+// failure logs for diagnostics, and guarantees cleanup regardless of outcome.
 type JobProbe struct {
 	// KubeClient is an optional kubernetes.Interface used to retrieve pod logs.
 	// If nil, log retrieval is skipped (only job status is reported).
@@ -73,7 +73,7 @@ func (p *JobProbe) Execute(
 	k8sClient client.Client,
 	policy *secretv1alpha1.DynamicSecretPolicy,
 	config secretv1alpha1.ValidationProbe,
-	_ map[string][]byte, // secretData is not needed; secret is injected via JobTemplate env refs
+	_ map[string][]byte, // secretData is not needed; secret name is injected via DSO_REVISION_SECRET_NAME env var
 ) error {
 	ctx, span := telemetry.Tracer.Start(ctx, "ExecuteJobProbe",
 		trace.WithAttributes(
@@ -177,7 +177,7 @@ func (p *JobProbe) Execute(
 }
 
 // buildProbeJob constructs a batchv1.Job from the user-supplied JobTemplateSpec,
-// substitutes the revision secret placeholder in all container env values and args,
+// automatically injects the DSO_REVISION_SECRET_NAME environment variable into all containers,
 // and attaches an OwnerReference to the policy so garbage collection is policy-scoped.
 func buildProbeJob(
 	policy *secretv1alpha1.DynamicSecretPolicy,
@@ -187,8 +187,8 @@ func buildProbeJob(
 	// Copy the template to avoid mutating the spec.
 	tmpl := spec.JobTemplate.DeepCopy()
 
-	// Perform placeholder substitution throughout all container definitions.
-	substituteRevisionName(&tmpl.Spec, revisionSecretName)
+	// Automatically inject the DSO_REVISION_SECRET_NAME environment variable into all containers.
+	injectRevisionSecretEnv(&tmpl.Spec.Template.Spec, revisionSecretName)
 
 	// Generate a deterministic but unique Job name scoped to the policy + revision.
 	jobName := fmt.Sprintf("dso-probe-%s-%s", policy.Name, sanitizeName(revisionSecretName))
@@ -224,61 +224,35 @@ func buildProbeJob(
 	}
 }
 
-// substituteRevisionName walks all init and regular containers in the PodSpec,
-// replacing RevisionSecretNamePlaceholder in env values, valueFrom secretKeyRefs,
-// envFrom secretRefs, command, args, and volumes.
-func substituteRevisionName(spec *batchv1.JobSpec, revisionSecretName string) {
+// injectRevisionSecretEnv injects or updates the DSO_REVISION_SECRET_NAME environment
+// variable in all initContainers and containers of the pod specification.
+func injectRevisionSecretEnv(spec *corev1.PodSpec, revisionSecretName string) {
 	if spec == nil {
 		return
 	}
-	replaceInContainers(spec.Template.Spec.InitContainers, revisionSecretName)
-	replaceInContainers(spec.Template.Spec.Containers, revisionSecretName)
-
-	for i := range spec.Template.Spec.Volumes {
-		v := &spec.Template.Spec.Volumes[i]
-		if v.Secret != nil {
-			v.Secret.SecretName = strings.ReplaceAll(v.Secret.SecretName, RevisionSecretNamePlaceholder, revisionSecretName)
-		}
-		if v.Projected != nil {
-			for j := range v.Projected.Sources {
-				src := &v.Projected.Sources[j]
-				if src.Secret != nil {
-					src.Secret.Name = strings.ReplaceAll(src.Secret.Name, RevisionSecretNamePlaceholder, revisionSecretName)
-				}
-			}
-		}
-	}
+	spec.InitContainers = setOrAppendEnv(spec.InitContainers, EnvRevisionSecretName, revisionSecretName)
+	spec.Containers = setOrAppendEnv(spec.Containers, EnvRevisionSecretName, revisionSecretName)
 }
 
-func replaceInContainers(containers []corev1.Container, revisionSecretName string) {
+func setOrAppendEnv(containers []corev1.Container, key, value string) []corev1.Container {
 	for i := range containers {
-		c := &containers[i]
-		for j := range c.Env {
-			c.Env[j].Value = strings.ReplaceAll(c.Env[j].Value, RevisionSecretNamePlaceholder, revisionSecretName)
-			if c.Env[j].ValueFrom != nil && c.Env[j].ValueFrom.SecretKeyRef != nil {
-				c.Env[j].ValueFrom.SecretKeyRef.Name = strings.ReplaceAll(
-					c.Env[j].ValueFrom.SecretKeyRef.Name,
-					RevisionSecretNamePlaceholder,
-					revisionSecretName,
-				)
+		found := false
+		for j := range containers[i].Env {
+			if containers[i].Env[j].Name == key {
+				containers[i].Env[j].Value = value
+				containers[i].Env[j].ValueFrom = nil
+				found = true
+				break
 			}
 		}
-		for j := range c.EnvFrom {
-			if c.EnvFrom[j].SecretRef != nil {
-				c.EnvFrom[j].SecretRef.Name = strings.ReplaceAll(
-					c.EnvFrom[j].SecretRef.Name,
-					RevisionSecretNamePlaceholder,
-					revisionSecretName,
-				)
-			}
-		}
-		for j := range c.Command {
-			c.Command[j] = strings.ReplaceAll(c.Command[j], RevisionSecretNamePlaceholder, revisionSecretName)
-		}
-		for j := range c.Args {
-			c.Args[j] = strings.ReplaceAll(c.Args[j], RevisionSecretNamePlaceholder, revisionSecretName)
+		if !found {
+			containers[i].Env = append(containers[i].Env, corev1.EnvVar{
+				Name:  key,
+				Value: value,
+			})
 		}
 	}
+	return containers
 }
 
 // retrieveFailureLogs attempts to fetch the tail of logs from the first failed
