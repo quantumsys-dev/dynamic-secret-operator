@@ -2,8 +2,8 @@ apiVersion: v2
 name: dynamic-secret-operator
 description: Production-grade Kubernetes operator for automated zero-downtime secret rotations with progressive canary delivery
 type: application
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.2.0
+appVersion: "0.2.0"
 icon: https://raw.githubusercontent.com/quantumsys-dev/dynamic-secret-operator/main/docs/assets/logo.png
 keywords:
   - dynamic-secrets
