@@ -118,7 +118,7 @@ groups:
   - name: dso-alerts
     rules:
       - alert: DSOCircuitBreakerTripped
-        expr: dso_circuit_breakers_tripped_total > 0
+        expr: increase(dso_circuit_breakers_tripped_total[5m]) > 0
         for: 5m
         labels:
           severity: critical

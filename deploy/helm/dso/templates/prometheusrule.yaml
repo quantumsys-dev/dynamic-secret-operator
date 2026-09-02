@@ -14,7 +14,7 @@ spec:
     - name: {{ include "dso.fullname" . }}.rules
       rules:
         - alert: DsoCircuitBreakerTripped
-          expr: dso_circuit_breakers_tripped_total > 0
+          expr: increase(dso_circuit_breakers_tripped_total[5m]) > 0
           for: 1m
           labels:
             severity: critical
@@ -40,7 +40,7 @@ spec:
             runbook_url: "https://github.com/quantumsys-dev/dynamic-secret-operator/blob/main/docs/troubleshooting.md#validation-probe-failures"
 
         - alert: DsoServiceBusDLQMessages
-          expr: dso_servicebus_messages_total{status="dlq"} > 0 or increase(dso_servicebus_messages_total{status="dlq"}[5m]) > 0
+          expr: increase(dso_servicebus_messages_total{status="dlq"}[5m]) > 0
           for: 1m
           labels:
             severity: warning
