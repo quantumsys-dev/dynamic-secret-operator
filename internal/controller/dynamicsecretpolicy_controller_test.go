@@ -2608,5 +2608,3 @@ func TestFindPoliciesForRollout(t *testing.T) {
 		t.Errorf("expected 0 mapped requests for a non-Rollout object, got %d", len(reqs))
 	}
 }
-
-

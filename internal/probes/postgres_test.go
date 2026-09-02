@@ -200,4 +200,3 @@ func TestPostgresProbe_Execute(t *testing.T) {
 		}
 	})
 }
-

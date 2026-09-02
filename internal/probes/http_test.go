@@ -149,5 +149,3 @@ func TestHTTPProbe_Execute(t *testing.T) {
 		}
 	})
 }
-
-

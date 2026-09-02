@@ -18,7 +18,7 @@ package probes
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- Legacy thumbprint calculation
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/pem"
@@ -78,7 +78,7 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
-			InsecureSkipVerify: hasPinnedSecret,
+			InsecureSkipVerify: hasPinnedSecret, // #nosec G402 -- Custom pinned certificate validation
 		},
 	}
 
@@ -135,7 +135,7 @@ func (p *TLSProbe) Execute(ctx context.Context, config secretv1alpha1.Validation
 		if expectedThumbprintBytes, exists := secretData["thumbprint"]; exists && len(expectedThumbprintBytes) > 0 {
 			expected := cleanHex(string(expectedThumbprintBytes))
 			actualSHA256 := fmt.Sprintf("%x", sha256.Sum256(leafCert.Raw))
-			actualSHA1 := fmt.Sprintf("%x", sha1.Sum(leafCert.Raw))
+			actualSHA1 := fmt.Sprintf("%x", sha1.Sum(leafCert.Raw)) // #nosec G401 -- Legacy thumbprint calculation
 
 			if expected != actualSHA256 && expected != actualSHA1 {
 				mismatchErr := fmt.Errorf("tls certificate thumbprint mismatch against expected secret value")

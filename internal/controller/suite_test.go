@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -129,8 +128,3 @@ var _ = AfterSuite(func() {
 		_ = testEnv.Stop()
 	}
 })
-
-const (
-	timeout  = time.Second * 10
-	interval = time.Millisecond * 250
-)

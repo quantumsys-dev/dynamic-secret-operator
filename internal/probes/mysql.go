@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/XSAM/otelsql"
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/go-sql-driver/mysql" // Register mysql driver for database/sql
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"

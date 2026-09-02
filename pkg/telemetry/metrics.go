@@ -92,4 +92,3 @@ func init() {
 		KeyVaultFetchLatency,
 	)
 }
-

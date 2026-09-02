@@ -78,7 +78,7 @@ func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.Validatio
 
 		baseTransport := &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: hasPinnedSecret,
+				InsecureSkipVerify: hasPinnedSecret, // #nosec G402 -- Custom pinned secret validation
 			},
 			ResponseHeaderTimeout: 10 * time.Second,
 		}
@@ -103,7 +103,9 @@ func (p *HTTPProbe) Execute(ctx context.Context, config secretv1alpha1.Validatio
 		span.RecordError(doErr)
 		return doErr
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
 		statusErr := fmt.Errorf("http probe received unsuccessful status code %d from %q", resp.StatusCode, config.Endpoint)

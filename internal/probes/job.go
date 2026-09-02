@@ -44,6 +44,7 @@ const (
 	maxFailureLogBytes = 4096
 )
 
+// ProbeJobState represents the lifecycle status of an ephemeral validation probe Job.
 type ProbeJobState string
 
 const (
@@ -241,7 +242,9 @@ func RetrieveFailureLogs(ctx context.Context, k8sClient client.Client, kubeClien
 	if err != nil {
 		return fmt.Sprintf("(failed to stream pod logs: %v)", err)
 	}
-	defer rc.Close()
+	defer func() {
+		_ = rc.Close()
+	}()
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, io.LimitReader(rc, maxFailureLogBytes)); err != nil {

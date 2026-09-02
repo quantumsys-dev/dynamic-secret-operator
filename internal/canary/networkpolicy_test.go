@@ -227,4 +227,3 @@ func TestBuildNetworkPolicy(t *testing.T) {
 		}
 	})
 }
-
