@@ -21,7 +21,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -89,12 +88,10 @@ func (p *MySQLProbe) Execute(ctx context.Context, config secretv1alpha1.Validati
 		return portErr
 	}
 
-	escapedUser := url.QueryEscape(username)
-	escapedPassword := url.QueryEscape(password)
-	escapedDBName := url.QueryEscape(dbname)
-
+	// MySQL's go-sql-driver requires raw strings and parses separators natively.
+	// URL-encoding credentials here breaks authentication for passwords containing special characters.
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=5s",
-		escapedUser, escapedPassword, host, port, escapedDBName)
+		username, password, host, port, dbname)
 
 	connector := p.DBConnector
 	if connector == nil {

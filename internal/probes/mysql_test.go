@@ -125,7 +125,7 @@ func TestMySQLProbe_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("correctly URL-encodes special characters in credentials", func(t *testing.T) {
+	t.Run("passes credentials securely without incorrect URL-encoding", func(t *testing.T) {
 		var capturedDSN string
 		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 		if err != nil {
@@ -158,13 +158,13 @@ func TestMySQLProbe_Execute(t *testing.T) {
 			t.Fatalf("expected successful probe execution with special characters, got: %v", err)
 		}
 
-		expectedUser := "admin%40tenant%3A1"
-		expectedPass := "p%40ss%3Aw%2Ford%3F%23123"
-		expectedDB := "app%2Fdb"
+		expectedUser := "admin@tenant:1"
+		expectedPass := "p@ss:w/ord?#123"
+		expectedDB := "app/db"
 		expectedPrefix := expectedUser + ":" + expectedPass + "@tcp(mysql-db:3306)/" + expectedDB
 
 		if !strings.HasPrefix(capturedDSN, expectedPrefix) {
-			t.Errorf("expected DSN to contain encoded credentials prefix %q, got %q", expectedPrefix, capturedDSN)
+			t.Errorf("expected DSN to contain raw credentials prefix %q, got %q", expectedPrefix, capturedDSN)
 		}
 	})
 
