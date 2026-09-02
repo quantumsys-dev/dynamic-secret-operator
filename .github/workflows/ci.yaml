@@ -19,13 +19,13 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version: '1.24'
           cache: true
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.60.3
+          version: v1.64.5
           args: --timeout=5m
 
   test:
@@ -38,16 +38,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version: '1.24'
           cache: true
 
-      - name: Setup Envtest
-        uses: kubernetes-sigs/controller-runtime/envtest-setup-action@v1.2.0
-        with:
-          version: '1.31.x'
+      - name: Install setup-envtest and download k8s control-plane binaries
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.19
+          K8S_ASSETS_DIR="$(setup-envtest use 1.31.0 -p path)"
+          echo "KUBEBUILDER_ASSETS=${K8S_ASSETS_DIR}" >> $GITHUB_ENV
 
       - name: Run Tests
-        # The envtest action automatically exports KUBEBUILDER_ASSETS
         run: go test -v -race -count=1 ./api/... ./internal/... ./pkg/...
 
   e2e:
@@ -61,7 +61,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
+          go-version: '1.24'
           cache: true
 
       - name: Create Kind Cluster
