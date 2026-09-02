@@ -35,38 +35,53 @@ DSO shifts secret rotation from a risky "push and pray" operation to a safe, eve
 
 ```mermaid
 flowchart TD
-    subgraph Azure Cloud ["☁️ Azure Cloud (Zero-Trust)"]
-        AKV["🔑 Key Vault<br/>(Secrets & Certs)"]
-        AEG["⚡ Event Grid<br/>(Rotation Subscription)"]
-        ASB["📬 Service Bus Queue<br/>(Peek-Lock Delivery)"]
-        AKV -->|"SecretNewVersionCreated"| AEG
-        AEG -->|"Push Event"| ASB
+    subgraph MultiCloud ["☁️ Multi-Cloud Secret Backends"]
+        direction TB
+        subgraph ModeB ["Mode 1: Universal Multi-Cloud Ingestion (ESO)"]
+            VAULT_ALL["AWS Secrets Manager / GCP Secret Manager / Vault / Key Vault"]
+            ESO["External Secrets Operator<br/>(SecretStore + ExternalSecret)"]
+            SYNC_SEC["Intermediate Secret<br/>(dso.quantumsys.dev/managed: watch)"]
+            VAULT_ALL -->|"Sync"| ESO
+            ESO -->|"Writes"| SYNC_SEC
+        end
+
+        subgraph ModeA ["Mode 2: Event-Driven Direct Ingestion (Azure)"]
+            AKV["Azure Key Vault<br/>(Secrets & Certs)"]
+            AEG["Event Grid<br/>(Rotation Subscription)"]
+            ASB["Service Bus Queue<br/>(Peek-Lock Delivery)"]
+            AKV -->|"SecretNewVersionCreated"| AEG
+            AEG -->|"Push Event"| ASB
+        end
     end
 
-    subgraph K8s Cluster ["☸️ Kubernetes Cluster"]
-        subgraph DSO Namespace ["dso-system"]
-            DSO["⚙️ Dynamic Secret Operator<br/>(Azure Workload Identity)"]
+    subgraph K8sCluster ["☸️ Kubernetes Cluster Architecture"]
+        subgraph DSO_System ["dso-system Namespace"]
+            DSO["⚙️ Dynamic Secret Operator<br/>(Pluggable Source Providers)"]
             OTEL["📊 OpenTelemetry & Prometheus<br/>(:8080/metrics)"]
         end
 
-        subgraph App Namespace ["Application Namespace"]
-            CRD["📄 DynamicSecretPolicy<br/>(CRD Instance)"]
-            SEC_NEW["🔒 Immutable SecretRevision<br/>(app-rev-f5a6b7)"]
-            CANARY["🐤 Canary Pod & NetworkPolicy<br/>(Network-Isolated Testing)"]
-            PROBES["🩺 Validation Probes<br/>(HTTP / TLS / PostgreSQL / MySQL / Job)"]
-            PROD["🚀 Production Workload<br/>(Zero-Downtime Rollover)"]
+        subgraph AppNamespace ["Target Application Namespace"]
+            DSP["📄 DynamicSecretPolicy<br/>(Declarative Strategy & Probes)"]
+            REV_SEC["🔒 Immutable SecretRevision<br/>(app-rev-a1b2c3d4)"]
+            CANARY["🐤 Ephemeral Canary Pod<br/>(+ NetPol / Cilium eBPF Sandbox)"]
+            PROBES["🩺 Synthetic Validation Probes<br/>(HTTP / TLS / PG / MySQL / Job)"]
+            PROD["🚀 Production Workload<br/>(Deployment / StatefulSet / Rollout)"]
         end
     end
 
-    ASB -.->|"1. Outbound Pull (NACK on Backpressure)"| DSO
-    DSO -->|"2. Fetch via Workload Identity"| AKV
-    CRD -->|"Defines Target & Probes"| DSO
-    DSO -->|"3. Materialize Immutable Secret"| SEC
-    DSO -->|"4. Provision Isolated Canary"| CANARY
-    CANARY -->|"Mounts"| SEC
-    DSO -->|"5. Execute Health Probes"| PROBES
-    PROBES -->|"Validate"| CANARY
-    DSO -->|"6. Progressive Patch & Promote"| PROD
+    %% Ingestion Flows
+    SYNC_SEC -.->|"spec.source.k8sSecret (Watch)"| DSO
+    ASB -.->|"spec.source.azureKeyVault (Peek-Lock)"| DSO
+    DSO -.->|"Fetch Payload via Workload Identity"| AKV
+
+    %% Progressive Delivery State Machine
+    DSP -->|"1. Reconcile Policy"| DSO
+    DSO -->|"2. Materialize Revision"| REV_SEC
+    DSO -->|"3. Provision Isolated Sandbox"| CANARY
+    CANARY -->|"Mounts"| REV_SEC
+    DSO -->|"4. Execute Synthetic Probes"| PROBES
+    PROBES -->|"Validate Real Traffic"| CANARY
+    DSO -->|"5. Zero-Downtime Rollover & GitOps Patch"| PROD
 ```
 
 ---
