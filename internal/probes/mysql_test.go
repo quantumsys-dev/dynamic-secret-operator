@@ -201,4 +201,3 @@ func TestMySQLProbe_Execute(t *testing.T) {
 		}
 	})
 }
-

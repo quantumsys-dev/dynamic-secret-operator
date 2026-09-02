@@ -37,4 +37,3 @@ func init() {
 		propagation.Baggage{},
 	))
 }
-

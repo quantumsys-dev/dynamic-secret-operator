@@ -553,4 +553,3 @@ func TestMutatePodTemplateSpec_ImplicitEnv_PreservesUnrelatedSecretsWithSameKey(
 			redisEnv.ValueFrom.SecretKeyRef.Name)
 	}
 }
-

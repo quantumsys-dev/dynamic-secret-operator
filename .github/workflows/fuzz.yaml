@@ -1,5 +1,5 @@
 name: Continuous Fuzzing
----
+
 on:
   schedule:
     - cron: '0 2 * * *' # Run nightly at 02:00 UTC

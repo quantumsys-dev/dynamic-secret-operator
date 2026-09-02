@@ -167,7 +167,6 @@ func main() {
 		eventIngester = sbListener
 	}
 
-
 	// A single Kubernetes label selector can only AND requirements together, so secrets DSO
 	// owns (ManagedValueTrue) and externally owned source secrets DSO merely watches
 	// (ManagedValueWatch, e.g. an ESO sync target) must share the same label key with an

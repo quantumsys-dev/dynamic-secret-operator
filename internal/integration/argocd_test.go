@@ -313,4 +313,3 @@ func TestReconcileArgoCDIgnoreDifferences_PreservesCustomUserEntries(t *testing.
 		t.Errorf("expected Deployment entry correctly added with 1 JSON pointer and 2 JQ path expressions, got %+v", dsoEntry)
 	}
 }
-

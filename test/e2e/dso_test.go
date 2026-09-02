@@ -27,6 +27,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	"sigs.k8s.io/e2e-framework/klient/wait"
 	"sigs.k8s.io/e2e-framework/klient/wait/conditions"
@@ -125,6 +126,26 @@ func TestHappyPath_Promotion(t *testing.T) {
 				t.Logf("warning: deployment availability check timed out: %v", err)
 			}
 
+			// 3.1 Create Target Workload Service so in-cluster validation probe resolves
+			targetSvc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      targetDeployName,
+					Namespace: testNs,
+				},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"app": targetDeployName},
+					Ports: []corev1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.FromInt(80),
+						},
+					},
+				},
+			}
+			if err := r.Create(ctx, targetSvc); err != nil {
+				t.Fatalf("failed creating target service: %v", err)
+			}
+
 			// 4. Apply DynamicSecretPolicy pointing to target workload
 			policy := &secretv1alpha1.DynamicSecretPolicy{
 				ObjectMeta: metav1.ObjectMeta{
@@ -144,7 +165,7 @@ func TestHappyPath_Promotion(t *testing.T) {
 					ValidationProbes: []secretv1alpha1.ValidationProbe{
 						{
 							Type:         secretv1alpha1.ProbeTypeHTTP,
-							Endpoint:     "http://localhost:80/",
+							Endpoint:     fmt.Sprintf("http://%s.%s.svc.cluster.local:80/", targetDeployName, testNs),
 							QueryTimeout: 5,
 						},
 					},

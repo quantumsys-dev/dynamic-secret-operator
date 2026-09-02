@@ -247,4 +247,3 @@ func extractTargetCIDRAndPort(ctx context.Context, endpoint string, probeType se
 	}
 	return cidrs, ports
 }
-

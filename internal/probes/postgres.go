@@ -28,7 +28,7 @@ import (
 	"time"
 
 	"github.com/XSAM/otelsql"
-	_ "github.com/lib/pq"
+	_ "github.com/lib/pq" // Register postgres driver for database/sql
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -160,7 +160,9 @@ func (p *PostgresProbe) Execute(ctx context.Context, config secretv1alpha1.Valid
 			fallbackDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/postgres?sslmode=disable&connect_timeout=%d",
 				escapedUser, escapedPassword, host, port, 5)
 			if fallbackDB, fErr := connector("postgres", fallbackDSN); fErr == nil {
-				defer fallbackDB.Close()
+				defer func() {
+					_ = fallbackDB.Close()
+				}()
 				if pErr := fallbackDB.PingContext(ctx); pErr == nil {
 					return nil
 				}
