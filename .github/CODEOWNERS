@@ -1,0 +1,17 @@
+# Global Code Ownership
+# Universal rule for all files in the repository
+* @cassanji
+
+# CI/CD and Security Workflows
+/.github/workflows/ @cassanji
+/SECURITY.md @cassanji
+
+# CRD API Types & Controllers
+/api/ @cassanji
+/internal/controller/ @cassanji
+/internal/ @cassanji
+/pkg/ @cassanji
+
+# Helm Charts and Deployment Manifests
+/deploy/helm/ @cassanji
+/config/ @cassanji
