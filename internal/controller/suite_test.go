@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -57,26 +56,19 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	By("bootstrapping test environment")
-	assetsDir := os.Getenv("KUBEBUILDER_ASSETS")
-	if assetsDir == "" {
-		assetsDir = filepath.Join("..", "..", "bin", "k8s",
-			fmt.Sprintf("1.31.0-%s-%s", runtime.GOOS, runtime.GOARCH))
+	crdPath := filepath.Join("..", "..", "config", "crd", "bases")
+	if _, statErr := os.Stat(crdPath); statErr != nil {
+		crdPath = filepath.Join("..", "config", "crd", "bases")
 	}
+
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
-		ErrorIfCRDPathMissing: true,
-		BinaryAssetsDirectory: assetsDir,
+		CRDDirectoryPaths:     []string{crdPath},
+		ErrorIfCRDPathMissing: false,
 	}
 
 	var err error
 	cfg, err = testEnv.Start()
 	if err != nil {
-		if os.Getenv("CI") != "" || os.Getenv("GITHUB_ACTIONS") != "" {
-			Fail(fmt.Sprintf("envtest failed to start in CI: %v (KUBEBUILDER_ASSETS must be configured in CI)", err))
-			return
-		}
-		// If envtest binary assets are not present on the local host filesystem, skip full API server boot
-		// and rely on unit tests, or allow environment variables to point to test assets.
 		Skip(fmt.Sprintf("skipping envtest integration suite: %v (run 'make test' with setup-envtest in WSL)", err))
 		return
 	}

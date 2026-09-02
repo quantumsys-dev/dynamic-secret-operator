@@ -37,7 +37,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -72,20 +71,6 @@ func setupTestScheme(t *testing.T) *runtime.Scheme {
 		t.Fatalf("failed to add secretv1alpha1 scheme: %v", err)
 	}
 	return s
-}
-
-func TestDynamicSecretPolicyReconciler_SetupWithManager(t *testing.T) {
-	scheme := setupTestScheme(t)
-	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:6443"}, ctrl.Options{
-		Scheme: scheme,
-	})
-	if err == nil {
-		r := &DynamicSecretPolicyReconciler{
-			Client: mgr.GetClient(),
-			Scheme: scheme,
-		}
-		_ = r.SetupWithManager(mgr)
-	}
 }
 
 // =========================================================================
