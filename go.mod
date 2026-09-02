@@ -1,6 +1,6 @@
 module github.com/quantumsys-dev/dynamic-secret-operator
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
@@ -223,3 +223,7 @@ replace (
 )
 
 replace github.com/cyphar/filepath-securejoin => github.com/cyphar/filepath-securejoin v0.3.6
+
+replace golang.org/x/exp => golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f
+
+replace cloud.google.com/go/compute/metadata => cloud.google.com/go/compute/metadata v0.5.2
