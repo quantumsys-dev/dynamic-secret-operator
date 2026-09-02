@@ -60,9 +60,9 @@ spec:
       queryTimeout: 10
 
   # 6. Automated Rollback & Circuit Breaker (Optional, defaulted if omitted)
-  circuitBreaker:
-    consecutiveFailureThreshold: 3
-    resetTimeoutSeconds: 300
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
 ```
 
 ---

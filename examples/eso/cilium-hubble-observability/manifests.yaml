@@ -117,7 +117,7 @@ spec:
   validationProbes:
     - type: MySQL
       endpoint: "mysql-db.dso-cilium-demo.svc.cluster.local:3306/payments"
-      timeoutSeconds: 5
-  circuitBreaker:
-    consecutiveFailureThreshold: 3
-    resetTimeoutSeconds: 120
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3

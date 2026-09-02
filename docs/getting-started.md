@@ -188,10 +188,10 @@ spec:
   validationProbes:
     - type: HTTP
       endpoint: "http://localhost:80"
-      timeoutSeconds: 5
-  circuitBreaker:
-    consecutiveFailureThreshold: 3
-    resetTimeoutSeconds: 300
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
 EOF
 ```
 

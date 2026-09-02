@@ -119,7 +119,7 @@ spec:
   validationProbes:
     - type: PostgreSQL
       endpoint: "postgres-db.dso-circuit-breaker-demo.svc.cluster.local:5432/orders"
-      timeoutSeconds: 3
-  circuitBreaker:
-    consecutiveFailureThreshold: 2
-    resetTimeoutSeconds: 60
+      queryTimeout: 3
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 2
