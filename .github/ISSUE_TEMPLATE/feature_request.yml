@@ -1,0 +1,64 @@
+name: 💡 Feature Request
+description: Propose a new capability, provider driver, probe engine, or enhancement for DSO
+title: "[FEAT]: "
+labels: ["kind/feature", "triage/needs-discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an enhancement to the Dynamic Secret Operator! We actively welcome community proposals to expand DSO's cloud-native progressive delivery capabilities.
+
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: Is your feature request related to a problem?
+      description: A clear description of the pain point or limitation you are experiencing.
+      placeholder: "I'm always frustrated when rotating credentials in cloud provider X because..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Describe the solution you'd like
+      description: Detailed description of the desired behavior, proposed CRD schema modifications, or architecture workflow.
+      placeholder: "Add native support for AWS Secrets Manager using SQS/EventBridge in spec.source.awsSecretsManager..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target_scope
+    attributes:
+      label: Target Component / Architecture Scope
+      description: Which part of DSO does this feature primarily impact?
+      options:
+        - "Pluggable Source Providers (AWS / GCP / Vault / Azure)"
+        - "Synthetic Validation Probes (HTTP / TLS / DB / Job)"
+        - "Canary Sandboxing & NetworkPolicy / Cilium eBPF"
+        - "Workload Rollout Engine (Deployment / StatefulSet / DaemonSet / Argo Rollouts)"
+        - "GitOps & Argo CD Harmony"
+        - "Observability & Metrics (OpenTelemetry / Prometheus)"
+        - "Helm Chart & Operator Packaging"
+        - "Documentation & Architecture Decision Records (ADRs)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives_considered
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions, custom Job scripts, or workarounds you've evaluated.
+      placeholder: "Currently using External Secrets Operator with generic Job probes, but native integration would provide..."
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any mockups, architectural diagrams, RFC links, or API references here.
+
+  - type: checkboxes
+    id: contribution_interest
+    attributes:
+      label: Willingness to Contribute
+      options:
+        - label: I would be interested in submitting a Pull Request to implement or co-design this feature.

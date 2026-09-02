@@ -1,0 +1,121 @@
+name: 🐛 Bug Report
+description: Report a reproducible problem or unexpected behavior in Dynamic Secret Operator (DSO)
+title: "[BUG]: "
+labels: ["kind/bug", "triage/needs-investigation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please ensure that you are running a supported version of Kubernetes (1.28+) and DSO.
+        
+        ⚠️ **SECURITY NOTICE:** Do **NOT** paste raw passwords, client secrets, API tokens, or unredacted database connection strings in this issue. DSO error logs automatically redact secrets, but always inspect your manifests before submitting.
+
+  - type: input
+    id: dso_version
+    attributes:
+      label: DSO Version / Image Tag
+      description: What version of Dynamic Secret Operator are you running? (e.g., `v0.2.0`, `ghcr.io/quantumsys-dev/dynamic-secret-operator:latest`)
+      placeholder: "v0.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: k8s_version
+    attributes:
+      label: Kubernetes Version
+      description: The output of `kubectl version --short` or your cloud provider environment (e.g., AKS 1.30.2, EKS 1.29, Kind 1.31).
+      placeholder: "Client: v1.31.0, Server: v1.30.2 (AKS)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation Method
+      description: How was DSO installed into the cluster?
+      options:
+        - "Helm Chart (OCI ghcr.io)"
+        - "Helm Chart (Local / Git)"
+        - "Raw YAML Manifests (config/crd / deploy)"
+        - "Other"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ingestion_mode
+    attributes:
+      label: Secret Ingestion Provider Mode
+      description: Which secret source / ingestion mechanism is being used?
+      options:
+        - "Azure Key Vault + Service Bus (Event-Driven)"
+        - "External Secrets Operator (ESO) Intermediate Secret Watch"
+        - "K8s Native Secret Source"
+        - "Other / Multi-Secret"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem Description
+      description: A clear and concise description of what the bug is.
+      placeholder: "When rotating a database password with special characters, the canary validation probe fails unexpectedly..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Steps to Reproduce
+      description: Clear, sequential steps to reproduce the behavior.
+      placeholder: |
+        1. Deploy DynamicSecretPolicy with spec.source.k8sSecret 'app-secret-synced'
+        2. Update secret payload in cloud vault / intermediate secret
+        3. Observe controller logs and CRD status conditions
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_vs_observed
+    attributes:
+      label: Expected vs Observed Behavior
+      description: What did you expect to happen versus what actually happened?
+      placeholder: |
+        Expected: Canary validates probe successfully and promotes production workload with zero downtime.
+        Observed: Circuit breaker trips after 3 consecutive failures.
+    validations:
+      required: true
+
+  - type: textarea
+    id: policy_manifest
+    attributes:
+      label: Relevant DynamicSecretPolicy Manifest
+      description: Paste the minimal `DynamicSecretPolicy` YAML manifest causing the issue (ensure all sensitive fields are redacted).
+      render: yaml
+      placeholder: |
+        apiVersion: dso.quantumsys.dev/v1alpha1
+        kind: DynamicSecretPolicy
+        metadata:
+          name: demo-policy
+          namespace: default
+        spec:
+          ...
+
+  - type: textarea
+    id: operator_logs
+    attributes:
+      label: Operator Logs & Diagnostics
+      description: Output from `kubectl logs -n dso-system deployment/dso-controller-manager -c manager` or `kubectl describe dsp <name>`.
+      render: text
+      placeholder: |
+        {"level":"error","ts":"...","logger":"controller","msg":"canary probe failed","error":"..."}
+
+  - type: checkboxes
+    id: pre_submission
+    attributes:
+      label: Security & Pre-Submission Checklist
+      options:
+        - label: I confirm that I have searched existing issues and this is not a duplicate.
+          required: true
+        - label: I have verified that no sensitive credentials, API keys, or private tokens are contained in this submission.
+          required: true
