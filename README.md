@@ -231,7 +231,22 @@ Explore our comprehensive reference architecture examples for testing:
 
 ---
 
-## 📚 Architecture Decision Records (ADRs)
+## 📚 Documentation & Architecture Decision Records (ADRs)
+
+For comprehensive details on enterprise integration, architecture, and operation:
+
+- [Getting Started Guide (5-Minute Quickstart)](docs/getting-started.md)
+- [API Reference](docs/api-reference.md)
+- [Configuration & Enterprise Tuning](docs/configuration.md)
+- [Troubleshooting & Runbooks](docs/troubleshooting.md)
+- [GitOps: Argo CD Self-Heal Integration](docs/gitops-argo-cd.md)
+- [Security & Threat Model](docs/security.md)
+- [Pluggable Providers Overview](docs/providers/overview.md)
+
+**Architecture Decision Records (ADRs):**
+- [ADR-001: Azure Service Bus Peek-Lock vs Webhooks](docs/architecture/001-asb-peek-lock-vs-webhooks.md)
+- [ADR-002: Immutable Revisions vs Mutable Updates](docs/architecture/002-immutable-revisions-vs-mutable.md)
+- [ADR-003: Decoupling Secret Ingestion & ESO Standard](docs/architecture/003-decoupling-secret-ingestion-eso.md)
 
 We actively welcome community contributions, PRs, and provider plugin development to help make DSO the universal standard for progressive secret delivery across all major cloud providers.
 

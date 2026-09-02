@@ -17,11 +17,12 @@ metadata:
   name: payment-service-db-policy
   namespace: production
 spec:
-  # 1. Azure Key Vault Reference (Required)
-  vaultRef:
-    keyVaultURI: "https://my-prod-vault.vault.azure.net"
-    objectName: "postgres-password"
-    objectType: "Secret" # Options: Secret, Key, Certificate
+  # 1. Secret Source Ingestion (Required)
+  source:
+    type: "K8sSecret" # Options: AzureKeyVault, K8sSecret, AWSSecretsManager, GCPSecretManager, Vault
+    parseJSON: false  # When true, unmarshals JSON payloads into discrete keys
+    k8sSecret:
+      name: "eso-synced-db-pass"
 
   # 2. Target Workload Selector (Required)
   workloadSelector:
@@ -59,24 +60,29 @@ spec:
       queryTimeout: 10
 
   # 6. Automated Rollback & Circuit Breaker (Optional, defaulted if omitted)
-  rollbackConfig:
-    autoRollback: true
-    circuitBreakerThreshold: 3
-    postRollbackScript: ""
+  circuitBreaker:
+    consecutiveFailureThreshold: 3
+    resetTimeoutSeconds: 300
 ```
 
 ---
 
 ## 🔍 Specification Field Breakdown (`spec`)
 
-### `spec.vaultRef` (Required)
-Specifies the Azure Key Vault resource to track.
+### `spec.source` (Required)
+Specifies the pluggable secret provider backend configuration.
 
 | Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| `keyVaultURI` | `string` | **Yes** | Fully qualified Azure Key Vault URI. Validated via strict regex supporting `vault.azure.net`, `vault.azure.cn`, and `vault.usgovcloudapi.net`. |
-| `objectName` | `string` | **Yes** | Name of the secret, key, or certificate in Key Vault. |
-| `objectType` | `string` | **Yes** | Type of the Key Vault object. Enum: `Secret`, `Key`, `Certificate`. Default: `Secret`. |
+| `type` | `string` | **Yes** | The source backend type. Supported: `AzureKeyVault`, `K8sSecret`, `AWSSecretsManager`, `GCPSecretManager`, `Vault`. |
+| `parseJSON` | `bool` | No | Unmarshals JSON string payloads into discrete key-value pairs in the materialized Secret (default: `false`). |
+| `k8sSecret` | `K8sSecretSource` | Context | Required when `type` is `K8sSecret`. Universal multi-cloud ingestion via intermediate ESO Kubernetes secrets. |
+| `azureKeyVault` | `AzureKeyVaultSource` | Context | Required when `type` is `AzureKeyVault`. Direct Azure Key Vault event-driven ingestion. |
+| `awsSecretsManager`| `AWSSecretsManagerSource` | Context | Reserved for native AWS Secrets Manager + EventBridge/SQS driver. |
+| `gcpSecretManager`| `GCPSecretManagerSource` | Context | Reserved for native GCP Secret Manager + Pub/Sub driver. |
+| `vault` | `VaultSource` | Context | Reserved for native HashiCorp Vault webhook/engine driver. |
+
+*(Note: `spec.vaultRef` is deprecated but preserved for backwards compatibility with v0.1.x policies).*
 
 ---
 
