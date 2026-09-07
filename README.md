@@ -121,6 +121,84 @@ DSO provides two distinct, enterprise-grade ingestion models designed to fit any
 
 ---
 
+### 🩺 Synthetic Validation Probes: Role, Execution Flow, and Outcomes
+
+Regardless of whether secret ingestion is driven by **ESO Mode** (watching intermediate secrets) or **Event-Driven Mode** (reactive push streams), DSO **never** promotes a rotated secret directly to production workloads. 
+
+Instead, the operator intercepts the event and executes a zero-trust **Progressive Delivery & Canary Validation Pipeline**:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Ingestion: Upstream Secret Rotation (ESO Sync / Cloud Queue Push)
+    Ingestion --> RevisionPrepared: Materialize Immutable SecretRevision
+    RevisionPrepared --> CanaryProvisioning: Deploy Ephemeral Canary + Network Sandbox
+    CanaryProvisioning --> Validating: Run spec.validationProbes
+    
+    state Validating {
+        [*] --> CheckProbes: HTTP / TLS / PostgreSQL / MySQL / Job
+        CheckProbes --> Passed: All Probes Succeed ✅
+        CheckProbes --> Failed: Any Probe Fails or Times Out ❌
+    }
+    
+    Passed --> Promoting: Zero-Downtime Rolling Update & Argo CD Auto-Patch
+    Promoting --> Completed: Production Verified & Teardown Canary
+    Failed --> RolledBack: Trip Circuit Breaker & Preserve Production
+    Completed --> [*]
+    RolledBack --> [*]
+```
+
+#### 1. Where Validation Probes Fit In
+When an upstream rotation occurs, DSO transitions through distinct lifecycle phases before production workloads are touched:
+1. **`RevisionPrepared`**: Computes the SHA-256 checksum of the new payload and creates an immutable, cryptographically named Kubernetes Secret (`<workload>-rev-<sha256>`).
+2. **`CanaryProvisioning`**: Provisions an isolated canary deployment (`<workload>-canary`) and applies an ephemeral `NetworkPolicy` (or Cilium eBPF egress sandbox). Only this canary pod mounts the candidate `SecretRevision`.
+3. **`Validating`**: **This is where `validationProbes` enter the lifecycle.** The operator runs all synthetic probes configured in `spec.validationProbes` against the candidate revision and canary sandbox.
+
+#### 2. How Validation Probes Work
+DSO provides a modular, pluggable probe execution engine with strict anti-leakage sanitization:
+- **`HTTP` / `HTTPS`**: Issues HTTP requests against canary endpoints, verifying status codes (`200-399`) within `queryTimeout`.
+- **`TLS`**: Executes a mutual or one-way TLS handshake, verifying certificate validity dates (not expired, already active) and asserting that the leaf certificate's SHA-256 thumbprint matches the new secret.
+- **`PostgreSQL` & `MySQL`**: Opens a real database connection using the rotated username/password and executes a live verification query (`SELECT 1`). All DSNs and credentials are automatically redacted from logs and OpenTelemetry traces.
+- **`Job` (Bring Your Own Container)**: Ephemerally schedules an arbitrary Kubernetes Batch Job (`batch/v1.Job`) in the target namespace (e.g., `redis-cli`, custom shell scripts, compliance validators). DSO injects the candidate secret name as `DSO_REVISION_SECRET_NAME`, monitors completion, and parses container exit codes.
+- **Automatic Canary Redirection**: For probes targeting the workload, DSO automatically discovers the ready canary pod IP address and redirects the probe's network traffic to the isolated canary instance.
+
+---
+
+#### 3. What Happens When Probes Succeed (✅ Success Path)
+When all configured validation probes pass successfully:
+1. **Workload Promotion (`Promoting` / `RolloutProgressing`)**:
+   - DSO safely patches the production workload (`Deployment`, `StatefulSet`, `DaemonSet`, or `Argo Rollout`) to mount the validated `SecretRevision`.
+   - The workload rolls out with zero downtime using native Kubernetes rolling upgrade strategies.
+2. **GitOps Harmony (Argo CD Auto-Patch)**:
+   - DSO dynamically patches the target Argo CD `Application`'s `spec.ignoreDifferences` with JSON Pointers to the modified revision annotation and secret volumes, preventing Argo CD self-heal revert loops.
+3. **Sandbox Teardown & Cleanup**:
+   - The ephemeral canary deployment and network sandbox policies are automatically deleted.
+   - The policy status transitions to `PromotionCompleted: True`.
+   - Consecutive failure counters are reset to zero (`consecutiveFailures: 0`).
+4. **Queue Event ACK (Event-Driven Mode)**:
+   - The message lock on the event broker (e.g. Azure Service Bus Peek-Lock, AWS SQS visibility timeout, GCP Pub/Sub ack) is completed and acknowledged, finalizing the event stream.
+
+---
+
+#### 4. What Happens When Probes Fail (❌ Failure & Rollback Path)
+If any probe fails, times out, or the canary pod enters `CrashLoopBackOff`:
+1. **Absolute Production Isolation (Zero Outages)**:
+   - **Production pods are NEVER touched and NEVER patched.**
+   - Production workloads remain running normally with their existing, functional secret revision without disruption.
+2. **Masked Diagnostics & Observability**:
+   - DSO captures the exact failure cause (e.g., `password authentication failed`, `certificate expired`, `connection timed out`) and redacts all secrets before recording the error into `status.conditions`.
+   - Emits failure metrics to Prometheus (`dso_probe_failures_total`) and exports OpenTelemetry tracing spans.
+3. **Transient Retries & Circuit Breaker Protection**:
+   - DSO increments the failure counter (`consecutiveFailures++`) and retries with exponential backoff (in Event-Driven Mode, the message is released/NACKed to allow retry).
+   - If failures reach `spec.rollbackConfig.circuitBreakerThreshold` (default: 3):
+     - DSO **trips the circuit breaker** and halts further rollout attempts to prevent authentication lockouts or denial of service against upstream backends.
+     - The policy transitions to `RolledBack: True` with reason `ValidationProbeFailed`.
+     - The failed canary deployment and network policies are deleted to reclaim resources.
+4. **Self-Healing on Upstream Correction**:
+   - As soon as an administrator or CI/CD pipeline pushes a valid secret to the upstream vault (or ESO syncs a corrected secret), DSO detects the new SHA-256 hash drift, resets the circuit breaker, and automatically starts a new canary validation cycle.
+
+---
+
 ## ✨ Key Enterprise Capabilities
 
 | Feature | Description |
@@ -147,222 +225,32 @@ DSO provides two distinct, enterprise-grade ingestion models designed to fit any
     *   **Backpressure Handling:** Leverages reliable queue delivery (e.g. Azure Service Bus Peek-Lock, AWS SQS visibility timeouts, GCP Pub/Sub nacks) with explicit timeout context NACKs to ensure rotation events are safely preserved during cluster CPU/Queue saturation.
 *   **🚥 Native Rollout Compatibility:** Works natively with standard Kubernetes `Deployment`, `StatefulSet`, and `DaemonSet` resources, as well as native support for **Argo Rollouts (Blue/Green)** for advanced traffic shifting.
 
-## 🔐 Azure Prerequisites & Infrastructure Setup
+## 📖 CRD API Reference Summary
 
-You can provision all required Azure resources (Resource Group, Key Vault, Service Bus, Event Grid, AKS, and Workload Identity Federation) automatically or manually:
+The `DynamicSecretPolicy` CRD is your declarative interface for secret ingestion, isolated canary sandboxing, synthetic validation probes, and automated rollbacks.
 
-### Automated Provisioning (PowerShell)
-Execute the infrastructure provisioner script with minimal-cost SKUs (Free Tier AKS, Standard Key Vault, Basic Service Bus):
+DSO features a modular architecture where the **secret source backend** (`spec.source`) and the **validation probe type** (`spec.validationProbes`) are completely pluggable and decoupled:
 
-```powershell
-.\setup-azure-resources.ps1 -ResourceGroupName "rg-dso-dev" -Location "eastus"
-```
+| Field Block | Purpose | Supported Options |
+| :--- | :--- | :--- |
+| `spec.source` | Pluggable secret backend ingestion | `K8sSecret` (ESO Universal Multi-Cloud), `AzureKeyVault`, `AWSSecretsManager`, `GCPSecretManager`, `Vault` |
+| `spec.workloadSelector` | Target workload resource to protect and roll over | `Deployment`, `StatefulSet`, `DaemonSet`, `Rollout` (Argo Rollouts Blue/Green) |
+| `spec.validationProbes` | Synthetic zero-trust canary validation checks | `HTTP` / `HTTPS`, `TLS` (handshake & thumbprint), `PostgreSQL`, `MySQL` (`SELECT 1`), `Job` (Bring Your Own Container) |
+| `spec.rollbackConfig` | Resiliency, backoff, and circuit breaker protection | `autoRollback: true`, `circuitBreakerThreshold: 3` |
 
 ---
 
-### Manual Azure RBAC Setup
 
-#### 1. Assign Azure RBAC Roles
-Assign the Managed Identity permissions on your Key Vault and Service Bus namespace:
+### 📚 Dedicated Provider Guides & Policy Patterns
 
-```bash
-# 1. Key Vault Secrets User (Read-only secret retrieval)
-az role assignment create \
-  --role "Key Vault Secrets User" \
-  --assignee-object-id "<MANAGED_IDENTITY_OBJECT_ID>" \
-  --assignee-principal-type "ServicePrincipal" \
-  --scope "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.KeyVault/vaults/<VAULT_NAME>"
+For complete, copy-paste ready `DynamicSecretPolicy` manifests featuring diverse probe types (`HTTP`, `TLS`, `PostgreSQL`, `MySQL`, `Job`) tailored to each cloud ecosystem, consult our dedicated provider documentation:
 
-# 2. Azure Service Bus Data Receiver (Peek-Lock message consumption)
-az role assignment create \
-  --role "Azure Service Bus Data Receiver" \
-  --assignee-object-id "<MANAGED_IDENTITY_OBJECT_ID>" \
-  --assignee-principal-type "ServicePrincipal" \
-  --scope "/subscriptions/<SUB_ID>/resourceGroups/<RG>/providers/Microsoft.ServiceBus/namespaces/<SERVICEBUS_NAME>"
-```
-
-#### 2. Establish Workload Identity Federation
-```bash
-az identity federated-credential create \
-  --name "dso-federated-credential" \
-  --identity-name "<MANAGED_IDENTITY_NAME>" \
-  --resource-group "<RG>" \
-  --issuer "<AKS_OIDC_ISSUER_URL>" \
-  --subject "system:serviceaccount:dso-system:dso-dynamic-secret-operator" \
-  --audience "api://AzureADTokenExchange"
-```
-
-### 3. Deploy DSO Operator via Helm
-
-Deploy DSO into your cluster using the installation configuration suited for your cloud provider or operating mode:
-
-> 📖 **Provider Installation Guides:**  
-> - 🟢 **[Microsoft Azure Key Vault Guide](docs/providers/azure.md)** *(Production Ready)*
-> - 🟢 **[Universal Multi-Cloud via ESO Guide](docs/providers/eso.md)** *(Production Ready)*
-> - 🟡 **[Amazon Web Services (AWS) Guide](docs/providers/aws.md)** *(In Development – Roadmap v0.3)*
-> - 🟡 **[Google Cloud Platform (GCP) Guide](docs/providers/gcp.md)** *(In Development – Roadmap v0.3)*
-
-#### Option 1: Microsoft Azure (🟢 Production Ready)
-*Event-driven via Azure Key Vault, Azure Event Grid, Azure Service Bus, and Azure Workload Identity.*
-
-**PowerShell (Windows):**
-```powershell
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
-  --namespace dso-system `
-  --create-namespace `
-  --set mode=event-driven `
-  --set provider=azure `
-  --set azure.workloadIdentity.enabled=true `
-  --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" `
-  --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" `
-  --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" `
-  --set azure.serviceBus.queueName="<QUEUE_NAME>" `
-  --wait
-```
-
-**Bash (Linux / macOS):**
-```bash
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
-  --namespace dso-system \
-  --create-namespace \
-  --set mode=event-driven \
-  --set provider=azure \
-  --set azure.workloadIdentity.enabled=true \
-  --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" \
-  --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" \
-  --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" \
-  --set azure.serviceBus.queueName="<QUEUE_NAME>" \
-  --wait
-```
-
-#### Option 2: Amazon Web Services (AWS) (🟡 In Development – Roadmap v0.3)
-> [!NOTE]
-> Native AWS event-driven ingestion (EventBridge $\to$ SQS) is currently under active development.
-> For production AWS clusters today, use **Option 4 (Universal Multi-Cloud via ESO)** below. See also [AWS Provider Guide](docs/providers/aws.md).
-
-**PowerShell (Windows):**
-```powershell
-# Note: Native AWS provider is currently under development (Roadmap v0.3.0)
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
-  --namespace dso-system `
-  --create-namespace `
-  --set mode=event-driven `
-  --set provider=aws `
-  --set aws.enabled=true `
-  --set aws.roleArn="arn:aws:iam::<ACCOUNT_ID>:role/dso-secret-operator-role" `
-  --set aws.sqs.queueUrl="https://sqs.<REGION>.amazonaws.com/<ACCOUNT_ID>/dso-vault-events" `
-  --set aws.region="<REGION>" `
-  --wait
-```
-
-**Bash (Linux / macOS):**
-```bash
-# Note: Native AWS provider is currently under development (Roadmap v0.3.0)
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
-  --namespace dso-system \
-  --create-namespace \
-  --set mode=event-driven \
-  --set provider=aws \
-  --set aws.enabled=true \
-  --set aws.roleArn="arn:aws:iam::<ACCOUNT_ID>:role/dso-secret-operator-role" \
-  --set aws.sqs.queueUrl="https://sqs.<REGION>.amazonaws.com/<ACCOUNT_ID>/dso-vault-events" \
-  --set aws.region="<REGION>" \
-  --wait
-```
-
-#### Option 3: Google Cloud Platform (GCP) (🟡 In Development – Roadmap v0.3)
-> [!NOTE]
-> Native GCP event-driven ingestion (Secret Manager $\to$ Pub/Sub) is currently under active development.
-> For production GCP clusters today, use **Option 4 (Universal Multi-Cloud via ESO)** below. See also [GCP Provider Guide](docs/providers/gcp.md).
-
-**PowerShell (Windows):**
-```powershell
-# Note: Native GCP provider is currently under development (Roadmap v0.3.0)
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
-  --namespace dso-system `
-  --create-namespace `
-  --set mode=event-driven `
-  --set provider=gcp `
-  --set gcp.enabled=true `
-  --set gcp.workloadIdentity.serviceAccount="dso-sa@<PROJECT_ID>.iam.gserviceaccount.com" `
-  --set gcp.pubsub.subscription="projects/<PROJECT_ID>/subscriptions/dso-vault-events-sub" `
-  --wait
-```
-
-**Bash (Linux / macOS):**
-```bash
-# Note: Native GCP provider is currently under development (Roadmap v0.3.0)
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
-  --namespace dso-system \
-  --create-namespace \
-  --set mode=event-driven \
-  --set provider=gcp \
-  --set gcp.enabled=true \
-  --set gcp.workloadIdentity.serviceAccount="dso-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
-  --set gcp.pubsub.subscription="projects/<PROJECT_ID>/subscriptions/dso-vault-events-sub" \
-  --wait
-```
-
-#### Option 4: Universal Multi-Cloud via External Secrets Operator (ESO) (🟢 Production Ready)
-*Recommended for AWS, GCP, HashiCorp Vault, Azure, or hybrid clusters today. Simply set `mode=eso` (requires no cloud credentials or provider parameter inside DSO).*  
-*(See the [ESO Universal Provider Guide](docs/providers/eso.md) for full prerequisites and setup).*
-
-**PowerShell (Windows):**
-```powershell
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
-  --namespace dso-system `
-  --create-namespace `
-  --set mode=eso `
-  --wait
-```
-
-**Bash (Linux / macOS):**
-```bash
-helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
-  --namespace dso-system \
-  --create-namespace \
-  --set mode=eso \
-  --wait
-```
-
-## 📖 CRD API Reference Summary
-
-The `DynamicSecretPolicy` CRD is your declarative interface for secret management.
-
-```yaml
-apiVersion: dso.quantumsys.dev/v1alpha1
-kind: DynamicSecretPolicy
-metadata:
-  name: payment-db-policy
-  namespace: production
-spec:
-  # 1. External Vault Identity
-  vaultRef:
-    keyVaultURI: "https://my-prod-vault.vault.azure.net"
-    objectName: "payment-db-credentials"
-    objectType: "Secret" # Options: Secret, Certificate, Key
-
-  # 2. Target Workload to Promote
-  workloadSelector:
-    kind: "Deployment" # Options: Deployment, StatefulSet, DaemonSet, Rollout
-    name: "payment-service"
-
-  # 3. Explicit Injection Boundaries (Optional)
-  targetRef:
-    volumeName: "db-secret-volume"
-
-  # 4. Synthetic Validation Probes
-  validationProbes:
-    - type: "PostgreSQL"
-      endpoint: "postgres.production.svc.cluster.local:5432"
-      queryTimeout: 5
-
-  # 5. Circuit Breaker Configuration
-  rollbackConfig:
-    autoRollback: true
-    circuitBreakerThreshold: 3
-```
-*For the complete specification, default behaviors, and Kyverno Policy-as-Code examples, view the [Full API Reference](docs/api-reference.md).*
+- 🟢 **[Universal Multi-Cloud via ESO Guide](docs/providers/eso.md)** – *Production Ready* (Patterns for HTTP Health, Redis Job, PostgreSQL/MySQL, and Ingress TLS probes)
+- 🟢 **[Microsoft Azure Key Vault Guide](docs/providers/azure.md)** – *Production Ready* (Patterns for Relational Database, Ingress TLS Handshake, Microservice HTTP, and Redis Job probes)
+- 🟡 **[Amazon Web Services (AWS) Guide](docs/providers/aws.md)** – *In Development (Roadmap v0.3)* (Patterns for Aurora MySQL, Microservice HTTP, Ingress TLS, and ElastiCache Redis Job probes)
+- 🟡 **[Google Cloud Platform (GCP) Guide](docs/providers/gcp.md)** – *In Development (Roadmap v0.3)* (Patterns for Memorystore Redis Job, Microservice HTTP, Cloud SQL Database, and Ingress TLS probes)
+- 📖 **[Pluggable Providers Overview](docs/providers/overview.md)** – Architectural model of the provider registry and ingestion engine
+- 📖 **[Comprehensive CRD API Reference](docs/api-reference.md)** – Full schema field definitions, status conditions, and Kyverno policy rules
 
 ## 🗺️ Future Roadmap: Multi-Cloud Expansion
 
