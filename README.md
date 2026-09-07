@@ -238,45 +238,8 @@ DSO features a modular architecture where the **secret source backend** (`spec.s
 | `spec.validationProbes` | Synthetic zero-trust canary validation checks | `HTTP` / `HTTPS`, `TLS` (handshake & thumbprint), `PostgreSQL`, `MySQL` (`SELECT 1`), `Job` (Bring Your Own Container) |
 | `spec.rollbackConfig` | Resiliency, backoff, and circuit breaker protection | `autoRollback: true`, `circuitBreakerThreshold: 3` |
 
-### Declarative Policy Structure
-
-```yaml
-apiVersion: dso.quantumsys.dev/v1alpha1
-kind: DynamicSecretPolicy
-metadata:
-  name: example-policy
-  namespace: production
-spec:
-  # 1. Pluggable Source Backend (K8sSecret / AzureKeyVault / AWSSecretsManager / GCPSecretManager / Vault)
-  source:
-    type: "K8sSecret" # e.g. "K8sSecret" for ESO, "AzureKeyVault" for Azure push
-    k8sSecret:
-      name: "eso-synced-credentials"
-
-  # 2. Target Workload to Protect and Roll Over
-  workloadSelector:
-    kind: "Deployment" # Options: Deployment, StatefulSet, DaemonSet, Rollout
-    name: "my-service"
-
-  # 3. Workload Volume Injection Boundary (Optional)
-  targetRef:
-    volumeName: "credentials-volume"
-
-  # 4. Pluggable Synthetic Validation Probes (HTTP, TLS, PostgreSQL, MySQL, Job)
-  validationProbes:
-    - type: "HTTP"
-      endpoint: "http://my-service.production.svc.cluster.local:8080/healthz"
-      path: "/healthz"
-      expectedStatus: 200
-      queryTimeout: 5
-
-  # 5. Circuit Breaker & Automatic Rollback Safeguards
-  rollbackConfig:
-    autoRollback: true
-    circuitBreakerThreshold: 3
-```
-
 ---
+
 
 ### 📚 Dedicated Provider Guides & Policy Patterns
 
