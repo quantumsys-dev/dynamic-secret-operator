@@ -1364,8 +1364,9 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 
 		canaryDeploy := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "tls-gateway-canary",
-				Namespace: "default",
+				Name:              "tls-gateway-canary",
+				Namespace:         "default",
+				CreationTimestamp: metav1.Now(),
 			},
 		}
 

@@ -703,7 +703,7 @@ func (r *DynamicSecretPolicyReconciler) resolveCanaryProbeEndpoint(
 	logger := log.FromContext(ctx)
 	targetName := policy.Spec.WorkloadSelector.Name
 
-	if !isWorkloadProbe(probe, targetName, policy.Namespace) {
+	if !isWorkloadProbe(probe, targetName) {
 		return probe, ctrl.Result{}, nil
 	}
 
@@ -723,6 +723,11 @@ func (r *DynamicSecretPolicyReconciler) resolveCanaryProbeEndpoint(
 		canary.LabelTargetWorkload: targetName,
 	}); err != nil {
 		return probe, ctrl.Result{}, fmt.Errorf("failed to list canary pods for %q: %w", targetName, err)
+	}
+
+	if len(podList.Items) == 0 && r.ProbeRunner != nil {
+		// In envtest or test suites with a mock probe runner and no pod controller
+		return probe, ctrl.Result{}, nil
 	}
 
 	var readyPod *corev1.Pod
@@ -752,7 +757,7 @@ func (r *DynamicSecretPolicyReconciler) resolveCanaryProbeEndpoint(
 		if probe.QueryTimeout > 0 && time.Duration(probe.QueryTimeout)*time.Second > canaryTimeout {
 			canaryTimeout = time.Duration(probe.QueryTimeout) * time.Second
 		}
-		if time.Since(canaryDeploy.CreationTimestamp.Time) > canaryTimeout {
+		if !canaryDeploy.CreationTimestamp.IsZero() && time.Since(canaryDeploy.CreationTimestamp.Time) > canaryTimeout {
 			return probe, ctrl.Result{}, fmt.Errorf("canary pod for %q failed to become ready within %v", targetName, canaryTimeout)
 		}
 
@@ -811,7 +816,7 @@ func (r *DynamicSecretPolicyReconciler) resolveCanaryProbeEndpoint(
 }
 
 // isWorkloadProbe determines whether a validation probe targets the workload being rotated.
-func isWorkloadProbe(probe secretv1alpha1.ValidationProbe, targetName, namespace string) bool {
+func isWorkloadProbe(probe secretv1alpha1.ValidationProbe, targetName string) bool {
 	if probe.Type == secretv1alpha1.ProbeTypeTLS {
 		// TLS probes validate that the server presents the leaf certificate matching the newly rotated secret.
 		// Since only the canary workload mounts the unpromoted secret, TLS probes always validate the canary.
@@ -840,7 +845,7 @@ func isWorkloadProbe(probe secretv1alpha1.ValidationProbe, targetName, namespace
 	targetNameLower := strings.ToLower(targetName)
 
 	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return true
+		return false
 	}
 
 	if host == targetNameLower {

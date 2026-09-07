@@ -261,4 +261,3 @@ func TestBuildProbeJob_DifferentContainerName(t *testing.T) {
 		t.Errorf("expected REDIS_AUTH_PASSWORD secretKeyRef.Name to be %s, got %s", revisionSecretName, redisAuthRef)
 	}
 }
-
