@@ -58,5 +58,5 @@ kubeconfig*
 .DS_Store
 Thumbs.db
 
-# Local test scratch scripts
-test-poc.ps1
+# Local test scratch scripts and directories
+local/
