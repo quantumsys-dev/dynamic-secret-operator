@@ -49,7 +49,7 @@ We decouple secret *ingestion* from secret *delivery* and establish DSO's primar
 
 ### Architectural Modes
 
-#### Mode 1: ESO-Native / Kubernetes Secret Lifecycle (Primary CNCF Standard)
+#### ESO Mode: ESO-Native / Kubernetes Secret Lifecycle (Primary CNCF Standard)
 - DSO observes target Kubernetes Secrets (or `ExternalSecret` status).
 - When ESO updates a synced secret with a new payload, DSO detects the hash drift, derives an immutable revision, and executes the progressive canary rollout.
 - **Zero Cloud IAM Overhead:** DSO requires zero cloud provider credentials.
@@ -60,8 +60,8 @@ We decouple secret *ingestion* from secret *delivery* and establish DSO's primar
   detection silently never triggers. This label is distinct from `dso.quantumsys.dev/managed:
   "true"`, which marks revision secrets DSO itself creates and owns.
 
-#### Mode 2: Push-Accelerated Hybrid Adapter (Azure Service Bus / EventGrid)
-- Retained as an optional event-driven adapter for environments where polling intervals are unacceptable and sub-second push notifications from Azure EventGrid &rarr; Service Bus are required.
+#### Event-Driven Mode: Push-Accelerated Multi-Cloud Ingestion (AWS SQS, GCP Pub/Sub, Azure Service Bus)
+- Retained as a direct event-driven ingestion model across major cloud providers (Amazon SQS, Google Cloud Pub/Sub, Azure Service Bus) for environments where polling intervals are unacceptable and sub-second push notifications directly from cloud vaults (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault) are required.
 
 ## Consequences
 
