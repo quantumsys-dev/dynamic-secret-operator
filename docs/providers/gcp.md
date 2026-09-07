@@ -86,25 +86,105 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
 
 ## 4. Planned DynamicSecretPolicy CRD (v0.3.0)
 
+When native GCP push ingestion lands in v0.3.0, you can bind secrets directly via `source.type: GCPSecretManager`. Below are real-world policy patterns demonstrating various probe types:
+
+### Pattern A: Ephemeral Batch Job Probe (Cloud Memorystore Redis)
+*Uses a "Bring Your Own Container" Job probe running `redis-cli PING` to verify rotated Memorystore Redis credentials:*
+
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
-  name: gcp-payment-policy
+  name: gcp-redis-cache-policy
   namespace: production
 spec:
   source:
     type: "GCPSecretManager"
     gcpSecretManager:
-      secretId: "projects/my-project/secrets/payment-db-password"
+      secretId: "projects/my-project/secrets/memorystore-redis-auth"
+  workloadSelector:
+    kind: "Deployment"
+    name: "session-worker"
+  validationProbes:
+    - type: "Job"
+      job:
+        timeoutSeconds: 30
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: redis-tester
+                    image: redis:7-alpine
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        REDIS_PASS=$(cat /secrets/auth/password)
+                        redis-cli -h 10.0.0.5 -a "$REDIS_PASS" PING | grep PONG
+                    volumeMounts:
+                      - name: test-secret
+                        mountPath: /secrets/auth
+                volumes:
+                  - name: test-secret
+                    secret:
+                      secretName: $(DSO_REVISION_SECRET_NAME)
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
+### Pattern B: Web Microservice with HTTP Health Probe
+*Asserts that the candidate microservice starts successfully and responds with HTTP 200 before routing live production traffic:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: gcp-payment-api-policy
+  namespace: production
+spec:
+  source:
+    type: "GCPSecretManager"
+    gcpSecretManager:
+      secretId: "projects/my-project/secrets/payment-api-keys"
   workloadSelector:
     kind: "Deployment"
     name: "payment-api"
   targetRef:
-    volumeName: "db-secret-volume"
+    volumeName: "api-tokens"
   validationProbes:
-    - type: "PostgreSQL"
-      endpoint: "postgres.production.svc.cluster.local:5432"
+    - type: "HTTP"
+      endpoint: "http://payment-api.production.svc.cluster.local:8080/healthz"
+      path: "/healthz"
+      expectedStatus: 200
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
+### Pattern C: Cloud SQL Relational Database Probe
+*Validates database credential rotation against Cloud SQL PostgreSQL/MySQL using a live `SELECT 1` query with automatic credential sanitization:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: gcp-cloudsql-db-policy
+  namespace: production
+spec:
+  source:
+    type: "GCPSecretManager"
+    gcpSecretManager:
+      secretId: "projects/my-project/secrets/cloudsql-db-password"
+  workloadSelector:
+    kind: "Deployment"
+    name: "user-service"
+  targetRef:
+    volumeName: "db-credentials"
+  validationProbes:
+    - type: "PostgreSQL" # Also supports "MySQL"
+      endpoint: "cloudsql-proxy.production.svc.cluster.local:5432"
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true

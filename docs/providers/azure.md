@@ -147,7 +147,10 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
 
 ## 4. Configuring a DynamicSecretPolicy
 
-To bind an Azure Key Vault secret to a workload, declare a `DynamicSecretPolicy` with `source.type: AzureKeyVault`:
+To bind an Azure Key Vault secret to a workload, declare a `DynamicSecretPolicy` with `source.type: AzureKeyVault`. Below are real-world policy patterns demonstrating various probe types:
+
+### Pattern A: Relational Database with PostgreSQL / MySQL Probe
+*Direct database validation running a live SQL query (`SELECT 1`) with automatic credential sanitization in logs:*
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -168,8 +171,69 @@ spec:
   targetRef:
     volumeName: "db-secret-volume"
   validationProbes:
-    - type: "PostgreSQL"
+    - type: "PostgreSQL" # Also supports "MySQL"
       endpoint: "postgres.production.svc.cluster.local:5432"
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
+### Pattern B: Ingress Gateway with TLS Certificate & Handshake Probe
+*Automatically intercepts Key Vault Certificates, splits them into `tls.crt` and `tls.key`, and tests live TLS handshakes and thumbprint matching:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: edge-gateway-tls-policy
+  namespace: production
+spec:
+  source:
+    type: "AzureKeyVault"
+    azureKeyVault:
+      keyVaultURI: "https://my-prod-vault.vault.azure.net"
+      objectName: "wildcard-prod-cert"
+      objectType: "Certificate" # Auto-partitioned into kubernetes.io/tls
+  workloadSelector:
+    kind: "Deployment"
+    name: "ingress-nginx-controller"
+  validationProbes:
+    - type: "TLS"
+      endpoint: "edge-gateway.production.svc.cluster.local:8443"
+      thumbprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      queryTimeout: 10
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 2
+```
+
+### Pattern C: Microservice with HTTP Health Probe
+*Executes synthetic HTTP status checks against the isolated canary pod:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: auth-service-policy
+  namespace: production
+spec:
+  source:
+    type: "AzureKeyVault"
+    azureKeyVault:
+      keyVaultURI: "https://my-prod-vault.vault.azure.net"
+      objectName: "auth-api-jwt-secret"
+      objectType: "Secret"
+  workloadSelector:
+    kind: "Deployment"
+    name: "auth-service"
+  targetRef:
+    volumeName: "jwt-keys-volume"
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://auth-service.production.svc.cluster.local:8080/healthz"
+      path: "/healthz"
+      expectedStatus: 200
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true

@@ -101,29 +101,91 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
 
 ## 4. Planned DynamicSecretPolicy CRD (v0.3.0)
 
+When native AWS push ingestion lands in v0.3.0, you can bind secrets directly via `source.type: AWSSecretsManager`. Below are real-world policy patterns demonstrating various probe types:
+
+### Pattern A: Amazon Aurora / RDS MySQL Database Probe
+*Validates database credential rotation against an Amazon Aurora or RDS MySQL instance using a live `SELECT 1` query with automatic credential sanitization:*
+
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
-  name: aws-payment-policy
+  name: aws-aurora-db-policy
   namespace: production
 spec:
   source:
     type: "AWSSecretsManager"
     awsSecretsManager:
-      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:payment-db-cred"
+      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:aurora-mysql-creds"
   workloadSelector:
     kind: "Deployment"
-    name: "payment-api"
+    name: "order-service"
   targetRef:
-    volumeName: "db-secret-volume"
+    volumeName: "db-credentials"
   validationProbes:
-    - type: "PostgreSQL"
-      endpoint: "postgres.production.svc.cluster.local:5432"
+    - type: "MySQL"
+      endpoint: "aurora-mysql.production.svc.cluster.local:3306"
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true
     circuitBreakerThreshold: 3
+```
+
+### Pattern B: Web Microservice with HTTP Health Probe
+*Asserts that the candidate microservice starts successfully and responds with HTTP 200 before routing live production traffic:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: aws-payment-api-policy
+  namespace: production
+spec:
+  source:
+    type: "AWSSecretsManager"
+    awsSecretsManager:
+      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:payment-api-tokens"
+  workloadSelector:
+    kind: "Deployment"
+    name: "payment-api"
+  targetRef:
+    volumeName: "api-tokens"
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://payment-api.production.svc.cluster.local:8080/healthz"
+      path: "/healthz"
+      expectedStatus: 200
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
+### Pattern C: Ingress TLS Certificate Handshake Probe
+*Intercepts rotated TLS certificates and verifies live TLS handshake and SHA-256 thumbprint matching:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: aws-ingress-tls-policy
+  namespace: production
+spec:
+  source:
+    type: "AWSSecretsManager"
+    awsSecretsManager:
+      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:wildcard-app-tls"
+  workloadSelector:
+    kind: "Deployment"
+    name: "aws-load-balancer-controller"
+  validationProbes:
+    - type: "TLS"
+      endpoint: "gateway.production.svc.cluster.local:443"
+      thumbprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      queryTimeout: 10
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 2
 ```
 
 ---

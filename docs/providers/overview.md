@@ -131,8 +131,11 @@ spec:
   targetRef:
     volumeName: "db-secret-volume"
   validationProbes:
-    - type: "PostgreSQL"
-      endpoint: "postgres.internal.svc.cluster.local:5432/orders"
+    - type: "HTTP" # Also supports "TLS", "PostgreSQL", "MySQL", "Job"
+      endpoint: "http://orders-api.production.svc.cluster.local:8080/healthz"
+      path: "/healthz"
+      expectedStatus: 200
+      queryTimeout: 5
 ```
 
 ---

@@ -131,6 +131,82 @@ flowchart TD
 
 ---
 
+### 🩺 The Convergence Point: Synthetic Validation Probes Lifecycle
+
+Regardless of the ingestion mode chosen (**ESO Mode** or **Event-Driven Mode**), both models converge directly on DSO's core Progressive Delivery state machine. 
+
+DSO **never** applies rotated secrets directly to production pods. Instead, the candidate secret revision is first subjected to isolated synthetic validation:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Ingestion: Upstream Secret Rotation (ESO Sync / Cloud Queue Push)
+    Ingestion --> RevisionPrepared: Materialize Immutable SecretRevision
+    RevisionPrepared --> CanaryProvisioning: Deploy Ephemeral Canary + Network Sandbox
+    CanaryProvisioning --> Validating: Run spec.validationProbes
+    
+    state Validating {
+        [*] --> CheckProbes: HTTP / TLS / PostgreSQL / MySQL / Job
+        CheckProbes --> Passed: All Probes Succeed ✅
+        CheckProbes --> Failed: Any Probe Fails or Times Out ❌
+    }
+    
+    Passed --> Promoting: Zero-Downtime Rolling Update & Argo CD Auto-Patch
+    Promoting --> Completed: Production Verified & Teardown Canary
+    Failed --> RolledBack: Trip Circuit Breaker & Preserve Production
+    Completed --> [*]
+    RolledBack --> [*]
+```
+
+#### 1. Where Validation Probes Fit In
+1. **`RevisionPrepared`**: Computes the cryptographic SHA-256 hash of the rotated secret payload and materializes a new immutable Secret (`<workload>-rev-<sha256>`).
+2. **`CanaryProvisioning`**: Provisions an isolated canary deployment (`<workload>-canary`) with an ephemeral `NetworkPolicy` (or Cilium eBPF egress sandbox). Only the canary pod mounts the candidate secret revision.
+3. **`Validating`**: **Validation probes enter the execution lifecycle here.** The operator runs all synthetic probes configured in `spec.validationProbes` against the candidate revision and canary sandbox.
+
+#### 2. How Validation Probes Work
+DSO executes synthetic probes with built-in zero-leakage credential masking:
+- **`HTTP` / `HTTPS`**: Issues HTTP requests against canary endpoints, verifying status codes (`200-399`) within `queryTimeout`.
+- **`TLS`**: Executes a live TLS handshake, verifying certificate validity dates (not expired, already active) and asserting leaf certificate SHA-256 thumbprint matching.
+- **`PostgreSQL` & `MySQL`**: Opens a live database connection using the rotated credentials and executes a verification query (`SELECT 1`). All connection strings and passwords are automatically redacted from logs and OpenTelemetry spans.
+- **`Job` (Bring Your Own Container)**: Creates an ephemeral Kubernetes Batch Job (`batch/v1.Job`) in the target namespace (e.g., `redis-cli`, custom shell scripts, compliance validators), automatically injecting `DSO_REVISION_SECRET_NAME` into container environments.
+- **Automatic Canary Redirection**: For workload probes, DSO automatically discovers the ready canary pod IP address and redirects the probe's network traffic to the isolated canary instance.
+
+---
+
+#### 3. What Happens When Probes Succeed (✅ Success Path)
+When all validation probes pass:
+1. **Zero-Downtime Workload Promotion (`Promoting`)**:
+   - DSO safely patches the production workload (`Deployment`, `StatefulSet`, `DaemonSet`, or `Argo Rollout`) to mount the validated `SecretRevision`.
+   - Pods are rolled out progressively via standard Kubernetes rolling upgrade strategies.
+2. **GitOps Harmony (Argo CD Auto-Patch)**:
+   - DSO dynamically patches the target Argo CD `Application`'s `spec.ignoreDifferences` with JSON Pointers to the modified revision annotation and secret volumes, preventing Argo CD self-heal revert loops.
+3. **Sandbox Teardown & Metrics Reset**:
+   - The ephemeral canary deployment and network sandbox policies are deleted to reclaim cluster resources.
+   - The policy transitions to `PromotionCompleted: True`, and consecutive failure counters reset to zero (`consecutiveFailures: 0`).
+4. **Queue Event ACK (Event-Driven Mode)**:
+   - The message lock on the event broker (e.g. Azure Service Bus Peek-Lock, AWS SQS visibility timeout, GCP Pub/Sub ack) is completed and acknowledged.
+
+---
+
+#### 4. What Happens When Probes Fail (❌ Failure & Rollback Path)
+If any probe fails, times out, or the canary crashes:
+1. **Absolute Production Isolation**:
+   - **Production workloads are NEVER touched and NEVER patched.**
+   - Production pods continue running uninterrupted with their existing, working secret revision.
+2. **Sanitized Diagnostics & Metrics**:
+   - DSO captures the exact failure cause (e.g., `password authentication failed`, `certificate expired`) and redacts all secrets before recording the error into `status.conditions`.
+   - Emits failure metrics to Prometheus (`dso_probe_failures_total`) and exports OpenTelemetry tracing spans.
+3. **Transient Retries & Circuit Breaker Tripping**:
+   - DSO increments the failure counter (`consecutiveFailures++`) and retries with exponential backoff (in Event-Driven Mode, the message is released/NACKed to allow retry).
+   - If failures reach `spec.rollbackConfig.circuitBreakerThreshold` (default: 3):
+     - DSO **trips the circuit breaker** and halts further rollout attempts to prevent authentication lockouts or denial of service against upstream backends.
+     - The policy transitions to `RolledBack: True` with reason `ValidationProbeFailed`.
+     - The failed canary deployment and network policies are deleted to reclaim resources.
+4. **Self-Healing on Upstream Correction**:
+   - The moment an administrator or CI/CD pipeline pushes a valid secret to the upstream vault (or ESO syncs a corrected secret), DSO detects the new SHA-256 hash drift, resets the circuit breaker, and automatically starts a new canary validation cycle.
+
+---
+
 ## 📦 Installation Guide by Mode
 
 ### Option A: Installing DSO for ESO Mode (Decoupled / Multi-Cloud)

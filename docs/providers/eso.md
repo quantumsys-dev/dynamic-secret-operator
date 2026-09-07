@@ -116,7 +116,85 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
 
 ## 5. Configuring a DynamicSecretPolicy
 
-Create a `DynamicSecretPolicy` pointing to the intermediate Kubernetes secret via `source.type: K8sSecret`:
+To bind an ESO-synchronized secret to a workload, declare a `DynamicSecretPolicy` with `source.type: K8sSecret`. Below are real-world policy patterns demonstrating various probe types:
+
+### Pattern A: Web Microservice with HTTP Health Probe
+*Validates that the canary pod can start and respond with HTTP 200 using the candidate credentials before promoting production:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: api-service-policy
+  namespace: production
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "api-synced-credentials"
+  workloadSelector:
+    kind: "Deployment"
+    name: "api-service"
+  targetRef:
+    volumeName: "credentials-volume"
+  validationProbes:
+    - type: "HTTP"
+      endpoint: "http://api-service.production.svc.cluster.local:8080/healthz"
+      path: "/healthz"
+      expectedStatus: 200
+      queryTimeout: 5
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
+### Pattern B: Ephemeral Batch Job Probe (Redis Cache Validation)
+*Uses a "Bring Your Own Container" Job probe running `redis-cli PING` to verify rotated cache tokens without embedding drivers in the operator:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: cache-redis-policy
+  namespace: production
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "redis-synced-auth"
+  workloadSelector:
+    kind: "Deployment"
+    name: "session-worker"
+  validationProbes:
+    - type: "Job"
+      job:
+        timeoutSeconds: 30
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: redis-tester
+                    image: redis:7-alpine
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        REDIS_PASS=$(cat /secrets/auth/password)
+                        redis-cli -h redis.production.svc -a "$REDIS_PASS" PING | grep PONG
+                    volumeMounts:
+                      - name: test-secret
+                        mountPath: /secrets/auth
+                volumes:
+                  - name: test-secret
+                    secret:
+                      secretName: $(DSO_REVISION_SECRET_NAME)
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
+### Pattern C: Relational Database with PostgreSQL Probe
+*Direct database validation running a synthetic `SELECT 1` query with automatic credential sanitization:*
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
