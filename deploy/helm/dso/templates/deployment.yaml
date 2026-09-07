@@ -1,3 +1,6 @@
+{{- $isESO := eq .Values.mode "eso" }}
+{{- $isAzure := or (eq .Values.provider "azure") (and (not .Values.provider) (ne .Values.mode "eso")) }}
+{{- $azureWorkloadIdentityEnabled := and (not $isESO) $isAzure .Values.azure.workloadIdentity.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,7 +17,7 @@ spec:
     metadata:
       labels:
         {{- include "dso.selectorLabels" . | nindent 8 }}
-        {{- if .Values.azure.workloadIdentity.enabled }}
+        {{- if $azureWorkloadIdentityEnabled }}
         azure.workload.identity/use: "true"
         {{- end }}
         {{- with .Values.podLabels }}
@@ -43,6 +46,10 @@ spec:
             - --leader-elect=true
             - --health-probe-bind-address=:8081
             - --metrics-bind-address=:{{ .Values.metrics.port }}
+            - --mode={{ .Values.mode | default "event-driven" }}
+            {{- if ne .Values.mode "eso" }}
+            - --provider={{ .Values.provider | default "azure" }}
+            {{- end }}
             - --event-buffer-size={{ .Values.controller.eventBufferSize | default 1000 }}
             - --max-concurrent-reconciles={{ .Values.controller.maxConcurrentReconciles | default 5 }}
             - --sync-period={{ .Values.controller.syncPeriod | default "5m" }}
@@ -53,21 +60,37 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           env:
-            {{- if and .Values.azure.workloadIdentity.enabled .Values.azure.workloadIdentity.clientId }}
+            - name: DSO_MODE
+              value: {{ .Values.mode | default "event-driven" | quote }}
+            {{- if ne .Values.mode "eso" }}
+            - name: DSO_PROVIDER
+              value: {{ .Values.provider | default "azure" | quote }}
+            {{- end }}
+            {{- if and $azureWorkloadIdentityEnabled .Values.azure.workloadIdentity.clientId }}
             - name: AZURE_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             {{- end }}
-            {{- if and .Values.azure.workloadIdentity.enabled .Values.azure.workloadIdentity.tenantId }}
+            {{- if and $azureWorkloadIdentityEnabled .Values.azure.workloadIdentity.tenantId }}
             - name: AZURE_TENANT_ID
               value: {{ .Values.azure.workloadIdentity.tenantId | quote }}
             {{- end }}
-            {{- if .Values.azure.serviceBus.namespace }}
+            {{- if and (not $isESO) $isAzure .Values.azure.serviceBus.namespace }}
             - name: SERVICEBUS_NAMESPACE
               value: {{ .Values.azure.serviceBus.namespace | quote }}
             {{- end }}
-            {{- if .Values.azure.serviceBus.queueName }}
+            {{- if and (not $isESO) $isAzure .Values.azure.serviceBus.queueName }}
             - name: SERVICEBUS_QUEUE_NAME
               value: {{ .Values.azure.serviceBus.queueName | quote }}
+            {{- end }}
+            {{- if and (not $isESO) (eq .Values.provider "aws") .Values.aws.sqs.queueUrl }}
+            - name: AWS_SQS_QUEUE_URL
+              value: {{ .Values.aws.sqs.queueUrl | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            {{- end }}
+            {{- if and (not $isESO) (eq .Values.provider "gcp") .Values.gcp.pubsub.subscription }}
+            - name: GCP_PUBSUB_SUBSCRIPTION
+              value: {{ .Values.gcp.pubsub.subscription | quote }}
             {{- end }}
             {{- if .Values.argoCD.autoPatch }}
             - name: ARGOCD_AUTOPATCH_ENABLED
