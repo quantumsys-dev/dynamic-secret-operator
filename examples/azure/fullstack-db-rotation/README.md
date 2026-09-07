@@ -19,7 +19,7 @@ flowchart TD
             DSO["⚙️ Dynamic Secret Operator<br/>(Azure Workload Identity)"]
         end
 
-        subgraph DemoApp ["default Namespace"]
+        subgraph DemoApp ["dso-examples Namespace"]
             POSTGRES["🐘 PostgreSQL Instance<br/>(Database: appdb)"]
             APP["🌐 Go Web Dashboard & Backend<br/>(db-status-app)"]
             CANARY["🐤 Ephemeral Canary Pod<br/>(Port: 8080)"]
@@ -65,15 +65,44 @@ flowchart TD
 ### Step 1: Ensure DSO is Installed on AKS
 If not already installed, deploy DSO to your AKS cluster via Helm:
 
+**PowerShell (Windows):**
+```powershell
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
+  --namespace dso-system `
+  --create-namespace `
+  --set mode=event-driven `
+  --set provider=azure `
+  --set azure.workloadIdentity.enabled=true `
+  --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" `
+  --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" `
+  --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" `
+  --set azure.serviceBus.queueName="dso-vault-events" `
+  --wait
+```
+
+**Bash (Linux / macOS):**
 ```bash
-helm install dso ./deploy/helm/dso \
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
   --namespace dso-system \
   --create-namespace \
+  --set mode=event-driven \
+  --set provider=azure \
+  --set azure.workloadIdentity.enabled=true \
   --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" \
   --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" \
   --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" \
-  --set azure.serviceBus.queueName="dso-vault-events"
+  --set azure.serviceBus.queueName="dso-vault-events" \
+  --wait
 ```
+
+> 💡 **Other Cloud Providers & Operating Modes:**  
+> While this example demonstrates native Azure Key Vault rotation, DSO supports 4 provider installation profiles:
+> - 🟢 **[Microsoft Azure](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/azure.md)** *(Production Ready)*
+> - 🟢 **[Universal Multi-Cloud via ESO](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/eso.md)** *(Production Ready – for AWS, GCP, Vault, and hybrid)*
+> - 🟡 **[Amazon Web Services - AWS](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/aws.md)** *(In Development – Roadmap v0.3)*
+> - 🟡 **[Google Cloud Platform - GCP](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/gcp.md)** *(In Development – Roadmap v0.3)*
+> 
+> See the [Getting Started Guide](../../../docs/getting-started.md) or [Pluggable Providers Overview](../../../docs/providers/overview.md) for details.
 
 ### Step 2: Deploy the Fullstack Demo on AKS
 Execute the deployment script providing your Azure Key Vault name:
@@ -90,13 +119,18 @@ chmod +x deploy-aks.sh
 ```
 
 ### Step 3: Access the Web Dashboard
-Forward the dashboard port locally:
+- **Public URL (LoadBalancer):**
+  ```bash
+  kubectl get svc db-status-app -n dso-examples
+  # Open http://<EXTERNAL-IP> in your browser
+  ```
+- **Fallback (Port-Forward):**
+  ```bash
+  kubectl port-forward svc/db-status-app 8080:80 -n dso-examples
+  # Open http://localhost:8080 in your browser
+  ```
 
-```bash
-kubectl port-forward svc/db-status-app 8080:80
-```
-
-Open [http://localhost:8080](http://localhost:8080) to observe live database connectivity and latency.
+Open the dashboard in your browser to observe live database connectivity and latency.
 
 ### Step 4: Trigger a Live Secret Rotation Test
 
@@ -111,12 +145,12 @@ Simulate the database backend password update:
 
 **PowerShell (Windows):**
 ```powershell
-kubectl exec -i deployment/postgres -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';"
+kubectl exec -i deployment/postgres -n dso-examples -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';"
 ```
 
 **Bash (Linux / WSL / macOS):**
 ```bash
-kubectl exec -i deployment/postgres -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';"
+kubectl exec -i deployment/postgres -n dso-examples -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';"
 ```
 
 #### 4.2 Update the Secret in Azure Key Vault

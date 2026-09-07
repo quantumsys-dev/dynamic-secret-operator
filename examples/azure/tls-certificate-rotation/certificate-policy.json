@@ -1,0 +1,40 @@
+{
+  "issuerParameters": {
+    "certificateTransparency": null,
+    "certificateType": null,
+    "name": "Self"
+  },
+  "keyProperties": {
+    "curve": null,
+    "exportable": true,
+    "keySize": 2048,
+    "keyType": "RSA",
+    "reuseKey": false
+  },
+  "lifetimeActions": [
+    {
+      "action": {
+        "actionType": "AutoRenew"
+      },
+      "trigger": {
+        "daysBeforeExpiry": 30,
+        "lifetimePercentage": null
+      }
+    }
+  ],
+  "secretProperties": {
+    "contentType": "application/x-pem-file"
+  },
+  "x509CertificateProperties": {
+    "keyUsage": [
+      "cRLSign",
+      "dataEncipherment",
+      "digitalSignature",
+      "keyAgreement",
+      "keyCertSign",
+      "keyEncipherment"
+    ],
+    "subject": "CN=tls-gateway.dso-examples.svc.cluster.local",
+    "validityInMonths": 12
+  }
+}

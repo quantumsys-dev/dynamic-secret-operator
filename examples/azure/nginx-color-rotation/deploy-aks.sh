@@ -89,6 +89,16 @@ sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | ku
 echo "⏳ Waiting for Nginx Color App deployment to be ready..."
 kubectl rollout status deployment/nginx-color-app -n dso-examples --timeout=120s || { echo "❌ Error: Deployment rollout failed or timed out."; exit 1; }
 
+# 8. Check and display Public LoadBalancer Service IP
+echo "🔍 Checking Public LoadBalancer IP for nginx-color-app..."
+EXT_IP="$(kubectl get svc nginx-color-app -n dso-examples -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+if [ -z "${EXT_IP}" ]; then
+    echo "ℹ️  LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    echo "ℹ️  Run 'kubectl get svc nginx-color-app -n dso-examples -w' to view the public IP as soon as Azure assigns it."
+else
+    echo "✅ Public IP assigned: http://${EXT_IP}"
+fi
+
 echo "=================================================================="
 echo "✅ Nginx Color Rotation Example deployed successfully on AKS!"
 echo "=================================================================="
@@ -120,13 +130,16 @@ echo "   az keyvault secret set --vault-name ${KEYVAULT_NAME} --name 'nginx-bg-c
 echo ""
 echo "4️⃣ Observe Zero-Downtime Promotion:"
 echo "   - Key Vault publishes SecretNewVersionCreated event to Azure Service Bus."
-echo "   - DSO triggers Canary Provisioning, runs synthetic HTTP /health probe."
+echo "   - DSO triggers Canary Provisioning, runs synthetic Job validation probe to assert valid hex color."
 echo "   - Target Deployment 'nginx-color-app' is promoted to the new color with zero downtime!"
 echo "   - Refresh your browser to see the background change from Blue (#3b82f6) to Green (#10b981)!"
 echo ""
-echo "5️⃣ Test Circuit Breaker & Auto-Rollback (Optional):"
-echo "   - Inject an invalid value that fails health checks:"
+echo "5️⃣ Test Circuit Breaker & Safe Abort (Optional):"
+echo "   - Inject an invalid value that fails format validation:"
 echo "     az keyvault secret set --vault-name ${KEYVAULT_NAME} --name 'nginx-bg-color' --value 'INVALID_COLOR'"
-echo "   - Watch DSO Canary fail synthetic probes and automatically abort rollout without affecting live traffic!"
+echo "   - Watch DSO Job probe fail hex format validation ('INVALID_COLOR' is not a valid hex code)."
+echo "   - DSO aborts promotion and protects production workloads from invalid secrets."
+echo "   - After reaching threshold (3 failures), DSO trips the Circuit Breaker (CircuitBreakerTripped: True)!"
+echo "   - Live traffic remains 100% online on the previous stable color!"
 echo "=================================================================="
 

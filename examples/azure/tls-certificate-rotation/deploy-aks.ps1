@@ -60,15 +60,11 @@ Write-Step "Checking certificate 'ingress-tls-cert' in Azure Key Vault '$KeyVaul
 $certCheck = az keyvault certificate show --vault-name $KeyVaultName --name "ingress-tls-cert" 2>$null
 if (-not $certCheck) {
     Write-Info "Creating initial self-signed certificate 'ingress-tls-cert' in Key Vault..."
-    $defaultPolicy = az keyvault certificate get-default-policy 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to get default certificate policy.`nDetails: $defaultPolicy"
-    }
-
+    $policyPath = Join-Path $PSScriptRoot "certificate-policy.json"
     $createCertOut = az keyvault certificate create `
         --vault-name $KeyVaultName `
         --name "ingress-tls-cert" `
-        --policy $defaultPolicy `
+        --policy "@$policyPath" `
         --output none 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create certificate 'ingress-tls-cert' in Key Vault '$KeyVaultName'.`nDetails: $createCertOut"
@@ -100,6 +96,34 @@ Write-Step "Ensuring namespace 'dso-examples' exists..."
 $nsOut = kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - 2>&1
 if ($LASTEXITCODE -ne 0) { throw "Failed to ensure namespace 'dso-examples'.`nDetails: $nsOut" }
 Write-Success "Namespace 'dso-examples' ready."
+
+Write-Step "Creating bootstrap TLS secret in cluster..."
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new("CN=localhost", $rsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddYears(1))
+$certPem = $cert.ExportCertificatePem()
+$keyPem = $rsa.ExportPkcs8PrivateKeyPem()
+
+$certFile = New-TemporaryFile
+$keyFile = New-TemporaryFile
+try {
+    Set-Content -Path $certFile.FullName -Value $certPem
+    Set-Content -Path $keyFile.FullName -Value $keyPem
+    $cp = $certFile.FullName
+    $kp = $keyFile.FullName
+    $secretOut = kubectl create secret tls tls-gateway-ingress-tls-cert-initial `
+        --namespace dso-examples `
+        --cert=$cp `
+        --key=$kp `
+        --dry-run=client -o yaml | kubectl apply -f - 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create bootstrap TLS secret.`nDetails: $secretOut"
+    }
+} finally {
+    Remove-Item -Path $certFile.FullName -ErrorAction SilentlyContinue
+    Remove-Item -Path $keyFile.FullName -ErrorAction SilentlyContinue
+}
+Write-Success "Bootstrap TLS secret created."
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "../../..") -ErrorAction SilentlyContinue
 if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
@@ -179,7 +203,7 @@ Write-Host @"
      kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f
 
 3️⃣ Trigger a Certificate Renewal in Azure Key Vault:
-   az keyvault certificate create --vault-name $KeyVaultName --name "ingress-tls-cert" --policy (az keyvault certificate get-default-policy)
+   az keyvault certificate create --vault-name "$KeyVaultName" --name "ingress-tls-cert" --policy "@certificate-policy.json"
 
 4️⃣ Observe Zero-Downtime TLS Rollover:
    - Azure Key Vault generates a new x509 certificate and private key.

@@ -28,7 +28,7 @@ flowchart TD
             DSO["⚙️ Dynamic Secret Operator"]
         end
 
-        subgraph ArgoRollouts ["default Namespace"]
+        subgraph ArgoRollouts ["dso-examples Namespace"]
             ROLLOUT["📜 Rollout: rollout-payment-service"]
             ACTIVE_SVC["🌐 Active Service (Blue)<br/>(Live Ingress Traffic)"]
             PREVIEW_SVC["🧪 Preview Service (Green)<br/>(Argo AnalysisRuns / manual promotion)"]
@@ -87,14 +87,26 @@ chmod +x deploy-aks.sh
 ./deploy-aks.sh -k kv-dso-dev
 ```
 
-### Step 2: Monitor Blue/Green Rollout Progress
+### Step 2: Access the Payment Service
+- **Public URL (LoadBalancer):**
+  ```bash
+  kubectl get svc payment-service-active -n dso-examples
+  # Open http://<EXTERNAL-IP> in your browser
+  ```
+- **Fallback (Port-Forward):**
+  ```bash
+  kubectl port-forward svc/payment-service-active 8080:80 -n dso-examples
+  # Open http://localhost:8080 in your browser
+  ```
+
+### Step 3: Monitor Blue/Green Rollout Progress
 Watch the live cutover using the Argo Rollouts CLI:
 
 ```bash
-kubectl argo rollouts get rollout rollout-payment-service --watch
+kubectl argo rollouts get rollout rollout-payment-service -n dso-examples --watch
 ```
 
-### Step 3: Trigger a Rotation in Key Vault
+### Step 4: Trigger a Rotation in Key Vault
 ```bash
 az keyvault secret set \
   --vault-name kv-dso-dev \

@@ -91,13 +91,23 @@ if [ ! -f "${SCRIPT_DIR}/manifests.yaml" ]; then
     echo "❌ Error: Manifest file not found at ${SCRIPT_DIR}/manifests.yaml"
     exit 1
 fi
-sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
+sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -n dso-examples -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
 echo "⏳ Waiting for PostgreSQL to be ready..."
 kubectl rollout status deployment/postgres -n dso-examples --timeout=120s || { echo "❌ Error: PostgreSQL rollout failed or timed out."; exit 1; }
 
 echo "⏳ Waiting for Web Dashboard to be ready..."
 kubectl rollout status deployment/db-status-app -n dso-examples --timeout=120s || { echo "❌ Error: Web Dashboard rollout failed or timed out."; exit 1; }
+
+# 8. Check and display Public LoadBalancer Service IP
+echo "🔍 Checking Public LoadBalancer IP for db-status-app..."
+EXT_IP="$(kubectl get svc db-status-app -n dso-examples -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+if [ -z "${EXT_IP}" ]; then
+    echo "ℹ️  LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    echo "ℹ️  Run 'kubectl get svc db-status-app -n dso-examples -w' to view the public IP as soon as Azure assigns it."
+else
+    echo "✅ Public IP assigned: http://${EXT_IP}"
+fi
 
 echo "=================================================================="
 echo "✅ Fullstack DB Rotation PoC deployed successfully on AKS!"
@@ -128,7 +138,7 @@ echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"
 echo ""
 echo "3️⃣ Execute Database Credential Rotation:"
 echo "   🔹 Step 3.1: Update the user password directly inside PostgreSQL (simulating DBA/Rotation Engine):"
-echo "      kubectl exec deployment/postgres -- psql -U postgres -d appdb -c \"ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';\""
+echo "      kubectl exec deployment/postgres -n dso-examples -- psql -U postgres -d appdb -c \"ALTER USER postgres WITH PASSWORD 'NewSecret2026_Rotated!';\""
 echo ""
 echo "   🔹 Step 3.2: Update the secret in Azure Key Vault:"
 echo "      az keyvault secret set --vault-name ${KEYVAULT_NAME} --name 'db-password' --value 'NewSecret2026_Rotated!'"

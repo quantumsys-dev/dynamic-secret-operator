@@ -17,14 +17,14 @@ flowchart TD
     subgraph AKS ["☸️ Azure Kubernetes Service (AKS) Cluster"]
         subgraph DSOSystem ["dso-system Namespace"]
             DSO["⚙️ Dynamic Secret Operator<br/>(ARGOCD_AUTOPATCH_ENABLED=true)"]
-            PROBE["🩺 HTTP Validation Probe"]
+            PROBE["🧪 Job Validation Probe<br/>(Hex Format Assert)"]
         end
 
         subgraph GitOps ["argocd Namespace"]
             ARGOCD["🐙 Argo CD Application Controller<br/>(Self-Heal Active)"]
         end
 
-        subgraph ProductionWorkload ["default Namespace"]
+        subgraph ProductionWorkload ["dso-examples Namespace"]
             CANARY["🐤 1-Replica Canary Pod<br/>(NetworkPolicy Isolated)"]
             PROD["🚀 Production Nginx Gateway<br/>(Rolling Update)"]
             SEC["🔒 Immutable SecretRevision"]
@@ -36,8 +36,8 @@ flowchart TD
     ASB -->|"3. Peek-Lock Event"| DSO
     DSO -->|"4. Materialize Revision"| SEC
     DSO -->|"5. Provision Isolated Canary"| CANARY
-    DSO -->|"6. HTTP Validation Probe"| PROBE
-    PROBE -->|"Verify Status 200"| CANARY
+    DSO -->|"6. Run Validation Probe"| PROBE
+    PROBE -->|"Verify CSS Hex Color"| SEC
     DSO -->|"7. Auto-Patch ignoreDifferences"| ARGOCD
     DSO -->|"8. Promote Workload"| PROD
     PROD -->|"Mounts"| SEC
@@ -79,13 +79,18 @@ chmod +x deploy-aks.sh
 ```
 
 ### Step 2: Access the Nginx Gateway
-Forward the gateway port:
+- **Public URL (LoadBalancer):**
+  ```bash
+  kubectl get svc nginx-color-app -n dso-examples
+  # Open http://<EXTERNAL-IP> in your browser
+  ```
+- **Fallback (Port-Forward):**
+  ```bash
+  kubectl port-forward svc/nginx-color-app 8080:80 -n dso-examples
+  # Open http://localhost:8080 in your browser
+  ```
 
-```bash
-kubectl port-forward svc/nginx-color-app 8080:80
-```
-
-Open [http://localhost:8080](http://localhost:8080) to observe the active background color.
+Open the application in your browser to observe the active background color.
 
 ### Step 3: Trigger a Secret Rotation in Key Vault
 Update the background color secret in Azure Key Vault:
@@ -98,3 +103,27 @@ az keyvault secret set \
 ```
 
 Refresh your browser to see the new color active without application downtime or Argo CD drift conflicts.
+
+### Step 4: Test Circuit Breaker & Safety Abort
+Simulate human error or misconfiguration by injecting an invalid color value:
+
+```bash
+az keyvault secret set \
+  --vault-name kv-dso-dev \
+  --name "nginx-bg-color" \
+  --value "INVALID_COLOR"
+```
+
+1. **Observe DSO Safety Gate:** DSO receives the event and runs the synthetic validation probe.
+2. **Probe Failure:** The probe detects that `INVALID_COLOR` is not a valid CSS hex color and fails immediately with exit code 1.
+3. **Production Isolation:** Production pods (`nginx-color-app`) are **not** touched and remain 100% online on the previous stable color.
+4. **Circuit Breaker Tripped:** After reaching the failure threshold (3 attempts), DSO trips the Circuit Breaker (`CircuitBreakerTripped: True`) to protect cluster stability and halt reconciliation loops:
+   ```bash
+   kubectl get dynamicsecretpolicy aks-nginx-color-policy -n dso-examples
+   ```
+5. **Recovery:** Fix the secret in Key Vault with a valid hex color:
+   ```bash
+   az keyvault secret set --vault-name kv-dso-dev --name "nginx-bg-color" --value "#10b981"
+   ```
+   DSO automatically resets the Circuit Breaker, re-runs validation, and safely promotes production!
+

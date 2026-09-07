@@ -20,7 +20,7 @@ flowchart TD
             PROBE["🩺 Synthetic TLS Validation Probe<br/>(Handshake & Thumbprint)"]
         end
 
-        subgraph IngressWorkload ["default Namespace"]
+        subgraph IngressWorkload ["dso-examples Namespace"]
             SEC["🔒 Secret: tls-gateway-ingress-tls-cert-rev-a1b2c3<br/>Type: kubernetes.io/tls<br/>├── tls.crt<br/>└── tls.key"]
             CANARY["🐤 Canary Pod<br/>(Port 8443 SSL)"]
             PROD["🚀 Production Ingress / Gateway<br/>(Zero-Downtime Rollover)"]
@@ -34,7 +34,7 @@ flowchart TD
     DSO -->|"5. Provision Canary"| CANARY
     CANARY -->|"Mounts"| SEC
     DSO -->|"6. Execute TLS Handshake Probe"| PROBE
-    PROBE -->|"Verify SSL"| CANARY
+    PROBE -->|"Verify SSL Handshake"| PROD
     PROBE -->|"7. Promote Production Workload"| PROD
 ```
 
@@ -74,28 +74,34 @@ chmod +x deploy-aks.sh
 ```
 
 ### Step 2: Test HTTPS Endpoint on AKS
-Forward the TLS gateway port:
 
-```bash
-kubectl port-forward svc/tls-gateway 8443:8443
-```
+- **Public Endpoint (LoadBalancer):**
+  ```bash
+  kubectl get svc tls-gateway -n dso-examples
+  curl -kv https://<EXTERNAL-IP>:8443
+  ```
+- **Fallback (Port-Forward):**
+  ```bash
+  kubectl port-forward svc/tls-gateway 8443:8443 -n dso-examples
+  curl -kv https://localhost:8443
+  ```
 
-Query the HTTPS endpoint:
-
-```bash
-curl -k https://localhost:8443
-```
-
-You should receive a secure `200 OK` response.
+You should receive a secure `200 OK` response with the active TLS certificate details.
 
 ### Step 3: Trigger a Live Certificate Rotation in Key Vault
 Rotate or create a new version of the certificate in Azure Key Vault:
 
+**Bash (Linux / WSL / macOS):**
 ```bash
 az keyvault certificate create \
   --vault-name kv-dso-dev \
   --name "ingress-tls-cert" \
-  --policy "$(az keyvault certificate get-default-policy)"
+  --policy "@certificate-policy.json"
+```
+
+**PowerShell (Windows):**
+```powershell
+az keyvault certificate create --vault-name "kv-dso-dev" --name "ingress-tls-cert" --policy "@certificate-policy.json"
 ```
 
 Observe DSO automatically parse the new certificate, validate the handshake on a canary, and perform a zero-downtime rolling update on the production gateway.
