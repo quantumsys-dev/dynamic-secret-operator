@@ -9,7 +9,8 @@
 # - Azure Service Bus (Basic tier, queue with dead-lettering)
 # - Azure Event Grid System Topic & Subscription (Key Vault -> Service Bus Queue)
 # - Azure Kubernetes Service (Free tier, 1x B2s node, OIDC & Workload Identity enabled)
-# - Azure RBAC Role Assignments (Key Vault Secrets User, Service Bus Data Receiver)
+# - Azure Container Registry (Basic tier - lowest cost, ~$0.16/day, attached to AKS)
+# - Azure RBAC Role Assignments (Key Vault Secrets User, Service Bus Data Receiver, AcrPull)
 # - Workload Identity Federated Credential
 #
 # All resources are verified before creation for full idempotency.
@@ -44,6 +45,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string]$EventSubscriptionName = "sub-kv-to-sb",
+
+    [Parameter(Mandatory = $false)]
+    [string]$AcrName = "",
 
     [Parameter(Mandatory = $false)]
     [string]$ServiceAccountNamespace = "dso-system",
@@ -93,6 +97,13 @@ $subscriptionId = $account.id
 $tenantId = $account.tenantId
 Write-Success "Connected to Subscription: $($account.name) ($subscriptionId)"
 Write-Success "Tenant ID: $tenantId"
+
+if (-not $AcrName) {
+    # Generate deterministic lowercase alphanumeric ACR name (5-50 chars, no hyphens)
+    $subClean = $subscriptionId.Replace("-", "").Substring(0, 6).ToLowerInvariant()
+    $AcrName = "acrdsodev$subClean"
+}
+Write-Info "Target Azure Container Registry (ACR): $AcrName (Basic Tier)"
 
 # ------------------------------------------------------------------------------
 # 1. Resource Group
@@ -231,7 +242,7 @@ if ($subId) {
         --resource-group $ResourceGroupName `
         --endpoint-type servicebusqueue `
         --endpoint $queueId `
-        --included-event-types Microsoft.KeyVault.SecretNewVersionCreated `
+        --included-event-types Microsoft.KeyVault.SecretNewVersionCreated Microsoft.KeyVault.CertificateNewVersionCreated `
         --output none
     Write-Success "Event Grid subscription '$EventSubscriptionName' created."
 }
@@ -264,9 +275,46 @@ $aksOidcIssuerUrl = az aks show --name $ClusterName --resource-group $ResourceGr
 Write-Success "AKS OIDC Issuer URL: $aksOidcIssuerUrl"
 
 # ------------------------------------------------------------------------------
-# 7. Azure RBAC Role Assignments (Idempotent)
+# 7. Azure Container Registry (ACR) (Basic Tier - Lowest Cost, Attached to AKS)
 # ------------------------------------------------------------------------------
-Write-Step "Step 7: Configuring Azure RBAC Role Assignments..."
+Write-Step "Step 7: Checking Azure Container Registry (ACR) '$AcrName'..."
+
+$acrId = az acr show --name $AcrName --resource-group $ResourceGroupName --query id -o tsv 2>$null
+if ($acrId) {
+    Write-Info "ACR '$AcrName' already exists."
+} else {
+    Write-Info "Creating ACR '$AcrName' (SKU: Basic - lowest cost tier, ~$0.16/day)..."
+    az acr create `
+        --name $AcrName `
+        --resource-group $ResourceGroupName `
+        --location $Location `
+        --sku Basic `
+        --admin-enabled true `
+        --output none
+    $acrId = az acr show --name $AcrName --resource-group $ResourceGroupName --query id -o tsv
+    Write-Success "ACR '$AcrName' created."
+}
+
+$acrLoginServer = az acr show --name $AcrName --resource-group $ResourceGroupName --query loginServer -o tsv
+Write-Success "ACR Login Server: $acrLoginServer"
+
+# Ensure AKS kubelet identity is attached to ACR with AcrPull role
+$kubeletObjectId = az aks show --name $ClusterName --resource-group $ResourceGroupName --query "identityProfile.kubeletidentity.objectId" -o tsv 2>$null
+if ($kubeletObjectId) {
+    $acrRoleAssigned = az role assignment list --assignee $kubeletObjectId --scope $acrId --role "AcrPull" --query "[0].id" -o tsv 2>$null
+    if ($acrRoleAssigned) {
+        Write-Info "AKS kubelet identity already has 'AcrPull' role on ACR '$AcrName'."
+    } else {
+        Write-Info "Attaching ACR '$AcrName' to AKS cluster '$ClusterName'..."
+        az aks update --name $ClusterName --resource-group $ResourceGroupName --attach-acr $AcrName --output none
+        Write-Success "AKS cluster '$ClusterName' attached to ACR '$AcrName'."
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 8. Azure RBAC Role Assignments (Idempotent)
+# ------------------------------------------------------------------------------
+Write-Step "Step 8: Configuring Azure RBAC Role Assignments..."
 
 # Role 1: Key Vault Secrets User
 $kvRoleAssigned = az role assignment list --assignee $managedIdentityPrincipalId --scope $keyVaultId --role "Key Vault Secrets User" --query "[0].id" -o tsv 2>$null
@@ -315,9 +363,9 @@ if ($currentUserId) {
 }
 
 # ------------------------------------------------------------------------------
-# 8. Workload Identity Federated Credential
+# 9. Workload Identity Federated Credential
 # ------------------------------------------------------------------------------
-Write-Step "Step 8: Configuring Workload Identity Federated Credential..."
+Write-Step "Step 9: Configuring Workload Identity Federated Credential..."
 
 $federatedCredentialName = "dso-federated-credential"
 $fedCredId = az identity federated-credential show --name $federatedCredentialName --identity-name $IdentityName --resource-group $ResourceGroupName --query id -o tsv 2>$null
@@ -337,14 +385,14 @@ if ($fedCredId) {
 }
 
 # ------------------------------------------------------------------------------
-# 9. Get AKS Credentials (Kubeconfig)
+# 10. Get AKS Credentials (Kubeconfig)
 # ------------------------------------------------------------------------------
-Write-Step "Step 9: Merging AKS Cluster Kubeconfig credentials..."
+Write-Step "Step 10: Merging AKS Cluster Kubeconfig credentials..."
 az aks get-credentials --resource-group $ResourceGroupName --name $ClusterName --overwrite-existing
 Write-Success "Kubeconfig updated for cluster '$ClusterName'."
 
 # ------------------------------------------------------------------------------
-# 10. Summary & Deployment Configuration
+# 11. Summary & Deployment Configuration
 # ------------------------------------------------------------------------------
 Write-Host "`n==================================================================" -ForegroundColor Green
 Write-Host "🎉 ALL AZURE INFRASTRUCTURE PROVISIONED SUCCESSFULLY!" -ForegroundColor Green
@@ -357,6 +405,8 @@ Write-Host @"
 Resource Group:             $ResourceGroupName
 Location:                   $Location
 AKS Cluster (Free Tier):    $ClusterName
+Azure Container Registry:   $AcrName (Basic Tier - Lowest Cost)
+  Login Server:             $acrLoginServer
 Managed Identity:           $IdentityName
   Client ID:                $managedIdentityClientId
   Principal ID:             $managedIdentityPrincipalId
@@ -378,15 +428,88 @@ export SERVICEBUS_QUEUE_NAME="$ServiceBusQueueName"
 export KEYVAULT_URI="$keyVaultUri"
 export ARGOCD_AUTOPATCH_ENABLED="true"
 
-📦 Helm Installation Command:
+🐳 Build & Push Operator Image to ACR:
 ------------------------------------------------------------------
-helm install dso ./deploy/helm/dso \
-  --namespace $ServiceAccountNamespace \
-  --create-namespace \
-  --set azure.workloadIdentity.clientId="$managedIdentityClientId" \
-  --set azure.workloadIdentity.tenantId="$tenantId" \
-  --set azure.serviceBus.namespace="$serviceBusFqdn" \
-  --set azure.serviceBus.queueName="$ServiceBusQueueName"
+az acr login --name $AcrName
+docker tag dynamic-secret-operator:local "$acrLoginServer/dynamic-secret-operator:0.2.1"
+docker push "$acrLoginServer/dynamic-secret-operator:0.2.1"
+
+📦 Helm Installation Options:
+------------------------------------------------------------------
+
+👉 OPTION 1: Native Azure Event-Driven Mode (Azure Key Vault + Service Bus)
+   Ingests real-time rotation events via Azure Service Bus using Workload Identity.
+
+   PowerShell:
+   helm install dso ./deploy/helm/dso ``
+     --namespace $ServiceAccountNamespace ``
+     --create-namespace ``
+     --set mode=event-driven ``
+     --set provider=azure ``
+     --set image.repository="$acrLoginServer/dynamic-secret-operator" ``
+     --set image.tag="0.2.1" ``
+     --set azure.workloadIdentity.enabled=true ``
+     --set azure.workloadIdentity.clientId="$managedIdentityClientId" ``
+     --set azure.workloadIdentity.tenantId="$tenantId" ``
+     --set azure.serviceBus.namespace="$serviceBusFqdn" ``
+     --set azure.serviceBus.queueName="$ServiceBusQueueName" ``
+     --wait
+
+   Bash:
+   helm install dso ./deploy/helm/dso \
+     --namespace $ServiceAccountNamespace \
+     --create-namespace \
+     --set mode=event-driven \
+     --set provider=azure \
+     --set azure.workloadIdentity.enabled=true \
+     --set azure.workloadIdentity.clientId="$managedIdentityClientId" \
+     --set azure.workloadIdentity.tenantId="$tenantId" \
+     --set azure.serviceBus.namespace="$serviceBusFqdn" \
+     --set azure.serviceBus.queueName="$ServiceBusQueueName" \
+     --wait
+
+------------------------------------------------------------------
+
+👉 OPTION 2: Universal Multi-Cloud Mode via External Secrets Operator (ESO)
+   Decoupled architecture: ESO handles vault synchronization, DSO handles canary rollouts.
+   Zero cloud IAM credentials needed inside DSO!
+
+   Step 2.1: Install External Secrets Operator (ESO):
+   helm repo add external-secrets https://charts.external-secrets.io
+   helm repo update
+   helm install external-secrets external-secrets/external-secrets \
+     --namespace external-secrets \
+     --create-namespace \
+     --set installCRDs=true \
+     --wait
+
+   Step 2.2: Install Dynamic Secret Operator (DSO) in ESO Mode:
+   PowerShell:
+   helm install dso ./deploy/helm/dso ``
+     --namespace $ServiceAccountNamespace ``
+     --create-namespace ``
+     --set mode=eso ``
+     --set image.repository="$acrLoginServer/dynamic-secret-operator" ``
+     --set image.tag="0.2.1" ``
+     --wait
+
+   Bash:
+   helm install dso ./deploy/helm/dso \
+     --namespace $ServiceAccountNamespace \
+     --create-namespace \
+     --set mode=eso \
+     --set image.repository="$acrLoginServer/dynamic-secret-operator" \
+     --set image.tag="0.2.1" \
+     --wait
+
+   Note: In ESO mode, label your synced ExternalSecret target with:
+         dso.quantumsys.dev/managed: "watch"
+
+------------------------------------------------------------------
+🔍 Verification & Diagnostics:
+------------------------------------------------------------------
+kubectl get pods -n $ServiceAccountNamespace
+kubectl logs -n $ServiceAccountNamespace -l app.kubernetes.io/name=dynamic-secret-operator -f
 
 ==================================================================
 "@ -ForegroundColor Cyan
