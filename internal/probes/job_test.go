@@ -200,3 +200,65 @@ func TestBuildProbeJob(t *testing.T) {
 		t.Errorf("expected %s=%s in job container env", EnvRevisionSecretName, revisionSecretName)
 	}
 }
+
+func TestBuildProbeJob_DifferentContainerName(t *testing.T) {
+	policy := &secretv1alpha1.DynamicSecretPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "redis-cache-rotation",
+			Namespace: "dso-examples",
+		},
+		Spec: secretv1alpha1.DynamicSecretPolicySpec{
+			WorkloadSelector: secretv1alpha1.WorkloadSelector{
+				Kind: "Deployment",
+				Name: "redis-consumer",
+			},
+			VaultRef: secretv1alpha1.VaultReference{
+				ObjectName: "redis-auth-password",
+			},
+			TargetRef: &secretv1alpha1.TargetRef{
+				ContainerName: "app",
+				EnvName:       "REDIS_AUTH_PASSWORD",
+			},
+		},
+		Status: secretv1alpha1.DynamicSecretPolicyStatus{
+			DesiredRevision: "753c1ecc6895",
+		},
+	}
+
+	jobProbeSpec := &secretv1alpha1.JobProbeSpec{
+		JobTemplate: batchv1.JobTemplateSpec{
+			Spec: batchv1.JobSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyNever,
+						Containers: []corev1.Container{
+							{
+								Name:  "redis-ping",
+								Image: "redis:7-alpine",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	revisionSecretName := "redis-consumer-redis-auth-password-rev-753c1ecc6895"
+	job := buildProbeJob(policy, jobProbeSpec, revisionSecretName)
+
+	if job == nil {
+		t.Fatalf("expected non-nil Job")
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	var redisAuthRef string
+	for _, env := range container.Env {
+		if env.Name == "REDIS_AUTH_PASSWORD" && env.ValueFrom != nil && env.ValueFrom.SecretKeyRef != nil {
+			redisAuthRef = env.ValueFrom.SecretKeyRef.Name
+		}
+	}
+	if redisAuthRef != revisionSecretName {
+		t.Errorf("expected REDIS_AUTH_PASSWORD secretKeyRef.Name to be %s, got %s", revisionSecretName, redisAuthRef)
+	}
+}
+
