@@ -193,7 +193,7 @@ spec:
     circuitBreakerThreshold: 3
 ```
 
-### Pattern C: Relational Database with PostgreSQL Probe
+### Pattern C: Relational Database with PostgreSQL / MySQL Probe
 *Direct database validation running a synthetic `SELECT 1` query with automatic credential sanitization:*
 
 ```yaml
@@ -213,12 +213,39 @@ spec:
   targetRef:
     volumeName: "db-secret-volume"
   validationProbes:
-    - type: "PostgreSQL"
+    - type: "PostgreSQL" # Also supports "MySQL"
       endpoint: "postgres.internal.svc.cluster.local:5432/orders"
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true
     circuitBreakerThreshold: 3
+```
+
+### Pattern D: Ingress Gateway with TLS Certificate Handshake Probe
+*Validates that an ESO-synced `kubernetes.io/tls` secret successfully negotiates a TLS handshake and matches the expected SHA-256 thumbprint:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: edge-gateway-tls-policy
+  namespace: ingress-system
+spec:
+  source:
+    type: "K8sSecret"
+    k8sSecret:
+      name: "eso-synced-ingress-tls"
+  workloadSelector:
+    kind: "Deployment"
+    name: "ingress-nginx-controller"
+  validationProbes:
+    - type: "TLS"
+      endpoint: "edge-gateway.ingress-system.svc.cluster.local:443"
+      thumbprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      queryTimeout: 10
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 2
 ```
 
 ---

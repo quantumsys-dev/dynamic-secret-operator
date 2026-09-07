@@ -240,6 +240,53 @@ spec:
     circuitBreakerThreshold: 3
 ```
 
+### Pattern D: "Bring Your Own Container" Ephemeral Batch Job Probe (Redis Cache)
+*Executes an isolated Kubernetes Job to validate custom protocols (e.g. `redis-cli PING` against Azure Cache for Redis), automatically injecting candidate credentials via `$(DSO_REVISION_SECRET_NAME)`:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: azure-redis-cache-policy
+  namespace: production
+spec:
+  source:
+    type: "AzureKeyVault"
+    azureKeyVault:
+      keyVaultURI: "https://my-prod-vault.vault.azure.net"
+      objectName: "azure-redis-primary-key"
+      objectType: "Secret"
+  workloadSelector:
+    kind: "Deployment"
+    name: "session-worker"
+  validationProbes:
+    - type: "Job"
+      job:
+        timeoutSeconds: 30
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: redis-tester
+                    image: redis:7-alpine
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        REDIS_PASS=$(cat /secrets/auth/password)
+                        redis-cli -h my-redis.redis.cache.windows.net -p 6380 --tls -a "$REDIS_PASS" PING | grep PONG
+                    volumeMounts:
+                      - name: test-secret
+                        mountPath: /secrets/auth
+                volumes:
+                  - name: test-secret
+                    secret:
+                      secretName: $(DSO_REVISION_SECRET_NAME)
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
 ---
 
 ## 5. End-to-End Verification

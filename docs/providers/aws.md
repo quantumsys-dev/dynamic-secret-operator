@@ -188,6 +188,51 @@ spec:
     circuitBreakerThreshold: 2
 ```
 
+### Pattern D: "Bring Your Own Container" Ephemeral Batch Job Probe (ElastiCache Redis)
+*Schedules an isolated Kubernetes Batch Job running `redis-cli PING` against an Amazon ElastiCache cluster with candidate secret automatically injected as `$(DSO_REVISION_SECRET_NAME)`:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: aws-redis-cache-policy
+  namespace: production
+spec:
+  source:
+    type: "AWSSecretsManager"
+    awsSecretsManager:
+      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:elasticache-redis-auth"
+  workloadSelector:
+    kind: "Deployment"
+    name: "session-worker"
+  validationProbes:
+    - type: "Job"
+      job:
+        timeoutSeconds: 30
+        jobTemplate:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: redis-tester
+                    image: redis:7-alpine
+                    command: ["/bin/sh", "-c"]
+                    args:
+                      - |
+                        REDIS_PASS=$(cat /secrets/auth/password)
+                        redis-cli -h redis-cluster.cache.amazonaws.com -a "$REDIS_PASS" PING | grep PONG
+                    volumeMounts:
+                      - name: test-secret
+                        mountPath: /secrets/auth
+                volumes:
+                  - name: test-secret
+                    secret:
+                      secretName: $(DSO_REVISION_SECRET_NAME)
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 3
+```
+
 ---
 
 ## 5. Recommended Production Alternative Today: ESO Mode

@@ -191,6 +191,33 @@ spec:
     circuitBreakerThreshold: 3
 ```
 
+### Pattern D: Ingress Gateway with TLS Certificate Handshake Probe
+*Intercepts rotated TLS certificates and verifies live TLS handshake and SHA-256 thumbprint matching:*
+
+```yaml
+apiVersion: dso.quantumsys.dev/v1alpha1
+kind: DynamicSecretPolicy
+metadata:
+  name: gcp-ingress-tls-policy
+  namespace: ingress-system
+spec:
+  source:
+    type: "GCPSecretManager"
+    gcpSecretManager:
+      secretId: "projects/my-project/secrets/wildcard-ingress-tls"
+  workloadSelector:
+    kind: "Deployment"
+    name: "ingress-nginx-controller"
+  validationProbes:
+    - type: "TLS"
+      endpoint: "edge-gateway.ingress-system.svc.cluster.local:443"
+      thumbprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      queryTimeout: 10
+  rollbackConfig:
+    autoRollback: true
+    circuitBreakerThreshold: 2
+```
+
 ---
 
 ## 5. Recommended Production Alternative Today: ESO Mode

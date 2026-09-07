@@ -238,157 +238,39 @@ DSO features a modular architecture where the **secret source backend** (`spec.s
 | `spec.validationProbes` | Synthetic zero-trust canary validation checks | `HTTP` / `HTTPS`, `TLS` (handshake & thumbprint), `PostgreSQL`, `MySQL` (`SELECT 1`), `Job` (Bring Your Own Container) |
 | `spec.rollbackConfig` | Resiliency, backoff, and circuit breaker protection | `autoRollback: true`, `circuitBreakerThreshold: 3` |
 
-### 🛠️ Real-World Policy Patterns
-
-Below are representative examples across different cloud backends and probe types:
-
-#### Pattern 1: Universal Multi-Cloud (ESO Mode) + `HTTP` Health Probe
-*Watches an intermediate secret synced by External Secrets Operator (from AWS, GCP, Vault, etc.) and tests canary HTTP health status (`200 OK`) before promotion:*
+### Declarative Policy Structure
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
-  name: web-api-policy
+  name: example-policy
   namespace: production
 spec:
-  # 1. Source Ingestion: Universal ESO Mode (No cloud IAM credentials needed in DSO)
+  # 1. Pluggable Source Backend (K8sSecret / AzureKeyVault / AWSSecretsManager / GCPSecretManager / Vault)
   source:
-    type: "K8sSecret"
+    type: "K8sSecret" # e.g. "K8sSecret" for ESO, "AzureKeyVault" for Azure push
     k8sSecret:
-      name: "eso-synced-api-token"
+      name: "eso-synced-credentials"
 
-  # 2. Target Workload
+  # 2. Target Workload to Protect and Roll Over
   workloadSelector:
-    kind: "Deployment"
-    name: "web-api"
+    kind: "Deployment" # Options: Deployment, StatefulSet, DaemonSet, Rollout
+    name: "my-service"
 
-  # 3. Mount Injection Point
+  # 3. Workload Volume Injection Boundary (Optional)
   targetRef:
-    volumeName: "api-keys-volume"
+    volumeName: "credentials-volume"
 
-  # 4. Synthetic Validation Probe: HTTP Health Check
+  # 4. Pluggable Synthetic Validation Probes (HTTP, TLS, PostgreSQL, MySQL, Job)
   validationProbes:
     - type: "HTTP"
-      endpoint: "http://web-api.production.svc.cluster.local:8080/healthz"
+      endpoint: "http://my-service.production.svc.cluster.local:8080/healthz"
       path: "/healthz"
       expectedStatus: 200
       queryTimeout: 5
 
-  # 5. Circuit Breaker Configuration
-  rollbackConfig:
-    autoRollback: true
-    circuitBreakerThreshold: 3
-```
-
-#### Pattern 2: Microsoft Azure Key Vault (Event-Driven) + `PostgreSQL` / `MySQL` Probe
-*Direct sub-second event-driven push ingestion from Azure Key Vault via Service Bus Peek-Lock, running live SQL query (`SELECT 1`) validation with automatic credential sanitization:*
-
-```yaml
-apiVersion: dso.quantumsys.dev/v1alpha1
-kind: DynamicSecretPolicy
-metadata:
-  name: payment-db-policy
-  namespace: production
-spec:
-  # 1. Source Ingestion: Direct Azure Key Vault
-  source:
-    type: "AzureKeyVault"
-    azureKeyVault:
-      keyVaultURI: "https://my-prod-vault.vault.azure.net"
-      objectName: "payment-db-credentials"
-      objectType: "Secret" # Options: Secret, Certificate, Key
-
-  # 2. Target Workload
-  workloadSelector:
-    kind: "Deployment"
-    name: "payment-service"
-
-  # 3. Mount Injection Point
-  targetRef:
-    volumeName: "db-secret-volume"
-
-  # 4. Synthetic Validation Probe: Live Database Handshake (Sanitized in logs)
-  validationProbes:
-    - type: "PostgreSQL" # Also supports "MySQL"
-      endpoint: "postgres.production.svc.cluster.local:5432"
-      queryTimeout: 5
-
-  # 5. Circuit Breaker Configuration
-  rollbackConfig:
-    autoRollback: true
-    circuitBreakerThreshold: 3
-```
-
-#### Pattern 3: Ingress Gateway + `TLS` Certificate Handshake & Thumbprint Probe
-*Monitors certificate rotations, automatically parses PEM/PKCS#12 into `kubernetes.io/tls`, and asserts live TLS handshakes and thumbprint matches:*
-
-```yaml
-apiVersion: dso.quantumsys.dev/v1alpha1
-kind: DynamicSecretPolicy
-metadata:
-  name: ingress-tls-policy
-  namespace: ingress-system
-spec:
-  source:
-    type: "AzureKeyVault"
-    azureKeyVault:
-      keyVaultURI: "https://my-prod-vault.vault.azure.net"
-      objectName: "wildcard-tls-cert"
-      objectType: "Certificate" # Automatically parsed into kubernetes.io/tls
-  workloadSelector:
-    kind: "Deployment"
-    name: "ingress-nginx-controller"
-  validationProbes:
-    - type: "TLS"
-      endpoint: "ingress-nginx.ingress-system.svc.cluster.local:443"
-      thumbprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-      queryTimeout: 10
-  rollbackConfig:
-    autoRollback: true
-    circuitBreakerThreshold: 2
-```
-
-#### Pattern 4: "Bring Your Own Container" Ephemeral Batch `Job` Probe (Redis Cache)
-*Schedules an isolated Kubernetes Batch Job running arbitrary testing utilities (e.g. `redis-cli PING`), with candidate secret name automatically injected as `$(DSO_REVISION_SECRET_NAME)`:*
-
-```yaml
-apiVersion: dso.quantumsys.dev/v1alpha1
-kind: DynamicSecretPolicy
-metadata:
-  name: session-worker-policy
-  namespace: production
-spec:
-  source:
-    type: "K8sSecret"
-    k8sSecret:
-      name: "redis-synced-auth"
-  workloadSelector:
-    kind: "Deployment"
-    name: "session-worker"
-  validationProbes:
-    - type: "Job"
-      job:
-        timeoutSeconds: 30
-        jobTemplate:
-          spec:
-            template:
-              spec:
-                containers:
-                  - name: redis-tester
-                    image: redis:7-alpine
-                    command: ["/bin/sh", "-c"]
-                    args:
-                      - |
-                        REDIS_PASS=$(cat /secrets/auth/password)
-                        redis-cli -h redis.production.svc -a "$REDIS_PASS" PING | grep PONG
-                    volumeMounts:
-                      - name: test-secret
-                        mountPath: /secrets/auth
-                volumes:
-                  - name: test-secret
-                    secret:
-                      secretName: $(DSO_REVISION_SECRET_NAME)
+  # 5. Circuit Breaker & Automatic Rollback Safeguards
   rollbackConfig:
     autoRollback: true
     circuitBreakerThreshold: 3
@@ -396,15 +278,16 @@ spec:
 
 ---
 
-### 📚 Dedicated Provider Guides & Documentation
+### 📚 Dedicated Provider Guides & Policy Patterns
 
-For complete provider-specific manifests, authentication setups, and end-to-end walkthroughs:
-- 🟢 **[Universal Multi-Cloud via ESO Guide](docs/providers/eso.md)** – *Production Ready* (HTTP, Redis Job, and PostgreSQL probe examples)
-- 🟢 **[Microsoft Azure Key Vault Guide](docs/providers/azure.md)** – *Production Ready* (PostgreSQL/MySQL, TLS Handshake, and HTTP probe examples)
-- 🟡 **[Amazon Web Services (AWS) Guide](docs/providers/aws.md)** – *In Development (Roadmap v0.3)* (Aurora MySQL, HTTP, and TLS probe examples)
-- 🟡 **[Google Cloud Platform (GCP) Guide](docs/providers/gcp.md)** – *In Development (Roadmap v0.3)* (Memorystore Redis Job, HTTP, and Cloud SQL probe examples)
-- 📖 **[Pluggable Providers Overview](docs/providers/overview.md)** – Architecture of the provider registry and ingestion layer
-- 📖 **[Comprehensive CRD API Reference](docs/api-reference.md)** – Full schema specification, field descriptions, and Kyverno policy examples
+For complete, copy-paste ready `DynamicSecretPolicy` manifests featuring diverse probe types (`HTTP`, `TLS`, `PostgreSQL`, `MySQL`, `Job`) tailored to each cloud ecosystem, consult our dedicated provider documentation:
+
+- 🟢 **[Universal Multi-Cloud via ESO Guide](docs/providers/eso.md)** – *Production Ready* (Patterns for HTTP Health, Redis Job, PostgreSQL/MySQL, and Ingress TLS probes)
+- 🟢 **[Microsoft Azure Key Vault Guide](docs/providers/azure.md)** – *Production Ready* (Patterns for Relational Database, Ingress TLS Handshake, Microservice HTTP, and Redis Job probes)
+- 🟡 **[Amazon Web Services (AWS) Guide](docs/providers/aws.md)** – *In Development (Roadmap v0.3)* (Patterns for Aurora MySQL, Microservice HTTP, Ingress TLS, and ElastiCache Redis Job probes)
+- 🟡 **[Google Cloud Platform (GCP) Guide](docs/providers/gcp.md)** – *In Development (Roadmap v0.3)* (Patterns for Memorystore Redis Job, Microservice HTTP, Cloud SQL Database, and Ingress TLS probes)
+- 📖 **[Pluggable Providers Overview](docs/providers/overview.md)** – Architectural model of the provider registry and ingestion engine
+- 📖 **[Comprehensive CRD API Reference](docs/api-reference.md)** – Full schema field definitions, status conditions, and Kyverno policy rules
 
 ## 🗺️ Future Roadmap: Multi-Cloud Expansion
 
