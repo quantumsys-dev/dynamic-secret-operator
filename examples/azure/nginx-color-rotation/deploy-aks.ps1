@@ -161,14 +161,17 @@ Write-Host @"
 
 4️⃣ Observe Zero-Downtime Promotion:
    - Key Vault publishes SecretNewVersionCreated event to Azure Service Bus.
-   - DSO triggers Canary Provisioning, runs synthetic HTTP /health probe.
+   - DSO triggers Canary Provisioning, runs synthetic Job validation probe to assert valid hex color.
    - Target Deployment 'nginx-color-app' is promoted to the new color with zero downtime!
    - Refresh your browser to see the background change from Blue (#3b82f6) to Green (#10b981)!
 
-5️⃣ Test Circuit Breaker & Auto-Rollback (Optional):
-   - Inject an invalid value that fails health checks:
+5️⃣ Test Circuit Breaker & Safe Abort (Optional):
+   - Inject an invalid value that fails format validation:
      az keyvault secret set --vault-name $KeyVaultName --name "nginx-bg-color" --value "INVALID_COLOR"
-   - Watch DSO Canary fail synthetic probes and automatically abort rollout without affecting live traffic!
+   - Watch DSO Job probe fail hex format validation ('INVALID_COLOR' is not a valid hex code).
+   - DSO aborts promotion and protects production workloads from invalid secrets.
+   - After reaching threshold (3 failures), DSO trips the Circuit Breaker (CircuitBreakerTripped: True)!
+   - Live traffic remains 100% online on the previous stable color!
 ==================================================================
 "@ -ForegroundColor Cyan
 

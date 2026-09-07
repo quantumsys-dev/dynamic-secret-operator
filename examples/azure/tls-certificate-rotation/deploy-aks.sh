@@ -55,10 +55,11 @@ echo "✅ Key Vault '${KEYVAULT_NAME}' verified."
 echo "🔑 Checking certificate 'ingress-tls-cert' in Azure Key Vault '${KEYVAULT_NAME}'..."
 if ! az keyvault certificate show --vault-name "${KEYVAULT_NAME}" --name "ingress-tls-cert" >/dev/null 2>&1; then
     echo "ℹ️  Creating initial self-signed certificate 'ingress-tls-cert' in Key Vault..."
+    POLICY_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/certificate-policy.json"
     az keyvault certificate create \
         --vault-name "${KEYVAULT_NAME}" \
         --name "ingress-tls-cert" \
-        --policy "$(az keyvault certificate get-default-policy)" \
+        --policy "@${POLICY_PATH}" \
         --output none || { echo "❌ Error: Failed to create certificate 'ingress-tls-cert' in Key Vault '${KEYVAULT_NAME}'."; exit 1; }
     echo "⏳ Waiting for Key Vault certificate creation to finish..."
     TIMEOUT=60
@@ -123,6 +124,16 @@ sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | ku
 echo "⏳ Waiting for TLS Gateway deployment to be ready..."
 kubectl rollout status deployment/tls-gateway -n dso-examples --timeout=120s || { echo "❌ Error: TLS Gateway rollout failed or timed out."; exit 1; }
 
+# 8. Check and display Public LoadBalancer Service IP
+echo "🔍 Checking Public LoadBalancer IP for tls-gateway..."
+EXT_IP="$(kubectl get svc tls-gateway -n dso-examples -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+if [ -z "${EXT_IP}" ]; then
+    echo "ℹ️  LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    echo "ℹ️  Run 'kubectl get svc tls-gateway -n dso-examples -w' to view the public IP as soon as Azure assigns it."
+else
+    echo "✅ Public HTTPS Endpoint: https://${EXT_IP}:8443"
+fi
+
 echo "=================================================================="
 echo "✅ TLS Certificate Rotation Example deployed successfully on AKS!"
 echo "=================================================================="
@@ -150,7 +161,7 @@ echo "   - Stream Operator Logs:"
 echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"
 echo ""
 echo "3️⃣ Trigger a Certificate Renewal in Azure Key Vault:"
-echo "   az keyvault certificate create --vault-name ${KEYVAULT_NAME} --name 'ingress-tls-cert' --policy \"\$(az keyvault certificate get-default-policy)\""
+echo "   az keyvault certificate create --vault-name ${KEYVAULT_NAME} --name 'ingress-tls-cert' --policy \"@certificate-policy.json\""
 echo ""
 echo "4️⃣ Observe Zero-Downtime TLS Rollover:"
 echo "   - Azure Key Vault generates a new x509 certificate and private key."

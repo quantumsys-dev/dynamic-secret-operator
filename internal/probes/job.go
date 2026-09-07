@@ -59,8 +59,26 @@ const (
 )
 
 // DeriveProbeJobName calculates the deterministic name for an ephemeral probe Job.
+// Kubernetes resource names must not exceed 63 characters and must be DNS-1123 compliant.
 func DeriveProbeJobName(policyName, revisionSecretName string) string {
-	jobName := fmt.Sprintf("dso-probe-%s-%s", policyName, sanitizeName(revisionSecretName))
+	sanitizedPolicy := sanitizeName(policyName)
+	sanitizedRev := sanitizeName(revisionSecretName)
+
+	// revisionSecretName typically ends with the unique revision hash (e.g. ...-rev-97b5d2b36224).
+	// We MUST preserve the unique revision suffix so probe Jobs are uniquely
+	// named per revision and never collide with stale completed Jobs from previous rotations.
+	if len(sanitizedRev) > 24 {
+		sanitizedRev = sanitizedRev[len(sanitizedRev)-24:]
+		sanitizedRev = strings.TrimPrefix(sanitizedRev, "-")
+	}
+
+	prefix := "dso-probe-"
+	maxPolicyLen := 63 - len(prefix) - 1 - len(sanitizedRev)
+	if maxPolicyLen > 0 && len(sanitizedPolicy) > maxPolicyLen {
+		sanitizedPolicy = strings.TrimSuffix(sanitizedPolicy[:maxPolicyLen], "-")
+	}
+
+	jobName := fmt.Sprintf("%s%s-%s", prefix, sanitizedPolicy, sanitizedRev)
 	if len(jobName) > 63 {
 		jobName = jobName[:63]
 	}
@@ -79,8 +97,14 @@ func BuildProbeJob(
 	// Copy the template to avoid mutating the spec.
 	tmpl := spec.JobTemplate.DeepCopy()
 
-	// Mutate volumes, envs, and volumeMounts in the Job pod template to point to the new secret revision
-	workload.MutatePodTemplateSpec(&tmpl.Spec.Template, policy.Spec.WorkloadSelector.Name, policy, revisionSecretName)
+	// Mutate volumes, envs, and volumeMounts in the Job pod template to point to the new secret revision.
+	// For probe jobs, targetContainerName must not restrict mutation to the workload's container name
+	// because probe jobs have their own container naming conventions (e.g. redis-ping, validator).
+	probePolicy := policy.DeepCopy()
+	if probePolicy.Spec.TargetRef != nil {
+		probePolicy.Spec.TargetRef.ContainerName = ""
+	}
+	workload.MutatePodTemplateSpec(&tmpl.Spec.Template, policy.Spec.WorkloadSelector.Name, probePolicy, revisionSecretName)
 
 	// Automatically inject the DSO_REVISION_SECRET_NAME environment variable into all containers for scripting convenience.
 	injectRevisionSecretEnv(&tmpl.Spec.Template.Spec, revisionSecretName)
@@ -253,7 +277,7 @@ func RetrieveFailureLogs(ctx context.Context, k8sClient client.Client, kubeClien
 	return buf.String()
 }
 
-// sanitizeName lowercases and truncates a string so it is safe to embed in
+// sanitizeName lowercases and sanitizes a string so it is safe to embed in
 // a Kubernetes resource name. Non-alphanumeric characters are replaced with "-".
 func sanitizeName(s string) string {
 	var b strings.Builder
@@ -264,11 +288,5 @@ func sanitizeName(s string) string {
 			b.WriteRune('-')
 		}
 	}
-	result := b.String()
-	// Trim leading/trailing dashes.
-	result = strings.Trim(result, "-")
-	if len(result) > 32 {
-		result = result[:32]
-	}
-	return result
+	return strings.Trim(b.String(), "-")
 }

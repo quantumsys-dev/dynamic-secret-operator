@@ -211,19 +211,19 @@ Write-Host @"
 
 3️⃣ Test Independent Secret Rotations:
 
-   🔹 1. Rotate PostgreSQL Database Password:
-      a) Update Postgres user password in cluster:
-         kubectl exec deployment/postgres -n $Namespace -- psql -U appuser -d production_db -c "ALTER USER appuser WITH PASSWORD 'NewRotatedPsqlPass999!';"
-      b) Update secret in Azure Key Vault:
-         az keyvault secret set --vault-name "$KeyVaultName" --name "db-password" --value "NewRotatedPsqlPass999!"
-      -> DSO launches Canary and validates native PostgreSQL probe.
+    🔹 1. Rotate PostgreSQL Database Password:
+       a) Update Postgres user password in cluster:
+          kubectl exec deployment/postgres -n $Namespace -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'NewRotatedPsqlPass999!';"
+       b) Update secret in Azure Key Vault:
+          az keyvault secret set --vault-name "$KeyVaultName" --name "db-password" --value "NewRotatedPsqlPass999!"
+       -> DSO launches Canary and validates native PostgreSQL probe.
 
-   🔹 2. Rotate Redis Auth Token:
-      a) Update Redis password in cluster:
-         kubectl exec deployment/redis -n $Namespace -- redis-cli -a initialRedisToken123 CONFIG SET requirepass "NewRotatedRedisToken888!"
-      b) Update secret in Azure Key Vault:
-         az keyvault secret set --vault-name "$KeyVaultName" --name "redis-auth-token" --value "NewRotatedRedisToken888!"
-      -> DSO launches Canary and validates Redis connection probe.
+    🔹 2. Rotate Redis Auth Token:
+       a) Update Redis password in cluster:
+          kubectl exec deployment/redis -n $Namespace -- redis-cli -a InitialRedisToken456! CONFIG SET requirepass "NewRotatedRedisToken888!"
+       b) Update secret in Azure Key Vault:
+          az keyvault secret set --vault-name "$KeyVaultName" --name "redis-auth-token" --value "NewRotatedRedisToken888!"
+       -> DSO launches Canary and validates Redis connection probe.
 
    🔹 3. Rotate Payment API Gateway Key:
       az keyvault secret set --vault-name "$KeyVaultName" --name "payment-api-key" --value "sk_live_pay_new_777777"

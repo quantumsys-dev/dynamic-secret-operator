@@ -98,6 +98,16 @@ if [ ! -f "${SCRIPT_DIR}/manifests.yaml" ]; then
 fi
 sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
 
+# 8. Check and display Public LoadBalancer Service IP
+echo "🔍 Checking Public LoadBalancer IP for payment-service-active..."
+EXT_IP="$(kubectl get svc payment-service-active -n dso-examples -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+if [ -z "${EXT_IP}" ]; then
+    echo "ℹ️  LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    echo "ℹ️  Run 'kubectl get svc payment-service-active -n dso-examples -w' to view the public IP as soon as Azure assigns it."
+else
+    echo "✅ Public IP assigned: http://${EXT_IP}"
+fi
+
 echo "=================================================================="
 echo "✅ Argo Rollouts Blue/Green Example deployed successfully on AKS!"
 echo "=================================================================="

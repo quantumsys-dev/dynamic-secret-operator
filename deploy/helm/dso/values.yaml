@@ -7,7 +7,7 @@ image:
   repository: ghcr.io/quantumsys-dev/dynamic-secret-operator
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "0.2.0"
+  tag: "0.2.1"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -32,7 +32,19 @@ rbac:
   # When scope is "Namespaced", list of namespaces where DSO will have permissions (defaults to release namespace if empty)
   watchNamespaces: []
 
-# Azure Workload Identity configuration
+# Operating mode of DSO: "event-driven" or "eso"
+# - "event-driven": Direct sub-second push notifications from cloud message queues (Azure Service Bus, AWS SQS, GCP Pub/Sub).
+# - "eso": Decoupled universal multi-cloud mode via External Secrets Operator (zero cloud credentials required in DSO).
+mode: "event-driven"
+
+# Secret provider backend (required only when mode: "event-driven"):
+# - "azure": Microsoft Azure Key Vault & Azure Service Bus (Production Ready)
+# - "aws": AWS Secrets Manager & Amazon SQS (In Development - Roadmap v0.3)
+# - "gcp": Google Cloud Secret Manager & Cloud Pub/Sub (In Development - Roadmap v0.3)
+# Note: In "eso" mode, provider is not used (simply configure mode: "eso").
+provider: "azure"
+
+# Azure Workload Identity configuration (used when mode: "event-driven" and provider: "azure")
 azure:
   workloadIdentity:
     enabled: true
@@ -47,6 +59,27 @@ azure:
     namespace: ""
     # Name of the queue receiving Key Vault EventGrid events
     queueName: ""
+
+# AWS configuration (In Development - Roadmap v0.3; used when mode: "event-driven" and provider: "aws")
+aws:
+  enabled: false
+  # AWS IAM Role ARN for Service Accounts (IRSA) or EKS Pod Identity
+  roleArn: ""
+  # SQS queue URL receiving rotation notifications
+  sqs:
+    queueUrl: ""
+  # AWS Region
+  region: ""
+
+# Google Cloud Platform configuration (In Development - Roadmap v0.3; used when mode: "event-driven" and provider: "gcp")
+gcp:
+  enabled: false
+  # Google Cloud Workload Identity Service Account email
+  workloadIdentity:
+    serviceAccount: ""
+  # Cloud Pub/Sub Subscription ID
+  pubsub:
+    subscription: ""
 
 # Argo CD GitOps integration
 argoCD:

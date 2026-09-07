@@ -61,15 +61,16 @@ kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply
 echo "✅ Namespace '${NAMESPACE}' ready."
 
 # 5. Seed all 3 secrets in Azure Key Vault
-declare -A SECRETS=(
-    ["db-password"]="InitialPsqlPass123!"
-    ["redis-auth-token"]="InitialRedisToken456!"
-    ["payment-api-key"]="sk_live_pay_9876543210"
+SECRETS=(
+    "db-password:InitialPsqlPass123!"
+    "redis-auth-token:InitialRedisToken456!"
+    "payment-api-key:sk_live_pay_9876543210"
 )
 
 echo "🔑 Checking & seeding initial secrets in Azure Key Vault '${KEYVAULT_NAME}'..."
-for SECRET_NAME in "${!SECRETS[@]}"; do
-    SECRET_VALUE="${SECRETS[$SECRET_NAME]}"
+for item in "${SECRETS[@]}"; do
+    SECRET_NAME="${item%%:*}"
+    SECRET_VALUE="${item#*:}"
     if ! az keyvault secret show --vault-name "${KEYVAULT_NAME}" --name "${SECRET_NAME}" >/dev/null 2>&1; then
         echo "ℹ️  Secret '${SECRET_NAME}' not found. Creating in Key Vault..."
         az keyvault secret set \
@@ -130,6 +131,16 @@ kubectl rollout status deployment/redis -n "${NAMESPACE}" --timeout=120s || { ec
 kubectl rollout status deployment/payment-gateway -n "${NAMESPACE}" --timeout=120s || { echo "❌ Error: Payment Gateway rollout failed or timed out."; exit 1; }
 kubectl rollout status deployment/multi-secret-app -n "${NAMESPACE}" --timeout=180s || { echo "❌ Error: Multi-Secret App rollout failed or timed out."; exit 1; }
 
+# 10. Check and display Public LoadBalancer Service IP
+echo "🔍 Checking Public LoadBalancer IP for multi-secret-app..."
+EXT_IP="$(kubectl get svc multi-secret-app -n "${NAMESPACE}" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+if [ -z "${EXT_IP}" ]; then
+    echo "ℹ️  LoadBalancer Public IP is still being provisioned by Azure (status: <pending>)."
+    echo "ℹ️  Run 'kubectl get svc multi-secret-app -n ${NAMESPACE} -w' to view the public IP as soon as Azure assigns it."
+else
+    echo "✅ Public IP assigned: http://${EXT_IP}"
+fi
+
 echo "=================================================================="
 echo "🎉 MULTI-SECRET MICROSERVICE DEPLOYED SUCCESSFULLY!"
 echo "=================================================================="
@@ -157,14 +168,14 @@ echo "3️⃣ Test Independent Secret Rotations:"
 echo ""
 echo "   🔹 1. Rotate PostgreSQL Database Password:"
 echo "      a) Update Postgres user password in cluster:"
-echo "         kubectl exec deployment/postgres -n ${NAMESPACE} -- psql -U appuser -d production_db -c \"ALTER USER appuser WITH PASSWORD 'NewRotatedPsqlPass999!';\""
+echo "         kubectl exec deployment/postgres -n ${NAMESPACE} -- psql -U postgres -d appdb -c \"ALTER USER postgres WITH PASSWORD 'NewRotatedPsqlPass999!';\""
 echo "      b) Update secret in Azure Key Vault:"
-echo "         az keyvault secret set --vault-name '${KEYVAULT_NAME}' --name 'db-password' --value 'NewRotatedPsqlPass999!'"
+echo "         az keyvault secret set --vault-name \"${KEYVAULT_NAME}\" --name \"db-password\" --value \"NewRotatedPsqlPass999!\""
 echo "      -> DSO launches Canary and validates native PostgreSQL probe."
 echo ""
 echo "   🔹 2. Rotate Redis Auth Token:"
 echo "      a) Update Redis password in cluster:"
-echo "         kubectl exec deployment/redis -n ${NAMESPACE} -- redis-cli -a initialRedisToken123 CONFIG SET requirepass 'NewRotatedRedisToken888!'"
+echo "         kubectl exec deployment/redis -n ${NAMESPACE} -- redis-cli -a InitialRedisToken456! CONFIG SET requirepass 'NewRotatedRedisToken888!'"
 echo "      b) Update secret in Azure Key Vault:"
 echo "         az keyvault secret set --vault-name '${KEYVAULT_NAME}' --name 'redis-auth-token' --value 'NewRotatedRedisToken888!'"
 echo "      -> DSO launches Canary and validates Redis connection probe."

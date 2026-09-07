@@ -91,6 +91,10 @@ func main() {
 	var maxConcurrentReconciles int
 	var watchNamespaces string
 	var syncPeriod time.Duration
+	var mode string
+	var provider string
+	flag.StringVar(&mode, "mode", "event-driven", "Operating mode: 'event-driven' or 'eso'.")
+	flag.StringVar(&provider, "provider", "azure", "Secret provider backend for event-driven mode: 'azure', 'aws', or 'gcp'.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
@@ -118,8 +122,25 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	// Allow environment variables to supply or override mode and provider
+	if envMode := os.Getenv("DSO_MODE"); envMode != "" {
+		mode = envMode
+	}
+	if envProvider := os.Getenv("DSO_PROVIDER"); envProvider != "" {
+		provider = envProvider
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if mode == "eso" {
+		provider = ""
+	}
+
 	// Enforce structured JSON logging with standard operator context keys
-	logger := zap.New(zap.UseFlagOptions(&opts), zap.JSONEncoder()).WithValues("operator", "dynamic-secret-operator")
+	logger := zap.New(zap.UseFlagOptions(&opts), zap.JSONEncoder()).WithValues(
+		"operator", "dynamic-secret-operator",
+		"mode", mode,
+		"provider", provider,
+	)
 	ctrl.SetLogger(logger)
 	setupLog = ctrl.Log.WithName("setup")
 
@@ -130,7 +151,12 @@ func main() {
 	if os.Getenv("E2E_SYNTHETIC_MODE") == "true" {
 		setupLog.Info("operating in E2E_SYNTHETIC_MODE; using synthetic secret fetcher")
 		secretFetcher = &syntheticFetcher{}
-	} else {
+	} else if mode == "eso" {
+		// In ESO Mode, DSO operates 100% cloud-agnostic via Kubernetes Secrets.
+		// Cloud IAM credentials (e.g. Azure Workload Identity) are strictly bypassed.
+		setupLog.Info("operating in ESO Mode (Universal Multi-Cloud); bypassing cloud IAM initialization",
+			"mode", mode)
+	} else if provider == "azure" {
 		// Initialize zero-trust Azure Workload Identity authentication (fail-fast)
 		azureCred, err := azure.NewAzureCredential()
 		if err != nil {
@@ -158,6 +184,15 @@ func main() {
 			}
 			setupLog.Info("configured Azure Service Bus peek-lock listener", "namespace", sbNamespace, "queue", sbQueue)
 		}
+	} else if provider == "aws" {
+		setupLog.Info("AWS provider selected (Roadmap v0.3.0); native event-driven worker in development. For production AWS setups, please configure mode=eso.",
+			"mode", mode, "provider", provider)
+	} else if provider == "gcp" {
+		setupLog.Info("GCP provider selected (Roadmap v0.3.0); native event-driven worker in development. For production GCP setups, please configure mode=eso.",
+			"mode", mode, "provider", provider)
+	} else {
+		setupLog.Info("custom or unmanaged provider configured; starting without direct cloud fetcher",
+			"mode", mode, "provider", provider)
 	}
 
 	// eventIngester is the provider-agnostic handle; currently backed by Azure Service Bus.

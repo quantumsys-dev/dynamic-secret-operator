@@ -110,7 +110,7 @@ spec:
     volumeName: "tls-cert-volume"
   validationProbes:
     - type: "TLS"
-      endpoint: "127.0.0.1:8443"
+      endpoint: "tls-gateway.dso-examples.svc.cluster.local:8443"
       queryTimeout: 10
   rollbackConfig:
     autoRollback: true

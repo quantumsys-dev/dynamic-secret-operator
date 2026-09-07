@@ -1254,6 +1254,162 @@ func TestDynamicSecretPolicyReconciler_ValidationProbesExecution(t *testing.T) {
 			t.Fatalf("expected 1 job created, found %d", len(jobList.Items))
 		}
 	})
+
+	t.Run("resolves TLS probe endpoint to ready canary pod IP", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-policy",
+				Namespace: "default",
+			},
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{
+					Name: "tls-gateway",
+				},
+				ValidationProbes: []secretv1alpha1.ValidationProbe{
+					{
+						Type:     secretv1alpha1.ProbeTypeTLS,
+						Endpoint: "tls-gateway.default.svc.cluster.local:8443",
+					},
+				},
+			},
+			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				DesiredRevision: "rev-tls-123",
+			},
+		}
+
+		canaryDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-gateway-canary",
+				Namespace: "default",
+			},
+		}
+
+		canaryPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-gateway-canary-pod-xyz",
+				Namespace: "default",
+				Labels: map[string]string{
+					canary.LabelCanary:         "true",
+					canary.LabelTargetWorkload: "tls-gateway",
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.244.0.88",
+				Conditions: []corev1.PodCondition{
+					{
+						Type:   corev1.PodReady,
+						Status: corev1.ConditionTrue,
+					},
+				},
+			},
+		}
+
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-gateway-secret-rev-rev-tls-123",
+				Namespace: "default",
+			},
+			Data: map[string][]byte{"tls.crt": []byte("dummy-cert")},
+		}
+
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(policy, canaryDeploy, canaryPod, sec).
+			Build()
+
+		var recordedProbe secretv1alpha1.ValidationProbe
+		r := &DynamicSecretPolicyReconciler{
+			Client: c,
+			Scheme: scheme,
+			ProbeRunner: func(ctx context.Context, p secretv1alpha1.ValidationProbe, data map[string][]byte) error {
+				recordedProbe = p
+				return nil
+			},
+		}
+
+		res, err := r.reconcileValidationProbes(context.Background(), policy)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Requeue || res.RequeueAfter > 0 {
+			t.Errorf("expected immediate success, got requeue %v", res)
+		}
+		if recordedProbe.Endpoint != "10.244.0.88:8443" {
+			t.Errorf("expected canary endpoint '10.244.0.88:8443', got %q", recordedProbe.Endpoint)
+		}
+	})
+
+	t.Run("requeues when canary pod is not yet ready", func(t *testing.T) {
+		policy := &secretv1alpha1.DynamicSecretPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-policy-wait",
+				Namespace: "default",
+			},
+			Spec: secretv1alpha1.DynamicSecretPolicySpec{
+				WorkloadSelector: secretv1alpha1.WorkloadSelector{
+					Name: "tls-gateway",
+				},
+				ValidationProbes: []secretv1alpha1.ValidationProbe{
+					{
+						Type:     secretv1alpha1.ProbeTypeTLS,
+						Endpoint: "127.0.0.1:8443",
+					},
+				},
+			},
+			Status: secretv1alpha1.DynamicSecretPolicyStatus{
+				DesiredRevision: "rev-wait-123",
+			},
+		}
+
+		canaryDeploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "tls-gateway-canary",
+				Namespace:         "default",
+				CreationTimestamp: metav1.Now(),
+			},
+		}
+
+		pendingPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-gateway-canary-pending",
+				Namespace: "default",
+				Labels: map[string]string{
+					canary.LabelCanary:         "true",
+					canary.LabelTargetWorkload: "tls-gateway",
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+			},
+		}
+
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "tls-gateway-secret-rev-rev-wait-123",
+				Namespace: "default",
+			},
+			Data: map[string][]byte{"tls.crt": []byte("dummy-cert")},
+		}
+
+		c := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(policy, canaryDeploy, pendingPod, sec).
+			Build()
+
+		r := &DynamicSecretPolicyReconciler{
+			Client: c,
+			Scheme: scheme,
+		}
+
+		res, err := r.reconcileValidationProbes(context.Background(), policy)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.RequeueAfter != 2*time.Second {
+			t.Errorf("expected RequeueAfter 2s while waiting for canary pod, got %v", res.RequeueAfter)
+		}
+	})
 }
 
 func TestDynamicSecretPolicyReconciler_CircuitBreakerTripsOnConsecutiveFailures(t *testing.T) {

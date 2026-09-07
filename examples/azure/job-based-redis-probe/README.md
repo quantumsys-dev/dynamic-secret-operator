@@ -95,7 +95,23 @@ kubectl logs -n dso-examples -l app=redis-consumer -f
 
 ### Step 3: Trigger a Redis AUTH Password Rotation
 
-Update the secret in Azure Key Vault to simulate a rotation:
+#### 3.1 Update Password in Redis Master
+Simulate the backend credential update:
+
+**PowerShell (Windows):**
+```powershell
+$CurrentPass = (az keyvault secret show --vault-name kv-dso-dev --name "redis-auth-password" --query value -o tsv)
+kubectl exec deployment/redis-master -n dso-examples -- redis-cli -a $CurrentPass CONFIG SET requirepass "RotatedRedisPassword456!"
+```
+
+**Bash (Linux / WSL / macOS):**
+```bash
+CURRENT_PASS=$(az keyvault secret show --vault-name kv-dso-dev --name "redis-auth-password" --query value -o tsv)
+kubectl exec deployment/redis-master -n dso-examples -- redis-cli -a "${CURRENT_PASS}" CONFIG SET requirepass 'RotatedRedisPassword456!'
+```
+
+#### 3.2 Update Secret in Azure Key Vault
+Simulate the Secret Manager event notification:
 
 ```bash
 az keyvault secret set \

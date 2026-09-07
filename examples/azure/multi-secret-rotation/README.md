@@ -88,50 +88,64 @@ In microservices architectures, an application frequently depends on multiple ex
 **PowerShell (Windows):**
 ```powershell
 cd examples/aks/multi-secret-rotation
-.\deploy-aks.ps1 -KeyVaultName "kv-dso-dev-jc"
+.\deploy-aks.ps1 -KeyVaultName "kv-dso-dev"
 ```
 
 **Bash (Linux / WSL / macOS):**
 ```bash
 cd examples/aks/multi-secret-rotation
 chmod +x deploy-aks.sh
-./deploy-aks.sh -k kv-dso-dev-jc
+./deploy-aks.sh -k kv-dso-dev
 ```
 
 ---
 
 ## 📊 Step 2: Access the Multi-Secret Dashboard
 
-Forward the application port to your local machine:
-```bash
-kubectl port-forward svc/multi-secret-app 8080:80 -n dso-examples
-```
+- **Public URL (LoadBalancer):**
+  ```bash
+  kubectl get svc multi-secret-app -n dso-examples
+  # Open http://<EXTERNAL-IP> in your browser
+  ```
+- **Fallback (Port-Forward):**
+  ```bash
+  kubectl port-forward svc/multi-secret-app 8080:80 -n dso-examples
+  # Open http://localhost:8080 in your browser
+  ```
 
-Open [http://localhost:8080](http://localhost:8080) in your browser. You will see a live dashboard displaying the health, active secret mask, probe latency, and status for all three dependencies simultaneously.
+Open the dashboard in your browser. You will see a live interface displaying the health, active secret mask, probe latency, and status for all three dependencies simultaneously.
 
 ---
 
 ## 🔄 Step 3: Test Independent Secret Rotations
 
 ### Scenario A: Rotate the PostgreSQL Database Password Only
-Update the database secret in Azure Key Vault:
-```bash
-az keyvault secret set --vault-name "kv-dso-dev-jc" --name "db-password" --value "RotatedPostgresPass789!"
-```
+1. Update Postgres user password in cluster:
+   ```bash
+   kubectl exec deployment/postgres -n dso-examples -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'RotatedPostgresPass789!';"
+   ```
+2. Update the database secret in Azure Key Vault:
+   ```bash
+   az keyvault secret set --vault-name "kv-dso-dev" --name "db-password" --value "RotatedPostgresPass789!"
+   ```
 
 **Observe DSO in action:**
 1. Event Grid notifies Service Bus; DSO creates a canary pod.
 2. The `PostgreSQL` probe executes `SELECT count(*) FROM orders`.
 3. DSO performs a rolling update of `multi-secret-app`, modifying **only** `db-secret-volume`.
-4. Refresh the dashboard at [http://localhost:8080](http://localhost:8080) to observe the updated DB credential mask while Redis and Payment secrets remain unchanged.
+4. Refresh the dashboard to observe the updated DB credential mask while Redis and Payment secrets remain unchanged.
 
 ---
 
 ### Scenario B: Rotate the Redis Cache Token Only
-Update the Redis secret in Azure Key Vault:
-```bash
-az keyvault secret set --vault-name "kv-dso-dev-jc" --name "redis-auth-token" --value "RotatedRedisToken999!"
-```
+1. Update Redis password in cluster:
+   ```bash
+   kubectl exec deployment/redis -n dso-examples -- redis-cli -a InitialRedisToken456! CONFIG SET requirepass "RotatedRedisToken999!"
+   ```
+2. Update the Redis secret in Azure Key Vault:
+   ```bash
+   az keyvault secret set --vault-name "kv-dso-dev" --name "redis-auth-token" --value "RotatedRedisToken999!"
+   ```
 
 **Observe DSO in action:**
 1. DSO launches an ephemeral `Job` pod executing `redis-cli ping` with the new credential.
@@ -142,7 +156,7 @@ az keyvault secret set --vault-name "kv-dso-dev-jc" --name "redis-auth-token" --
 ### Scenario C: Rotate the Payment Gateway API Key
 Update the payment API key in Azure Key Vault:
 ```bash
-az keyvault secret set --vault-name "kv-dso-dev-jc" --name "payment-api-key" --value "sk_live_pay_updated_456"
+az keyvault secret set --vault-name "kv-dso-dev" --name "payment-api-key" --value "sk_live_pay_updated_456"
 ```
 
 **Observe DSO in action:**
@@ -155,7 +169,7 @@ az keyvault secret set --vault-name "kv-dso-dev-jc" --name "payment-api-key" --v
 
 Test DSO's safety by injecting an invalid secret into Key Vault:
 ```bash
-az keyvault secret set --vault-name "kv-dso-dev-jc" --name "db-password" --value "WrongInvalidPassword!"
+az keyvault secret set --vault-name "kv-dso-dev" --name "db-password" --value "WrongInvalidPassword!"
 ```
 
 1. DSO creates a canary pod and runs the `PostgreSQL` probe.

@@ -21,6 +21,8 @@ import (
 	"crypto/sha256"
 	"encoding/pem"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -652,7 +654,7 @@ func (r *DynamicSecretPolicyReconciler) reconcileValidationProbes(ctx context.Co
 				bg := metav1.DeletePropagationBackground
 				_ = r.Delete(ctx, currentJob, &client.DeleteOptions{PropagationPolicy: &bg})
 				telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(probe.Type)).Observe(time.Since(currentJob.CreationTimestamp.Time).Seconds())
-				// Continue to next probe
+				continue
 			case probes.ProbeJobStateFailed, probes.ProbeJobStateTimedOut:
 				// Delete the failed job so the next backoff attempt creates a fresh one
 				bg := metav1.DeletePropagationBackground
@@ -663,22 +665,198 @@ func (r *DynamicSecretPolicyReconciler) reconcileValidationProbes(ctx context.Co
 			}
 		}
 
+		effectiveProbe, res, err := r.resolveCanaryProbeEndpoint(ctx, policy, probe)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if res.Requeue || res.RequeueAfter > 0 {
+			return res, nil
+		}
+
 		// Synchronous network probes (HTTP, TLS, MySQL, PostgreSQL)
 		timeout := 15 * time.Second
-		if probe.QueryTimeout > 0 {
-			timeout = time.Duration(probe.QueryTimeout) * time.Second
+		if effectiveProbe.QueryTimeout > 0 {
+			timeout = time.Duration(effectiveProbe.QueryTimeout) * time.Second
 		}
 		probeCtx, probeCancel := context.WithTimeout(ctx, timeout)
 		start := time.Now()
-		err := runner(probeCtx, probe, secret.Data)
+		err = runner(probeCtx, effectiveProbe, secret.Data)
 		probeCancel()
-		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(probe.Type)).Observe(time.Since(start).Seconds())
+		telemetry.ProbeDurationSeconds.WithLabelValues(policy.Namespace, string(effectiveProbe.Type)).Observe(time.Since(start).Seconds())
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// resolveCanaryProbeEndpoint checks whether the validation probe targets the workload being rotated.
+// If so, and if an ephemeral canary deployment is provisioned, it redirects the probe's endpoint to the
+// ready canary pod's IP address. If the canary pod is still provisioning or awaiting readiness, it returns
+// a non-blocking requeue (RequeueAfter: 2 * time.Second).
+func (r *DynamicSecretPolicyReconciler) resolveCanaryProbeEndpoint(
+	ctx context.Context,
+	policy *secretv1alpha1.DynamicSecretPolicy,
+	probe secretv1alpha1.ValidationProbe,
+) (secretv1alpha1.ValidationProbe, ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	targetName := policy.Spec.WorkloadSelector.Name
+
+	if !isWorkloadProbe(probe, targetName) {
+		return probe, ctrl.Result{}, nil
+	}
+
+	canaryDeployName := fmt.Sprintf("%s-canary", targetName)
+	canaryDeploy := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: canaryDeployName, Namespace: policy.Namespace}, canaryDeploy); err != nil {
+		if apierrors.IsNotFound(err) {
+			// No synthetic canary deployment provisioned (e.g. Argo Rollout target or test environment)
+			return probe, ctrl.Result{}, nil
+		}
+		return probe, ctrl.Result{}, fmt.Errorf("failed to inspect canary deployment %q: %w", canaryDeployName, err)
+	}
+
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(policy.Namespace), client.MatchingLabels{
+		canary.LabelCanary:         "true",
+		canary.LabelTargetWorkload: targetName,
+	}); err != nil {
+		return probe, ctrl.Result{}, fmt.Errorf("failed to list canary pods for %q: %w", targetName, err)
+	}
+
+	if len(podList.Items) == 0 && r.ProbeRunner != nil {
+		// In envtest or test suites with a mock probe runner and no pod controller
+		return probe, ctrl.Result{}, nil
+	}
+
+	var readyPod *corev1.Pod
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
+			isReady := false
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					isReady = true
+					break
+				}
+			}
+			if isReady {
+				readyPod = pod
+				break
+			}
+		}
+	}
+
+	if readyPod == nil {
+		// Detect if canary deployment exceeded readiness timeout
+		canaryTimeout := 45 * time.Second
+		if probe.QueryTimeout > 0 && time.Duration(probe.QueryTimeout)*time.Second > canaryTimeout {
+			canaryTimeout = time.Duration(probe.QueryTimeout) * time.Second
+		}
+		if !canaryDeploy.CreationTimestamp.IsZero() && time.Since(canaryDeploy.CreationTimestamp.Time) > canaryTimeout {
+			return probe, ctrl.Result{}, fmt.Errorf("canary pod for %q failed to become ready within %v", targetName, canaryTimeout)
+		}
+
+		// Detect if canary pod container is failing or crashing
+		for i := range podList.Items {
+			for _, cs := range podList.Items[i].Status.ContainerStatuses {
+				if cs.RestartCount > 0 && cs.State.Waiting != nil &&
+					(cs.State.Waiting.Reason == "CrashLoopBackOff" || cs.State.Waiting.Reason == "RunContainerError") {
+					return probe, ctrl.Result{}, fmt.Errorf("canary pod %q is crashing (%s, restarts: %d)", podList.Items[i].Name, cs.State.Waiting.Reason, cs.RestartCount)
+				}
+			}
+		}
+
+		logger.Info("awaiting canary pod readiness before executing validation probe", "targetWorkload", targetName)
+		return probe, ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+
+	canaryIP := readyPod.Status.PodIP
+	effectiveEndpoint := probe.Endpoint
+
+	if strings.Contains(probe.Endpoint, "://") {
+		u, err := url.Parse(probe.Endpoint)
+		if err == nil {
+			port := u.Port()
+			if port != "" {
+				u.Host = net.JoinHostPort(canaryIP, port)
+			} else {
+				u.Host = canaryIP
+			}
+			effectiveEndpoint = u.String()
+		}
+	} else if strings.Contains(probe.Endpoint, ":") {
+		_, port, err := net.SplitHostPort(probe.Endpoint)
+		if err == nil {
+			effectiveEndpoint = net.JoinHostPort(canaryIP, port)
+		} else {
+			trimmed := strings.TrimPrefix(probe.Endpoint, ":")
+			effectiveEndpoint = net.JoinHostPort(canaryIP, trimmed)
+		}
+	} else if probe.Endpoint != "" {
+		if _, err := strconv.Atoi(probe.Endpoint); err == nil {
+			effectiveEndpoint = net.JoinHostPort(canaryIP, probe.Endpoint)
+		} else {
+			effectiveEndpoint = canaryIP
+		}
+	}
+
+	clonedProbe := probe
+	clonedProbe.Endpoint = effectiveEndpoint
+	logger.Info("redirected validation probe to canary pod IP",
+		"targetWorkload", targetName,
+		"originalEndpoint", probe.Endpoint,
+		"canaryEndpoint", effectiveEndpoint,
+	)
+	return clonedProbe, ctrl.Result{}, nil
+}
+
+// isWorkloadProbe determines whether a validation probe targets the workload being rotated.
+func isWorkloadProbe(probe secretv1alpha1.ValidationProbe, targetName string) bool {
+	if probe.Type == secretv1alpha1.ProbeTypeTLS {
+		// TLS probes validate that the server presents the leaf certificate matching the newly rotated secret.
+		// Since only the canary workload mounts the unpromoted secret, TLS probes always validate the canary.
+		return true
+	}
+
+	endpoint := strings.TrimSpace(probe.Endpoint)
+	if endpoint == "" {
+		return false
+	}
+
+	host := endpoint
+	if strings.Contains(endpoint, "://") {
+		u, err := url.Parse(endpoint)
+		if err == nil {
+			host = u.Hostname()
+		}
+	} else if strings.Contains(endpoint, ":") {
+		h, _, err := net.SplitHostPort(endpoint)
+		if err == nil {
+			host = h
+		}
+	}
+
+	host = strings.ToLower(strings.TrimSpace(host))
+	targetNameLower := strings.ToLower(targetName)
+
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return false
+	}
+
+	if host == targetNameLower {
+		return true
+	}
+
+	if strings.HasPrefix(host, targetNameLower+".") {
+		return true
+	}
+
+	return false
 }
 
 // promoteTargetWorkload patches the production target workload (Deployment, StatefulSet, DaemonSet)

@@ -1,44 +1,3 @@
-apiVersion: external-secrets.io/v1beta1
-kind: SecretStore
-metadata:
-  name: eso-color-store
-  namespace: dso-examples
-spec:
-  provider:
-    vault:
-      server: "http://vault.vault.svc.cluster.local:8200"
-      path: "secret"
-      version: "v2"
-      auth:
-        kubernetes:
-          mountPath: "kubernetes"
-          role: "eso-role"
----
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: nginx-bg-color-eso
-  namespace: dso-examples
-spec:
-  refreshInterval: 15s
-  secretStoreRef:
-    name: eso-color-store
-    kind: SecretStore
-  target:
-    name: nginx-bg-color-synced
-    creationPolicy: Owner
-    template:
-      metadata:
-        labels:
-          # Required for DSO to detect changes synced to this secret by ESO; see
-          # docs/architecture/003-decoupling-secret-ingestion-eso.md
-          dso.quantumsys.dev/managed: "watch"
-  data:
-    - secretKey: nginx-bg-color
-      remoteRef:
-        key: secret/ui
-        property: color
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -52,7 +11,7 @@ data:
       
       location / {
         default_type text/html;
-        return 200 '<!DOCTYPE html><html><head><title>DSO Live on AKS</title></head><body style="background-color: {{BG_COLOR}}; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: system-ui, -apple-system, sans-serif; text-shadow: 0 2px 4px rgba(0,0,0,0.5);"><h1 style="font-size: 2.8rem; margin-bottom: 0.5rem;">Dynamic Secret Operator</h1><p style="font-size: 1.3rem; margin-top: 0; opacity: 0.95;">ESO Color Rotation Demo</p><div style="margin-top: 1.5rem; padding: 0.8rem 1.6rem; background: rgba(0,0,0,0.4); backdrop-filter: blur(8px); border-radius: 12px; font-family: monospace; font-size: 1.2rem; border: 1px solid rgba(255,255,255,0.2);">Active Background Color: <span style="font-weight: bold; letter-spacing: 1px;">{{BG_COLOR}}</span></div></body></html>\n';
+        return 200 '<!DOCTYPE html><html><head><title>DSO Live on AKS</title></head><body style="background-color: {{BG_COLOR}}; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: system-ui, -apple-system, sans-serif; text-shadow: 0 2px 4px rgba(0,0,0,0.5);"><h1 style="font-size: 2.8rem; margin-bottom: 0.5rem;">Dynamic Secret Operator</h1><p style="font-size: 1.3rem; margin-top: 0; opacity: 0.95;">Production Nginx Gateway on AKS</p><div style="margin-top: 1.5rem; padding: 0.8rem 1.6rem; background: rgba(0,0,0,0.4); backdrop-filter: blur(8px); border-radius: 12px; font-family: monospace; font-size: 1.2rem; border: 1px solid rgba(255,255,255,0.2);">Active Background Color: <span style="font-weight: bold; letter-spacing: 1px;">{{BG_COLOR}}</span></div></body></html>\n';
       }
 
       location /health {
@@ -138,13 +97,13 @@ spec:
 apiVersion: dso.quantumsys.dev/v1alpha1
 kind: DynamicSecretPolicy
 metadata:
-  name: eso-nginx-color-policy
+  name: aks-nginx-color-policy
   namespace: dso-examples
 spec:
-  source:
-    type: "K8sSecret"
-    k8sSecret:
-      name: "nginx-bg-color-synced"
+  vaultRef:
+    keyVaultURI: "https://${KEYVAULT_NAME}.vault.azure.net"
+    objectName: "nginx-bg-color"
+    objectType: "Secret"
   workloadSelector:
     kind: "Deployment"
     name: "nginx-color-app"
@@ -191,7 +150,7 @@ spec:
                           exit 1
                         fi
                         if ! echo "$COLOR" | grep -Eq '^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$'; then
-                          echo "FATAL: '$COLOR' is not a valid CSS hex color! Expected format: #RGB or #RRGGBB (e.g. #3b82f6 or #10b981)." >&2
+                          echo "FATAL: '$COLOR' is not a valid CSS hex color! Expected format #RGB or #RRGGBB (e.g. #3b82f6 or #10b981)." >&2
                           exit 1
                         fi
                         echo "SUCCESS: Color '$COLOR' is a valid CSS hex color format."

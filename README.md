@@ -24,7 +24,7 @@
 Traditional secret management tools mutate secrets *in-place*, instantly crashing downstream pods if a rotated database credential, API key, or TLS certificate is malformed, not yet active, or fails handshakes. DSO solves this by adopting **ADR-002: Immutable Revisions**. 
 
 Featuring an **extensible, provider-agnostic source abstraction layer**, DSO supports:
-- **Event-Driven Azure Key Vault Ingestion** via Service Bus Peek-Lock & Zero-Trust Workload Identity.
+- **Event-Driven Multi-Cloud Ingestion** supporting AWS, GCP, and Azure via cloud-native message queues (Amazon SQS, Google Cloud Pub/Sub, Azure Service Bus) & Zero-Trust Federated Workload Identity.
 - **Universal Multi-Cloud Synergy with External Secrets Operator (ESO)** for AWS Secrets Manager, Google Cloud Secret Manager, HashiCorp Vault, and Akeyless.
 - **eBPF Canary Isolation with CiliumNetworkPolicy** and Hubble packet telemetry.
 - **Supply Chain Security** with SLSA Level 3 build provenance, keyless Cosign OIDC signing, and SPDX SBOMs.
@@ -35,28 +35,43 @@ DSO shifts secret rotation from a risky "push and pray" operation to a safe, eve
 
 ```mermaid
 flowchart TD
-    subgraph MultiCloud ["☁️ Multi-Cloud Secret Backends"]
+    subgraph MultiCloud ["☁️ Multi-Cloud Secret Backends & Ingestion Architectures"]
         direction TB
-        subgraph ModeB ["Mode 1: Universal Multi-Cloud Ingestion (ESO)"]
+
+        subgraph ModeESO ["ESO Mode: Universal Multi-Cloud Ingestion (ESO-Native)"]
             VAULT_ALL["AWS Secrets Manager / GCP Secret Manager / Vault / Key Vault"]
             ESO["External Secrets Operator<br/>(SecretStore + ExternalSecret)"]
             SYNC_SEC["Intermediate Secret<br/>(dso.quantumsys.dev/managed: watch)"]
-            VAULT_ALL -->|"Sync"| ESO
-            ESO -->|"Writes"| SYNC_SEC
+            VAULT_ALL -->|"Sync (Drift / Polling / Webhook)"| ESO
+            ESO -->|"Writes Synced Secret"| SYNC_SEC
         end
 
-        subgraph ModeA ["Mode 2: Event-Driven Direct Ingestion (Azure)"]
-            AKV["Azure Key Vault<br/>(Secrets & Certs)"]
-            AEG["Event Grid<br/>(Rotation Subscription)"]
-            ASB["Service Bus Queue<br/>(Peek-Lock Delivery)"]
-            AKV -->|"SecretNewVersionCreated"| AEG
-            AEG -->|"Push Event"| ASB
+        subgraph ModeEventDriven ["Event-Driven Mode: Universal Direct Ingestion (Multi-Cloud Push)"]
+            direction LR
+            subgraph CloudVaults ["Cloud Vaults & Event Routers"]
+                AKV["Azure Key Vault<br/>+ Event Grid"]
+                AWS_SM["AWS Secrets Manager<br/>+ EventBridge / SNS"]
+                GCP_SM["GCP Secret Manager<br/>+ Cloud Pub/Sub"]
+                VAULT_EVT["HashiCorp Vault<br/>+ Event Streams"]
+            end
+
+            subgraph CloudQueues ["Reliable Message Queues & Streaming"]
+                ASB["Azure Service Bus Queue<br/>(Peek-Lock Delivery)"]
+                SQS["Amazon SQS Queue<br/>(Ack/Nack Delivery)"]
+                PUBSUB["GCP Pub/Sub<br/>(Streaming Subscription)"]
+                KAFKA["Kafka / NATS Broker<br/>(Event Streaming)"]
+            end
+
+            AKV -->|"SecretNewVersionCreated"| ASB
+            AWS_SM -->|"Rotation Event"| SQS
+            GCP_SM -->|"Secret Version Add"| PUBSUB
+            VAULT_EVT -->|"Audit / Event Stream"| KAFKA
         end
     end
 
     subgraph K8sCluster ["☸️ Kubernetes Cluster Architecture"]
         subgraph DSO_System ["dso-system Namespace"]
-            DSO["⚙️ Dynamic Secret Operator<br/>(Pluggable Source Providers)"]
+            DSO["⚙️ Dynamic Secret Operator<br/>(Pluggable Event Handlers & Providers)"]
             OTEL["📊 OpenTelemetry & Prometheus<br/>(:8080/metrics)"]
         end
 
@@ -70,9 +85,9 @@ flowchart TD
     end
 
     %% Ingestion Flows
-    SYNC_SEC -.->|"spec.source.k8sSecret (Watch)"| DSO
-    ASB -.->|"spec.source.azureKeyVault (Peek-Lock)"| DSO
-    DSO -.->|"Fetch Payload via Workload Identity"| AKV
+    SYNC_SEC -.->|"spec.source.k8sSecret (Watch / Informer)"| DSO
+    CloudQueues -.->|"spec.source.* (Zero-Polling Push Stream)"| DSO
+    DSO -.->|"Fetch Payload via Cloud Identity (Workload Identity / IRSA)"| MultiCloud
 
     %% Progressive Delivery State Machine
     DSP -->|"1. Reconcile Policy"| DSO
@@ -86,12 +101,32 @@ flowchart TD
 
 ---
 
+### 🔄 Two Architectural Ingestion Modes: ESO Mode vs. Event-Driven Mode
+
+DSO provides two distinct, enterprise-grade ingestion models designed to fit any cloud topology:
+
+#### 1. ESO Mode: Universal Multi-Cloud Ingestion (ESO-Native / Decoupled)
+- **Concept:** Operates alongside the CNCF standard **External Secrets Operator (ESO)** to synchronize secrets from 30+ external secret stores (AWS Secrets Manager, Google Secret Manager, HashiCorp Vault, Azure Key Vault, Akeyless, CyberArk) into intermediate Kubernetes Secrets.
+- **How it Works:** When an upstream secret updates, ESO refreshes the Kubernetes Secret carrying the label `dso.quantumsys.dev/managed: "watch"`. DSO observes the hash drift through standard controller-runtime informers and initiates the progressive canary rollout.
+- **Zero Cloud IAM Overhead:** DSO requires **zero** cloud IAM permissions in this mode, running purely on native Kubernetes RBAC.
+
+#### 2. Event-Driven Mode: Universal Direct Ingestion (Multi-Cloud Push-Accelerated)
+- **Concept:** Sub-second, reactive push notifications triggered directly by cloud event brokers and queue streams. Rather than relying on periodic polling intervals, upstream secret rotations immediately push notification events to DSO.
+- **Multi-Cloud Architecture:** Event-driven ingestion is an architectural pattern supported across **all major cloud providers and hybrid infrastructures**:
+  - 🟦 **Microsoft Azure:** `Azure Key Vault` &rarr; `Azure Event Grid` &rarr; `Azure Service Bus Queue` (with Peek-Lock delivery and Azure Workload Identity).
+  - 🟧 **Amazon Web Services (AWS):** `AWS Secrets Manager` &rarr; `Amazon EventBridge / SNS` &rarr; `Amazon SQS Queue` (with message visibility timeouts and AWS IAM Roles for Service Accounts - IRSA / EKS Pod Identity).
+  - 🟥 **Google Cloud Platform (GCP):** `Google Cloud Secret Manager` &rarr; `Cloud Pub/Sub Topic & Subscription` (with streaming pull and GCP Workload Identity Federation).
+  - 🟪 **HashiCorp Vault & Hybrid/On-Prem:** `Vault Event Streams / Audit Webhooks` &rarr; `Apache Kafka / NATS / Event Broker` (with mutual TLS / SPIFFE identities).
+- **Sub-Second Latency & Zero Polling:** Eliminates API rate-limit throttling and polling delays, ensuring rotation events trigger canary validation within milliseconds of upstream modification.
+
+---
+
 ## ✨ Key Enterprise Capabilities
 
 | Feature | Description |
 | :--- | :--- |
-| **Pluggable Provider Architecture** | Extensible source backend abstraction (`source.Provider`) supporting native **Azure Key Vault**, **External Secrets Operator (ESO)** intermediate watch, and roadmap for **AWS Secrets Manager**, **GCP Secret Manager**, and **HashiCorp Vault**. |
-| **Zero-Trust Passwordless Auth** | Integrates exclusively with **Azure Workload Identity** using projected federated tokens. No static credentials, client secrets, or long-lived keys. |
+| **Pluggable Provider Architecture** | Extensible source backend abstraction (`source.Provider`) supporting native **Event-Driven Multi-Cloud Push** (Azure Key Vault, AWS Secrets Manager, GCP Secret Manager, Vault) and **Universal ESO-Native** intermediate watch. |
+| **Zero-Trust Passwordless Auth** | Integrates natively with cloud federated identities: **Azure Workload Identity**, **AWS IAM Roles for Service Accounts (IRSA) / EKS Pod Identity**, and **GCP Workload Identity**. No static credentials, client secrets, or long-lived tokens. |
 | **Immutable SecretRevisions** | Materializes cryptographically hashed, immutable Kubernetes Secrets (`<workload>-rev-<sha256>`), preventing in-place race conditions. |
 | **Progressive Canary Validation** | Spins up isolated canary workloads with strict `NetworkPolicy` or eBPF `CiliumNetworkPolicy` ingress rules and executes synthetic validation probes before touching production. |
 | **eBPF & Hubble Observability** | Optional native generation of `cilium.io/v2.CiliumNetworkPolicy` for granular L3/L4/L7 egress sandboxing and real-time Hubble packet telemetry. |
@@ -109,7 +144,7 @@ flowchart TD
 *   **♻️ Enterprise Resiliency & Etcd GC:** 
     *   **Circuit Breakers:** Tracks consecutive failures and halts reconciliation to prevent cascading cluster damage. Supports automatic drift-recovery the moment an upstream admin fixes the secret in Key Vault.
     *   **Sliding Window GC:** Automatically garbage-collects orphaned SecretRevisions in `etcd`, keeping only the `Current` and `Desired` revisions to prevent API server bloat.
-    *   **Backpressure Handling:** Leverages Azure Service Bus Peek-Lock with explicit timeout context NACKs to ensure rotation events are safely preserved during cluster CPU/Queue saturation.
+    *   **Backpressure Handling:** Leverages reliable queue delivery (e.g. Azure Service Bus Peek-Lock, AWS SQS visibility timeouts, GCP Pub/Sub nacks) with explicit timeout context NACKs to ensure rotation events are safely preserved during cluster CPU/Queue saturation.
 *   **🚥 Native Rollout Compatibility:** Works natively with standard Kubernetes `Deployment`, `StatefulSet`, and `DaemonSet` resources, as well as native support for **Argo Rollouts (Blue/Green)** for advanced traffic shifting.
 
 ## 🔐 Azure Prerequisites & Infrastructure Setup
@@ -157,34 +192,137 @@ az identity federated-credential create \
   --audience "api://AzureADTokenExchange"
 ```
 
-### 2. Explore the Examples (`kind` Ready)
+### 3. Deploy DSO Operator via Helm
 
-We provide comprehensive, end-to-end examples utilizing a local `kind` cluster. Check out the `examples/` directory to see DSO in action:
+Deploy DSO into your cluster using the installation configuration suited for your cloud provider or operating mode:
 
-*   **[Argo Rollouts Blue/Green (`examples/argo-rollouts-blue-green`)](examples/argo-rollouts-blue-green/):** Observe DSO updating a Rollout spec to trigger an isolated Green replica set, executing validation probes, and seamlessly cutting over Blue/Green traffic.
-*   **[Native TLS Certificate Rotation (`examples/tls-certificate-rotation`)](examples/tls-certificate-rotation/):** Watch DSO pull a raw PEM certificate, split it into `tls.crt`/`tls.key`, execute cryptographic TLS handshake probes, and rotate an Nginx Gateway without dropping connections.
-*   **[Nginx Color Canary (`examples/nginx-color-rotation`)](examples/nginx-color-rotation/):** A visual demonstration of Immutable SecretRevisions, canary transitions, and automatic Argo CD GitOps drift auto-patching.
+> 📖 **Provider Installation Guides:**  
+> - 🟢 **[Microsoft Azure Key Vault Guide](docs/providers/azure.md)** *(Production Ready)*
+> - 🟢 **[Universal Multi-Cloud via ESO Guide](docs/providers/eso.md)** *(Production Ready)*
+> - 🟡 **[Amazon Web Services (AWS) Guide](docs/providers/aws.md)** *(In Development – Roadmap v0.3)*
+> - 🟡 **[Google Cloud Platform (GCP) Guide](docs/providers/gcp.md)** *(In Development – Roadmap v0.3)*
+
+#### Option 1: Microsoft Azure (🟢 Production Ready)
+*Event-driven via Azure Key Vault, Azure Event Grid, Azure Service Bus, and Azure Workload Identity.*
 
 **PowerShell (Windows):**
 ```powershell
-helm install dso ./deploy/helm/dso `
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
   --namespace dso-system `
   --create-namespace `
+  --set mode=event-driven `
+  --set provider=azure `
+  --set azure.workloadIdentity.enabled=true `
   --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" `
   --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" `
   --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" `
-  --set azure.serviceBus.queueName="<QUEUE_NAME>"
+  --set azure.serviceBus.queueName="<QUEUE_NAME>" `
+  --wait
 ```
 
 **Bash (Linux / macOS):**
 ```bash
-helm install dso ./deploy/helm/dso \
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
   --namespace dso-system \
   --create-namespace \
+  --set mode=event-driven \
+  --set provider=azure \
+  --set azure.workloadIdentity.enabled=true \
   --set azure.workloadIdentity.clientId="<MANAGED_IDENTITY_CLIENT_ID>" \
   --set azure.workloadIdentity.tenantId="<AZURE_TENANT_ID>" \
   --set azure.serviceBus.namespace="<SERVICEBUS_NAMESPACE_FQDN>" \
-  --set azure.serviceBus.queueName="<QUEUE_NAME>"
+  --set azure.serviceBus.queueName="<QUEUE_NAME>" \
+  --wait
+```
+
+#### Option 2: Amazon Web Services (AWS) (🟡 In Development – Roadmap v0.3)
+> [!NOTE]
+> Native AWS event-driven ingestion (EventBridge $\to$ SQS) is currently under active development.
+> For production AWS clusters today, use **Option 4 (Universal Multi-Cloud via ESO)** below. See also [AWS Provider Guide](docs/providers/aws.md).
+
+**PowerShell (Windows):**
+```powershell
+# Note: Native AWS provider is currently under development (Roadmap v0.3.0)
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
+  --namespace dso-system `
+  --create-namespace `
+  --set mode=event-driven `
+  --set provider=aws `
+  --set aws.enabled=true `
+  --set aws.roleArn="arn:aws:iam::<ACCOUNT_ID>:role/dso-secret-operator-role" `
+  --set aws.sqs.queueUrl="https://sqs.<REGION>.amazonaws.com/<ACCOUNT_ID>/dso-vault-events" `
+  --set aws.region="<REGION>" `
+  --wait
+```
+
+**Bash (Linux / macOS):**
+```bash
+# Note: Native AWS provider is currently under development (Roadmap v0.3.0)
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
+  --namespace dso-system \
+  --create-namespace \
+  --set mode=event-driven \
+  --set provider=aws \
+  --set aws.enabled=true \
+  --set aws.roleArn="arn:aws:iam::<ACCOUNT_ID>:role/dso-secret-operator-role" \
+  --set aws.sqs.queueUrl="https://sqs.<REGION>.amazonaws.com/<ACCOUNT_ID>/dso-vault-events" \
+  --set aws.region="<REGION>" \
+  --wait
+```
+
+#### Option 3: Google Cloud Platform (GCP) (🟡 In Development – Roadmap v0.3)
+> [!NOTE]
+> Native GCP event-driven ingestion (Secret Manager $\to$ Pub/Sub) is currently under active development.
+> For production GCP clusters today, use **Option 4 (Universal Multi-Cloud via ESO)** below. See also [GCP Provider Guide](docs/providers/gcp.md).
+
+**PowerShell (Windows):**
+```powershell
+# Note: Native GCP provider is currently under development (Roadmap v0.3.0)
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
+  --namespace dso-system `
+  --create-namespace `
+  --set mode=event-driven `
+  --set provider=gcp `
+  --set gcp.enabled=true `
+  --set gcp.workloadIdentity.serviceAccount="dso-sa@<PROJECT_ID>.iam.gserviceaccount.com" `
+  --set gcp.pubsub.subscription="projects/<PROJECT_ID>/subscriptions/dso-vault-events-sub" `
+  --wait
+```
+
+**Bash (Linux / macOS):**
+```bash
+# Note: Native GCP provider is currently under development (Roadmap v0.3.0)
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
+  --namespace dso-system \
+  --create-namespace \
+  --set mode=event-driven \
+  --set provider=gcp \
+  --set gcp.enabled=true \
+  --set gcp.workloadIdentity.serviceAccount="dso-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
+  --set gcp.pubsub.subscription="projects/<PROJECT_ID>/subscriptions/dso-vault-events-sub" \
+  --wait
+```
+
+#### Option 4: Universal Multi-Cloud via External Secrets Operator (ESO) (🟢 Production Ready)
+*Recommended for AWS, GCP, HashiCorp Vault, Azure, or hybrid clusters today. Simply set `mode=eso` (requires no cloud credentials or provider parameter inside DSO).*  
+*(See the [ESO Universal Provider Guide](docs/providers/eso.md) for full prerequisites and setup).*
+
+**PowerShell (Windows):**
+```powershell
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
+  --namespace dso-system `
+  --create-namespace `
+  --set mode=eso `
+  --wait
+```
+
+**Bash (Linux / macOS):**
+```bash
+helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
+  --namespace dso-system \
+  --create-namespace \
+  --set mode=eso \
+  --wait
 ```
 
 ## 📖 CRD API Reference Summary
@@ -228,21 +366,39 @@ spec:
 
 ## 🗺️ Future Roadmap: Multi-Cloud Expansion
 
-DSO's core rotation engine—the state machine, immutable revisions, canary provisioner, and probe executor—is entirely provider-agnostic. 
+DSO's core progressive delivery engine—the state machine, immutable SecretRevisions, isolated canary sandboxing, and synthetic validation probes—is entirely cloud-agnostic.
+
+- **✅ Phase 1 (Production Ready - v0.2.x):**
+  - **ESO Mode (Universal Multi-Cloud):** Seamless progressive delivery for 30+ secret backends via External Secrets Operator across EKS, GKE, AKS, and bare-metal Kubernetes.
+  - **Event-Driven Mode (Azure):** Native sub-second push ingestion via Azure Key Vault, Event Grid, and Service Bus Peek-Lock queues with Azure Workload Identity.
+- **🚀 Phase 2 (Roadmap - v0.3.x):**
+  - **Event-Driven Mode (AWS):** Native push adapter for AWS Secrets Manager via Amazon EventBridge / SNS & Amazon SQS using AWS IAM Roles for Service Accounts (IRSA) and EKS Pod Identity.
+  - **Event-Driven Mode (Google Cloud):** Native push adapter for Google Cloud Secret Manager via Cloud Pub/Sub using GCP Workload Identity Federation.
+  - **Event-Driven Mode (HashiCorp Vault & On-Prem):** Native push adapter for Vault Event Streams and Audit Webhooks via Kafka / NATS / CloudEvents. 
 
 ---
 
-## 💡 Production & Enterprise Examples
+## 💡 Examples
 
 Explore our comprehensive reference architecture examples for testing:
 
-### ☁️ Azure Kubernetes Service (AKS) Examples
-- [**AKS Multi-Secret Rotation**](examples/aks/multi-secret-rotation/): Multi-secret workload auto-rotation consuming PostgreSQL, Redis, and Payment API keys with dedicated validation probes.
-- [**AKS Fullstack DB Rotation**](examples/aks/fullstack-db-rotation/): Live AKS cluster integration with Azure Key Vault, Service Bus, and Workload Identity.
-- [**AKS Job-Based Redis Probe**](examples/aks/job-based-redis-probe/): Ephemeral Batch Job probe running custom CLI validation scripts against rotated Redis cache tokens.
-- [**AKS Argo Rollouts Blue/Green**](examples/aks/argo-rollouts-blue-green/): Live AKS Blue/Green promotion triggered by Azure Key Vault rotations.
-- [**AKS TLS Certificate Rotation**](examples/aks/tls-certificate-rotation/): Live AKS TLS Gateway with Azure Key Vault SSL certificate auto-parsing.
-- [**AKS Nginx Color Canary**](examples/aks/nginx-color-rotation/): Live AKS Canary rollout with Argo CD `ignoreDifferences` auto-patching.
+### ☁️ Azure Kubernetes Service (AKS) Examples (`examples/azure`)
+- [**Azure Multi-Secret Rotation**](examples/azure/multi-secret-rotation/): Multi-secret workload auto-rotation consuming PostgreSQL, Redis, and Payment API keys with dedicated validation probes.
+- [**Azure Fullstack DB Rotation**](examples/azure/fullstack-db-rotation/): Live AKS cluster integration with Azure Key Vault, Service Bus, and Workload Identity.
+- [**Azure Job-Based Redis Probe**](examples/azure/job-based-redis-probe/): Ephemeral Batch Job probe running custom CLI validation scripts against rotated Redis cache tokens.
+- [**Azure Argo Rollouts Blue/Green**](examples/azure/argo-rollouts-blue-green/): Live AKS Blue/Green promotion triggered by Azure Key Vault rotations.
+- [**Azure TLS Certificate Rotation**](examples/azure/tls-certificate-rotation/): Live AKS TLS Gateway with Azure Key Vault SSL certificate auto-parsing.
+- [**Azure Nginx Color Canary**](examples/azure/nginx-color-rotation/): Live AKS Canary rollout with Argo CD `ignoreDifferences` auto-patching.
+
+### 🌐 External Secrets Operator (ESO) Multi-Cloud Examples (`examples/eso`)
+- [**ESO Argo Rollouts Blue/Green**](examples/eso/argo-rollouts-blue-green/): Decoupled Blue/Green rollout triggered by synced Kubernetes secrets.
+- [**ESO TLS Certificate Rotation**](examples/eso/tls-certificate-rotation/): Decoupled TLS ingress certificate rotation with synthetic TLS handshake verification.
+- [**ESO Nginx Color Canary**](examples/eso/nginx-color-rotation/): Canary rollout with synthetic Job hex color verification and Argo CD drift protection.
+- [**ESO Fullstack DB Rotation**](examples/eso/fullstack-db-rotation/): Zero-downtime PostgreSQL credential rollover via synced secrets.
+- [**ESO Job-Based Redis Probe**](examples/eso/job-based-redis-probe/): Ephemeral validation Job running `redis-cli PING` on synced secret update.
+- [**ESO Multi-Secret Rotation**](examples/eso/multi-secret-rotation/): Multi-secret microservice with independent validation probes per volume.
+- [**ESO Cilium Hubble Observability**](examples/eso/cilium-hubble-observability/): eBPF-based L3/L4/L7 egress network sandboxing and telemetry.
+- [**ESO Circuit Breaker & Rollback**](examples/eso/circuit-breaker-rollback/): Automatic circuit breaker tripping and rollback on invalid secrets.
 
 ---
 
@@ -251,12 +407,17 @@ Explore our comprehensive reference architecture examples for testing:
 For comprehensive details on enterprise integration, architecture, and operation:
 
 - [Getting Started Guide (5-Minute Quickstart)](docs/getting-started.md)
+- [Operating Modes Guide (ESO Mode vs Event-Driven Mode)](docs/operating-modes.md)
 - [API Reference](docs/api-reference.md)
 - [Configuration & Enterprise Tuning](docs/configuration.md)
 - [Troubleshooting & Runbooks](docs/troubleshooting.md)
 - [GitOps: Argo CD Self-Heal Integration](docs/gitops-argo-cd.md)
 - [Security & Threat Model](docs/security.md)
 - [Pluggable Providers Overview](docs/providers/overview.md)
+  - [Microsoft Azure Key Vault Guide (Production Ready)](docs/providers/azure.md)
+  - [Universal Multi-Cloud via ESO Guide (Production Ready)](docs/providers/eso.md)
+  - [AWS Secrets Manager Guide (In Development)](docs/providers/aws.md)
+  - [Google Cloud Secret Manager Guide (In Development)](docs/providers/gcp.md)
 
 **Architecture Decision Records (ADRs):**
 - [ADR-001: Azure Service Bus Peek-Lock vs Webhooks](docs/architecture/001-asb-peek-lock-vs-webhooks.md)

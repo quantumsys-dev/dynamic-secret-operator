@@ -189,7 +189,7 @@ spec:
                   seccompProfile:
                     type: RuntimeDefault
                 containers:
-                  - name: redis-ping
+                  - name: app
                     image: redis:7-alpine
                     imagePullPolicy: IfNotPresent
                     securityContext:
@@ -202,6 +202,11 @@ spec:
                         value: "redis-master.dso-examples.svc.cluster.local"
                       - name: REDIS_PORT
                         value: "6379"
+                      - name: REDIS_AUTH_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: redis-consumer-redis-auth-password-initial
+                            key: redis-auth-password
                     command:
                       - /bin/sh
                       - -c
@@ -211,6 +216,7 @@ spec:
                         RESULT=$(redis-cli \
                           -h "$REDIS_HOST" \
                           -p "$REDIS_PORT" \
+                          -a "$REDIS_AUTH_PASSWORD" \
                           --no-auth-warning \
                           PING)
                         if [ "$RESULT" != "PONG" ]; then
