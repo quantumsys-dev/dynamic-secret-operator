@@ -9,7 +9,7 @@ data:
     http {
       server {
         listen 8443 ssl;
-        server_name localhost;
+        server_name ${DOMAIN} localhost;
 
         ssl_certificate     /etc/ssl/certs/tls.crt;
         ssl_certificate_key /etc/ssl/certs/tls.key;
@@ -19,7 +19,7 @@ data:
 
         location / {
           default_type application/json;
-          return 200 '{"status":"ok","tls":"active","message":"Secure TLS gateway on AKS running with DSO managed certificate"}\n';
+          return 200 '{"status":"ok","tls":"active","domain":"${DOMAIN}","message":"Secure TLS gateway on AKS running with DSO managed certificate"}\n';
         }
 
         location /health {

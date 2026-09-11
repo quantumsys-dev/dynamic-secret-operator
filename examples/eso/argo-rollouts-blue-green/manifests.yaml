@@ -1,21 +1,4 @@
-apiVersion: external-secrets.io/v1beta1
-kind: SecretStore
-metadata:
-  name: eso-vault-store
-  namespace: dso-examples
-spec:
-  provider:
-    # Pluggable across AWS Secrets Manager, GCP Secret Manager, Vault, or Azure Key Vault
-    vault:
-      server: "http://vault.vault.svc.cluster.local:8200"
-      path: "secret"
-      version: "v2"
-      auth:
-        kubernetes:
-          mountPath: "kubernetes"
-          role: "eso-role"
----
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: payment-db-password-eso
@@ -23,8 +6,8 @@ metadata:
 spec:
   refreshInterval: 15s
   secretStoreRef:
-    name: eso-vault-store
-    kind: SecretStore
+    name: ${SECRET_STORE_NAME}
+    kind: ${SECRET_STORE_KIND}
   target:
     name: payment-db-password-synced
     creationPolicy: Owner
@@ -37,8 +20,7 @@ spec:
   data:
     - secretKey: payment-db-password
       remoteRef:
-        key: secret/payment
-        property: password
+        key: ${REMOTE_SECRET_NAME}
 ---
 apiVersion: v1
 kind: Service

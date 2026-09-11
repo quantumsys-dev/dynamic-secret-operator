@@ -1,20 +1,4 @@
-apiVersion: external-secrets.io/v1beta1
-kind: SecretStore
-metadata:
-  name: eso-redis-store
-  namespace: dso-examples
-spec:
-  provider:
-    vault:
-      server: "http://vault.vault.svc.cluster.local:8200"
-      path: "secret"
-      version: "v2"
-      auth:
-        kubernetes:
-          mountPath: "kubernetes"
-          role: "eso-role"
----
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: redis-auth-password-eso
@@ -22,8 +6,8 @@ metadata:
 spec:
   refreshInterval: 15s
   secretStoreRef:
-    name: eso-redis-store
-    kind: SecretStore
+    name: ${SECRET_STORE_NAME}
+    kind: ${SECRET_STORE_KIND}
   target:
     name: redis-auth-password-synced
     creationPolicy: Owner
@@ -36,8 +20,7 @@ spec:
   data:
     - secretKey: redis-auth-password
       remoteRef:
-        key: secret/redis
-        property: password
+        key: ${REMOTE_SECRET_NAME}
 ---
 apiVersion: apps/v1
 kind: Deployment

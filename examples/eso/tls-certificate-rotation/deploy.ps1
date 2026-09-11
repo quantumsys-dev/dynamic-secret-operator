@@ -1,5 +1,5 @@
 # ==============================================================================
-# Dynamic Secret Operator (DSO) – Deploy TLS Certificate Rotation Example on AKS
+# Dynamic Secret Operator (DSO) – Deploy ESO TLS Certificate Rotation Example
 # ==============================================================================
 
 [CmdletBinding()]
@@ -20,7 +20,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Ensure Azure CLI extension directory doesn't hit broken extensions
 if (-not $env:AZURE_EXTENSION_DIR) {
     $cleanExtDir = Join-Path $HOME ".azure\ext"
     if (-not (Test-Path $cleanExtDir)) { New-Item -ItemType Directory -Path $cleanExtDir -Force | Out-Null }
@@ -44,7 +43,7 @@ function Write-Info {
     Write-Host "ℹ️  $Message" -ForegroundColor Yellow
 }
 
-Write-Step "Deploying TLS Certificate Rotation Example to AKS Cluster..."
+Write-Step "Deploying ESO + DSO TLS Certificate Rotation Example to AKS..."
 Write-Info "Target Domain:     $Domain"
 Write-Info "Target Key Vault:  $KeyVaultName"
 
@@ -68,7 +67,7 @@ Write-Success "Using Kubernetes Context: $currentContext"
 Write-Step "Verifying access to Azure Key Vault '$KeyVaultName'..."
 $kvInfoRaw = az keyvault show --name $KeyVaultName 2>&1
 if ($LASTEXITCODE -ne 0) {
-    throw "Unable to access Key Vault '$KeyVaultName'. Please verify the name and your Azure permissions.`nDetails: $kvInfoRaw"
+    throw "Unable to access Key Vault '$KeyVaultName'. Please verify name and permissions.`nDetails: $kvInfoRaw"
 }
 $kvInfo = $kvInfoRaw | ConvertFrom-Json
 if (-not $ResourceGroupName) {
@@ -160,7 +159,7 @@ Write-Host "⚠️  ACTION REQUIRED: UPDATE DOMAIN NAME SERVERS AT REGISTRAR" -F
 Write-Host "==================================================================" -ForegroundColor Yellow
 Write-Host "The DNS Zone '$DnsZoneName' has been created/verified in Azure DNS." -ForegroundColor White
 Write-Host "You MUST update the Name Servers for domain '$Domain' at your domain" -ForegroundColor White
-Write-Host "registrar (e.g. GoDaddy, Namecheap, Cloudflare, Hostinger, etc.)" -ForegroundColor White
+Write-Host "registrar (e.g. GoDaddy, Namecheap, Cloudflare, Registro.br, Hostinger, etc.)" -ForegroundColor White
 Write-Host "to the following authoritative Azure DNS servers:" -ForegroundColor White
 Write-Host ""
 foreach ($ns in $nsList) {
@@ -261,7 +260,7 @@ if (-not $nsDelegated) {
 2. Update the Name Server (NS) records to the Azure DNS servers listed above.
 3. Wait for global DNS propagation across the network.
 4. Run this deployment script again to continue:
-   .\deploy-aks.ps1 -d "$Domain" -k "$KeyVaultName" -g "$ResourceGroupName"
+   .\deploy.ps1 -d "$Domain" -k "$KeyVaultName" -g "$ResourceGroupName"
 ==================================================================
 "@ -ForegroundColor Yellow
     throw "Please update the Name Servers at your domain registrar to the Azure DNS servers listed above, wait for propagation, and try again."
@@ -278,12 +277,11 @@ $policyContent = $policyContent -replace '\$\{DOMAIN\}', $Domain
 
 $tempPolicyFile = New-TemporaryFile
 Set-Content -Path $tempPolicyFile.FullName -Value $policyContent
-try {
 
+try {
     $certCheck = az keyvault certificate show --vault-name $KeyVaultName --name "ingress-tls-cert" 2>$null
     if (-not $certCheck) {
         Write-Info "Creating initial certificate 'ingress-tls-cert' (CN=$Domain) in Key Vault..."
-        
         $createSuccess = $false
         $createAttempts = 0
         $createCertOut = ""
@@ -324,7 +322,7 @@ try {
             $elapsed += 2
         }
         if (-not $certReady) {
-            throw "Timed out waiting for certificate 'ingress-tls-cert' to become ready in Key Vault."
+            throw "Timed out waiting for certificate 'ingress-tls-cert' in Key Vault."
         }
         Write-Success "Initial certificate created in Key Vault for '$Domain'."
     } else {
@@ -334,12 +332,58 @@ try {
     Remove-Item -Path $tempPolicyFile.FullName -ErrorAction SilentlyContinue
 }
 
-# 6. Ensure target namespace exists and apply bootstrap TLS secret
+# 6. Ensure target namespace & Azure Workload Identity federation for ESO
 Write-Step "Ensuring namespace 'dso-examples' exists..."
 $nsOut = kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - 2>&1
 if ($LASTEXITCODE -ne 0) { throw "Failed to ensure namespace 'dso-examples'.`nDetails: $nsOut" }
 Write-Success "Namespace 'dso-examples' ready."
 
+Write-Step "Resolving Azure Managed Identity & Workload Identity federation..."
+$identityList = az identity list -g $ResourceGroupName -o json 2>$null | ConvertFrom-Json
+$clientId = ""
+$identityName = ""
+if ($identityList -and $identityList.Count -gt 0) {
+    $clientId = $identityList[0].clientId
+    $identityName = $identityList[0].name
+}
+
+if (-not $clientId) {
+    Write-Info "Checking user-assigned managed identity 'id-dso-dev'..."
+    $idObj = az identity show -n "id-dso-dev" -g $ResourceGroupName -o json 2>$null | ConvertFrom-Json
+    if ($idObj) {
+        $clientId = $idObj.clientId
+        $identityName = $idObj.name
+    }
+}
+
+if ($clientId) {
+    Write-Success "Using Managed Identity '$identityName' (Client ID: $clientId)"
+    # Check federated credential for ESO service account
+    $fedCheck = az identity federated-credential show --name "dso-eso-sa-federation" --identity-name $identityName -g $ResourceGroupName 2>$null
+    if (-not $fedCheck) {
+        $aksCluster = az aks list -g $ResourceGroupName -o json 2>$null | ConvertFrom-Json
+        $issuerUrl = ""
+        if ($aksCluster -and $aksCluster.Count -gt 0) {
+            $issuerUrl = $aksCluster[0].oidcIssuerProfile.issuerUrl
+        }
+        if ($issuerUrl) {
+            Write-Info "Federating Managed Identity with ServiceAccount 'dso-examples:eso-azure-sa'..."
+            az identity federated-credential create `
+                --name "dso-eso-sa-federation" `
+                --identity-name $identityName `
+                --resource-group $ResourceGroupName `
+                --issuer "$issuerUrl" `
+                --subject "system:serviceaccount:dso-examples:eso-azure-sa" `
+                --audience "api://AzureADTokenExchange" `
+                --output none 2>&1 | Out-Null
+            Write-Success "Workload Identity federation established for ESO."
+        }
+    }
+} else {
+    Write-Info "Notice: Managed Identity client ID could not be auto-resolved; proceeding."
+}
+
+# 7. Create bootstrap TLS secret in cluster
 Write-Step "Creating bootstrap TLS secret for '$Domain' in cluster..."
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new("CN=$Domain", $rsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
@@ -379,15 +423,20 @@ if ($RepoRoot -and (Test-Path (Join-Path $RepoRoot "config/crd/bases"))) {
     Write-Success "CRD applied."
 }
 
-# 7. Apply manifests with Key Vault and Domain replacement
-Write-Step "Deploying Nginx TLS Gateway and DynamicSecretPolicy manifests..."
+# 8. Apply manifests
+Write-Step "Deploying ESO SecretStore, ExternalSecret, Nginx Gateway, and DSO Policy..."
 $manifestPath = Join-Path $PSScriptRoot "manifests.yaml"
 if (-not (Test-Path $manifestPath)) {
     throw "Manifest file not found: $manifestPath"
 }
-$manifestContent = Get-Content $manifestPath -Raw
+$tenantId = az account show --query tenantId -o tsv 2>$null
+if (-not $tenantId -and $kvInfo.properties.tenantId) {
+    $tenantId = $kvInfo.properties.tenantId
+}
 $manifestContent = $manifestContent -replace '\$\{KEYVAULT_NAME\}', $KeyVaultName
 $manifestContent = $manifestContent -replace '\$\{DOMAIN\}', $Domain
+$manifestContent = $manifestContent -replace '\$\{AZURE_CLIENT_ID\}', $clientId
+$manifestContent = $manifestContent -replace '\$\{AZURE_TENANT_ID\}', $tenantId
 
 $applyOut = $manifestContent | kubectl apply -f - 2>&1
 Write-Host $applyOut
@@ -395,7 +444,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to apply manifests.`nDetails: $applyOut"
 }
 
-# 8. Wait for deployment to be ready
+# 9. Wait for rollout
 Write-Info "Waiting for TLS Gateway deployment to become ready..."
 $rolloutOut = kubectl rollout status deployment/tls-gateway -n dso-examples --timeout=120s 2>&1
 Write-Host $rolloutOut
@@ -403,7 +452,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "TLS Gateway rollout failed or timed out.`nDetails: $rolloutOut"
 }
 
-# 9. Check and register Public LoadBalancer IP in Azure DNS
+# 10. Check and register Public LoadBalancer IP in Azure DNS
 Write-Step "Retrieving Public LoadBalancer IP for tls-gateway..."
 $extIp = $null
 $maxWait = 60
@@ -437,12 +486,11 @@ if ($extIp) {
         Write-Info "Notice: Could not automatically set A record. Details: $recordOut"
     }
 } else {
-    Write-Info "LoadBalancer Public IP is still pending in Azure. You can register the A record once ready using:"
-    Write-Info "az network dns record-set a add-record -g $ResourceGroupName -z $DnsZoneName -n '@' --ipv4-address <EXTERNAL-IP>"
+    Write-Info "LoadBalancer Public IP is still pending in Azure."
 }
 
 Write-Host "`n==================================================================" -ForegroundColor Green
-Write-Host "✅ TLS Certificate Rotation Example deployed successfully on AKS!" -ForegroundColor Green
+Write-Host "✅ ESO TLS Certificate Rotation Example deployed successfully on AKS!" -ForegroundColor Green
 Write-Host "==================================================================" -ForegroundColor Green
 
 Write-Host @"
