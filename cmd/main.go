@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -291,35 +290,18 @@ func main() {
 			handlerLog := ctrl.LoggerFrom(ctx).WithName("event-ingester-handler")
 			handlerLog.Info("processing rotation event")
 
-			var eventData struct {
-				Subject   string `json:"subject"`
-				EventType string `json:"eventType"`
-				Data      struct {
-					ObjectName string `json:"ObjectName"`
-					ObjectType string `json:"ObjectType"`
-					Version    string `json:"Version"`
-				} `json:"data"`
-				PolicyName string `json:"policyName"`
-				Namespace  string `json:"namespace"`
+			eventPayload, err := events.ParseRotationEventPayload(body)
+			if err != nil {
+				handlerLog.Error(err, "failed to parse rotation event payload")
+				return err
 			}
 
-			_ = json.Unmarshal(body, &eventData)
-
-			targetObjectName := eventData.Data.ObjectName
-			if targetObjectName == "" && eventData.Subject != "" {
-				parts := strings.Split(eventData.Subject, "/")
-				for i, part := range parts {
-					if part == "secrets" && i+1 < len(parts) {
-						targetObjectName = parts[i+1]
-						break
-					}
-				}
-			}
+			targetObjectName := eventPayload.ObjectName
 
 			policyList := &secretv1alpha1.DynamicSecretPolicyList{}
 			listOpts := []client.ListOption{}
-			if eventData.Namespace != "" {
-				listOpts = append(listOpts, client.InNamespace(eventData.Namespace))
+			if eventPayload.Namespace != "" {
+				listOpts = append(listOpts, client.InNamespace(eventPayload.Namespace))
 			}
 
 			if err := mgr.GetClient().List(ctx, policyList, listOpts...); err != nil {
@@ -330,7 +312,7 @@ func main() {
 			matchedCount := 0
 			for i := range policyList.Items {
 				p := &policyList.Items[i]
-				if targetObjectName == "" || p.Spec.GetVaultObjectName() == targetObjectName || p.Name == eventData.PolicyName {
+				if targetObjectName == "" || p.Spec.GetVaultObjectName() == targetObjectName || p.Name == eventPayload.PolicyName {
 					timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Second)
 					select {
 					case eventsChannel <- event.GenericEvent{Object: p}:
