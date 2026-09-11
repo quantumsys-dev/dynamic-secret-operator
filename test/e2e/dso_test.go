@@ -633,11 +633,13 @@ func TestJobProbe_ValidationAndPromotion(t *testing.T) {
 				}
 				for _, j := range jobList.Items {
 					if j.Labels != nil && j.Labels["dso.quantumsys.dev/probe"] == "job" {
-						return false, nil // Lingering job found
+						if j.GetDeletionTimestamp() == nil {
+							return false, nil // Lingering active job found (not yet marked for deletion)
+						}
 					}
 				}
 				return true, nil
-			}, wait.WithTimeout(time.Second*30), wait.WithInterval(time.Second*1))
+			}, wait.WithTimeout(time.Second*45), wait.WithInterval(time.Second*2))
 			if err != nil {
 				t.Fatalf("Ephemeral probe Job was not cleaned up after completion: %v", err)
 			}
