@@ -24,7 +24,7 @@ This document details both operating modes, architectural differences, security 
 
 ### ESO Mode: Universal Multi-Cloud Ingestion (ESO-Native / Decoupled)
 
-In **ESO Mode**, DSO embraces [**ADR-003: Decoupling Secret Ingestion**](architecture/003-decoupling-secret-ingestion-eso.md). DSO delegates external vault authentication, network connectivity, and secret formatting to the CNCF project [**External Secrets Operator (ESO)**](https://external-secrets.io/).
+In **ESO Mode**, DSO embraces [**ADR-003: Decoupling Secret Ingestion**](../adr/003-decoupling-secret-ingestion-eso.md). DSO delegates external vault authentication, network connectivity, and secret formatting to the CNCF project [**External Secrets Operator (ESO)**](https://external-secrets.io/).
 
 ```mermaid
 flowchart TD
@@ -159,7 +159,7 @@ stateDiagram-v2
 ```
 
 #### 1. Where Validation Probes Fit In
-1. **`RevisionPrepared`**: Computes the cryptographic SHA-256 hash of the rotated secret payload and materializes a new immutable Secret (`<workload>-rev-<sha256>`).
+1. **`RevisionPrepared`**: Computes the deterministic SHA-256 hash of the rotated secret payload and materializes a new immutable Secret (`<workload>-<secretName>-rev-<12-hex-hash>`).
 2. **`CanaryProvisioning`**: Provisions an isolated canary deployment (`<workload>-canary`) with an ephemeral `NetworkPolicy` (or Cilium eBPF egress sandbox). Only the canary pod mounts the candidate secret revision.
 3. **`Validating`**: **Validation probes enter the execution lifecycle here.** The operator runs all synthetic probes configured in `spec.validationProbes` against the candidate revision and canary sandbox.
 
@@ -179,7 +179,7 @@ When all validation probes pass:
    - DSO safely patches the production workload (`Deployment`, `StatefulSet`, `DaemonSet`, or `Argo Rollout`) to mount the validated `SecretRevision`.
    - Pods are rolled out progressively via standard Kubernetes rolling upgrade strategies.
 2. **GitOps Harmony (Argo CD Auto-Patch)**:
-   - DSO dynamically patches the target Argo CD `Application`'s `spec.ignoreDifferences` with JSON Pointers to the modified revision annotation and secret volumes, preventing Argo CD self-heal revert loops.
+   - DSO dynamically patches the target Argo CD `Application`'s `spec.ignoreDifferences` with JSON Pointer for the revision annotation and fine-grained JQ path expressions for secret volumes and environment variables, preventing Argo CD self-heal revert loops (see [GitOps Integration: Argo CD](gitops-argo-cd.md)).
 3. **Sandbox Teardown & Metrics Reset**:
    - The ephemeral canary deployment and network sandbox policies are deleted to reclaim cluster resources.
    - The policy transitions to `PromotionCompleted: True`, and consecutive failure counters reset to zero (`consecutiveFailures: 0`).
@@ -227,7 +227,7 @@ helm install external-secrets \
 ```
 
 #### Step 2: Install DSO in ESO Mode (Universal Multi-Cloud)
-*(See the [ESO Universal Provider Guide](providers/eso.md) for complete details).*
+*(See the [ESO Universal Provider Guide](../providers/eso/eso.md) for complete details).*
 
 **PowerShell (Windows):**
 ```powershell
@@ -251,7 +251,7 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
 Ensure your `ExternalSecret` attaches the required label to the generated secret:
 
 ```yaml
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: database-credentials-sync
@@ -329,7 +329,7 @@ In Event-Driven Mode, DSO connects directly to cloud message queues across **AWS
   - Role: `Azure Service Bus Data Receiver` on Service Bus.
 
 **Helm Installation (Production Ready):**  
-*(See the [Azure Key Vault Provider Guide](providers/azure.md) for full infrastructure setup).*
+*(See the [Azure Key Vault Provider Guide](../providers/azure/azure.md) for full infrastructure setup).*
 
 *PowerShell (Windows):*
 ```powershell
@@ -393,7 +393,7 @@ spec:
 
 > [!WARNING]
 > **Status: 🟡 Under Active Development (Roadmap v0.3.0)**  
-> Direct event-driven ingestion for AWS is currently in development. For production AWS environments today, use **[Option A: ESO Mode](#option-a-installing-dso-for-eso-mode-decoupled--multi-cloud)**. See the [AWS Secrets Manager Provider Guide](providers/aws.md) for details.
+> Direct event-driven ingestion for AWS is currently in development. For production AWS environments today, use **[Option A: ESO Mode](#option-a-installing-dso-for-eso-mode-decoupled--multi-cloud)**. See the [AWS Secrets Manager Provider Guide](../providers/aws/aws.md) for details.
 
 **Prerequisites:**
 - AWS Secrets Manager secret.
@@ -463,7 +463,7 @@ spec:
 
 > [!WARNING]
 > **Status: 🟡 Under Active Development (Roadmap v0.3.0)**  
-> Direct event-driven ingestion for GCP is currently in development. For production GCP environments today, use **[Option A: ESO Mode](#option-a-installing-dso-for-eso-mode-decoupled--multi-cloud)**. See the [Google Cloud Secret Manager Provider Guide](providers/gcp.md) for details.
+> Direct event-driven ingestion for GCP is currently in development. For production GCP environments today, use **[Option A: ESO Mode](#option-a-installing-dso-for-eso-mode-decoupled--multi-cloud)**. See the [Google Cloud Secret Manager Provider Guide](../providers/gcp/gcp.md) for details.
 
 **Prerequisites:**
 - Google Cloud Secret Manager secret.
@@ -562,13 +562,20 @@ flowchart TD
 
 ## 🔗 Related Resources
 
-- [Getting Started Guide (5-Minute Quickstart)](getting-started.md)
-- [Cloud Providers Overview](providers/overview.md)
-  - [Microsoft Azure Key Vault Guide (Production Ready)](providers/azure.md)
-  - [Universal Multi-Cloud via ESO Guide (Production Ready)](providers/eso.md)
-  - [AWS Secrets Manager Guide (In Development)](providers/aws.md)
-  - [Google Cloud Secret Manager Guide (In Development)](providers/gcp.md)
-- [ADR-001: Azure Service Bus Peek-Lock vs Webhooks](architecture/001-asb-peek-lock-vs-webhooks.md)
-- [ADR-003: Decoupling Secret Ingestion & ESO Standard](architecture/003-decoupling-secret-ingestion-eso.md)
-- [Azure Production Examples](../examples/azure/)
-- [ESO Multi-Cloud Examples](../examples/eso/)
+- [Getting Started Guide (5-Minute Quickstart)](../getting-started.md)
+- [Architecture & Operations Reference](api-reference.md)
+  - [Operator Configuration Reference](configuration.md)
+  - [GitOps Integration: Managing Argo CD Drift](gitops-argo-cd.md)
+  - [Security Architecture & Threat Model](security.md)
+- [Cloud Providers Overview](../providers/overview.md)
+  - [Microsoft Azure Key Vault Guide (Production Ready)](../providers/azure/azure.md)
+  - [Universal Multi-Cloud via ESO Guide (Production Ready)](../providers/eso/eso.md)
+  - [AWS Secrets Manager Guide (In Development)](../providers/aws/aws.md)
+  - [Google Cloud Secret Manager Guide (In Development)](../providers/gcp/gcp.md)
+- [Architecture Decision Records (ADRs)](../adr/)
+  - [ADR-001: Azure Service Bus Peek-Lock vs Webhooks](../adr/001-asb-peek-lock-vs-webhooks.md)
+  - [ADR-002: Immutable Revisions vs Mutable In-Place](../adr/002-immutable-revisions-vs-mutable.md)
+  - [ADR-003: Decoupling Secret Ingestion & ESO Standard](../adr/003-decoupling-secret-ingestion-eso.md)
+- [Code Examples](../../examples/)
+  - [Azure Production Examples](../../examples/azure/)
+  - [ESO Multi-Cloud Examples](../../examples/eso/)

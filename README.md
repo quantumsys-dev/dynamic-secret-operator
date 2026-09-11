@@ -19,7 +19,7 @@
 
 ## 📖 Executive Summary
 
-**Dynamic Secret Operator (DSO)** is a production-grade Kubernetes operator engineered to eliminate `CrashLoopBackOff` outages during credential rotations across multi-cloud environments. 
+**Dynamic Secret Operator (DSO)** is a Kubernetes operator engineered to eliminate `CrashLoopBackOff` outages during credential rotations across multi-cloud environments. 
 
 Traditional secret management tools mutate secrets *in-place*, instantly crashing downstream pods if a rotated database credential, API key, or TLS certificate is malformed, not yet active, or fails handshakes. DSO solves this by adopting **ADR-002: Immutable Revisions**. 
 
@@ -276,7 +276,7 @@ Explore our comprehensive reference architecture examples for testing:
 - [**Azure Job-Based Redis Probe**](examples/azure/job-based-redis-probe/): Ephemeral Batch Job probe running custom CLI validation scripts against rotated Redis cache tokens.
 - [**Azure Argo Rollouts Blue/Green**](examples/azure/argo-rollouts-blue-green/): Live AKS Blue/Green promotion triggered by Azure Key Vault rotations.
 - [**Azure TLS Certificate Rotation**](examples/azure/tls-certificate-rotation/): Live AKS TLS Gateway with Azure Key Vault SSL certificate auto-parsing.
-- [**Azure Nginx Color Canary**](examples/azure/nginx-color-rotation/): Live AKS Canary rollout with Argo CD `ignoreDifferences` auto-patching.
+- [**Azure Nginx Color Canary**](examples/azure/nginx-color-rotation/): Live AKS Nginx background color rotation with Azure Key Vault.
 
 ### 🌐 External Secrets Operator (ESO) Multi-Cloud Examples (`examples/eso`)
 - [**ESO Argo Rollouts Blue/Green**](examples/eso/argo-rollouts-blue-green/): Decoupled Blue/Green rollout triggered by synced Kubernetes secrets.
@@ -285,8 +285,6 @@ Explore our comprehensive reference architecture examples for testing:
 - [**ESO Fullstack DB Rotation**](examples/eso/fullstack-db-rotation/): Zero-downtime PostgreSQL credential rollover via synced secrets.
 - [**ESO Job-Based Redis Probe**](examples/eso/job-based-redis-probe/): Ephemeral validation Job running `redis-cli PING` on synced secret update.
 - [**ESO Multi-Secret Rotation**](examples/eso/multi-secret-rotation/): Multi-secret microservice with independent validation probes per volume.
-- [**ESO Cilium Hubble Observability**](examples/eso/cilium-hubble-observability/): eBPF-based L3/L4/L7 egress network sandboxing and telemetry.
-- [**ESO Circuit Breaker & Rollback**](examples/eso/circuit-breaker-rollback/): Automatic circuit breaker tripping and rollback on invalid secrets.
 
 ---
 
