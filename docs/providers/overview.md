@@ -27,12 +27,12 @@ graph TD
 
 ## 2. Supported Provider Backends & Dedicated Guides
 
-DSO provides documentation and reference guides for each supported and upcoming provider:
+DSO provides dedicated modular documentation suites ([README](azure/README.md), [Getting Started](azure/getting-started.md), and [Troubleshooting](azure/troubleshooting.md)) for each supported and upcoming provider:
 
-- 🟢 **[Microsoft Azure Key Vault Guide](azure.md)** – *Production Ready* (Direct event-driven via Event Grid & Service Bus)
-- 🟢 **[Universal Multi-Cloud via External Secrets Operator (ESO) Guide](eso.md)** – *Production Ready* (Decoupled intermediate secrets)
-- 🟡 **[Amazon Web Services (AWS) Secrets Manager Guide](aws.md)** – *In Development (Roadmap v0.3)*
-- 🟡 **[Google Cloud Platform (GCP) Secret Manager Guide](gcp.md)** – *In Development (Roadmap v0.3)*
+- 🟢 **[Microsoft Azure Key Vault Guide](azure/README.md)** – *Production Ready* (Direct event-driven via Event Grid & Service Bus)
+- 🟢 **[Universal Multi-Cloud via External Secrets Operator (ESO) Guide](eso/README.md)** – *Production Ready* (Decoupled intermediate secrets)
+- 🟡 **[Amazon Web Services (AWS) Secrets Manager Guide](aws/README.md)** – *In Development (Roadmap v0.3)*
+- 🟡 **[Google Cloud Platform (GCP) Secret Manager Guide](gcp/README.md)** – *In Development (Roadmap v0.3)*
 
 ---
 
@@ -41,7 +41,7 @@ DSO provides documentation and reference guides for each supported and upcoming 
 DSO provides direct event-driven ingestion across major cloud platforms without polling delays:
 
 #### Microsoft Azure (`AzureKeyVault`) — 🟢 Production Ready
-Ingests real-time rotation events from Azure Key Vault via Azure Event Grid and Azure Service Bus (`Peek-Lock` queue) authenticated with Azure Workload Identity. See full setup instructions in the [Azure Key Vault Provider Guide](azure.md).
+Ingests real-time rotation events from Azure Key Vault via Azure Event Grid and Azure Service Bus (`Peek-Lock` queue) authenticated with Azure Workload Identity. See full setup instructions in the [Azure Key Vault Provider Guide](azure/README.md).
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -63,9 +63,9 @@ spec:
 
 #### Amazon Web Services (`AWSSecretsManager`) — 🟡 In Development
 > [!NOTE]
-> Native AWS ingestion is under development for Roadmap v0.3. For production AWS workloads today, use the [External Secrets Operator (ESO) Guide](eso.md).
+> Native AWS ingestion is under development for Roadmap v0.3. For production AWS workloads today, use the [External Secrets Operator (ESO) Guide](eso/README.md).
 
-Ingests rotation events from AWS Secrets Manager via Amazon EventBridge and Amazon SQS queues authenticated using AWS IAM Roles for Service Accounts (IRSA) or EKS Pod Identity. See the [AWS Secrets Manager Provider Guide](aws.md).
+Ingests rotation events from AWS Secrets Manager via Amazon EventBridge and Amazon SQS queues authenticated using AWS IAM Roles for Service Accounts (IRSA) or EKS Pod Identity. See the [AWS Secrets Manager Provider Guide](aws/README.md).
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -85,9 +85,9 @@ spec:
 
 #### Google Cloud Platform (`GCPSecretManager`) — 🟡 In Development
 > [!NOTE]
-> Native GCP ingestion is under development for Roadmap v0.3. For production GCP workloads today, use the [External Secrets Operator (ESO) Guide](eso.md).
+> Native GCP ingestion is under development for Roadmap v0.3. For production GCP workloads today, use the [External Secrets Operator (ESO) Guide](eso/README.md).
 
-Ingests rotation events from Google Cloud Secret Manager via Cloud Pub/Sub topics and subscriptions authenticated using GCP Workload Identity Federation. See the [Google Cloud Secret Manager Provider Guide](gcp.md).
+Ingests rotation events from Google Cloud Secret Manager via Cloud Pub/Sub topics and subscriptions authenticated using GCP Workload Identity Federation. See the [Google Cloud Secret Manager Provider Guide](gcp/README.md).
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -106,12 +106,12 @@ spec:
 ```
 
 ### 2.2 Universal Multi-Cloud via External Secrets Operator (`K8sSecret`) — 🟢 Production Ready
-Leverages **External Secrets Operator (ESO)** to synchronize credentials from AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault, or Akeyless into intermediate Kubernetes secrets, which DSO monitors to trigger progressive delivery. See full details in the [ESO Universal Provider Guide](eso.md).
+Leverages **External Secrets Operator (ESO)** to synchronize credentials from AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault, or Akeyless into intermediate Kubernetes secrets, which DSO monitors to trigger progressive delivery. See full details in the [ESO Universal Provider Guide](eso/README.md).
 
 > **Required label:** the intermediate secret named in `k8sSecret.name` must carry the label
 > `dso.quantumsys.dev/managed: "watch"` (for example via `target.template.metadata.labels` on
 > the `ExternalSecret`), or DSO's cache will never observe its changes and rotations will not
-> be detected. See [ADR-003](../architecture/003-decoupling-secret-ingestion-eso.md) and the
+> be detected. See [ADR-003](../adr/003-decoupling-secret-ingestion-eso.md) and the
 > `examples/eso/` manifests for working examples.
 
 ```yaml
@@ -142,12 +142,12 @@ spec:
 
 ## 3. Native Provider Roadmap & Status
 
-| Provider | Guide | Mechanism | Status | Target Release |
+| Provider | Guide Suite | Mechanism | Status | Target Release |
 | :--- | :--- | :--- | :--- | :--- |
-| **Microsoft Azure** | [Azure Key Vault Guide](azure.md) | Event Grid $\to$ Service Bus Event-Driven Ingestion | 🟢 Production Ready | v0.1.0 |
-| **Universal Multi-Cloud (ESO)** | [ESO Universal Guide](eso.md) | Decoupled Intermediate Secret Watch | 🟢 Production Ready | v0.2.0 |
-| **AWS Secrets Manager** | [AWS Guide](aws.md) | Amazon EventBridge $\to$ Amazon SQS Watcher | 🟡 In Development | v0.3.0 |
-| **GCP Secret Manager** | [GCP Guide](gcp.md) | Cloud Pub/Sub Push/Pull Ingestion | 🟡 In Development | v0.3.0 |
+| **Microsoft Azure** | [Azure Key Vault Guide](azure/README.md) | Event Grid $\to$ Service Bus Event-Driven Ingestion | 🟢 Production Ready | v0.1.0 |
+| **Universal Multi-Cloud (ESO)** | [ESO Universal Guide](eso/README.md) | Decoupled Intermediate Secret Watch | 🟢 Production Ready | v0.2.0 |
+| **AWS Secrets Manager** | [AWS Guide](aws/README.md) | Amazon EventBridge $\to$ Amazon SQS Watcher | 🟡 In Development | v0.3.0 |
+| **GCP Secret Manager** | [GCP Guide](gcp/README.md) | Cloud Pub/Sub Push/Pull Ingestion | 🟡 In Development | v0.3.0 |
 | **HashiCorp Vault** | [Roadmap Guide](overview.md) | Vault Audit Engine / Webhook Receiver | 🟡 In Development | v0.3.0 |
 
 ---
