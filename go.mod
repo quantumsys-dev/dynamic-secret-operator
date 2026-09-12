@@ -9,13 +9,14 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets v1.3.1
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/XSAM/otelsql v0.37.0
-	github.com/argoproj/argo-cd/v2 v2.14.20
+	github.com/argoproj/argo-cd/v2 v2.14.21
 	github.com/argoproj/argo-rollouts v1.7.2
 	github.com/go-sql-driver/mysql v1.9.0
 	github.com/lib/pq v1.10.9
 	github.com/onsi/ginkgo/v2 v2.22.2
 	github.com/onsi/gomega v1.36.2
 	github.com/prometheus/client_golang v1.20.5
+	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
@@ -135,7 +136,6 @@ require (
 	github.com/skeema/knownhosts v1.3.1 // indirect
 	github.com/spf13/cobra v1.10.1 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
-	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/vladimirvivien/gexe v0.3.0 // indirect
 	github.com/vmihailenco/go-tinylfu v0.2.2 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.3.4 // indirect
