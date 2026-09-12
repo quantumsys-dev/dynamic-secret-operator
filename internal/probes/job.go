@@ -82,6 +82,7 @@ func DeriveProbeJobName(policyName, revisionSecretName string) string {
 	if len(jobName) > 63 {
 		jobName = jobName[:63]
 	}
+	jobName = strings.TrimRight(jobName, "-")
 	return jobName
 }
 

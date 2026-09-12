@@ -1,44 +1,24 @@
-# Microsoft Azure Key Vault Provider Guide
+# Getting Started with Microsoft Azure Key Vault & DSO
 
-The **Dynamic Secret Operator (DSO)** provides production-ready, event-driven secret rotation for **Microsoft Azure Key Vault**. Utilizing Azure Event Grid and Azure Service Bus queues, DSO ingests secret lifecycle events in sub-second time without continuous API polling, and uses Azure Workload Identity for secure, passwordless authentication.
-
-> **Status:** 🟢 **Production Ready** (Fully supported in DSO v0.1.0+)
+This guide walks you through the end-to-end configuration required to deploy and run the **Dynamic Secret Operator (DSO)** in **Event-Driven Mode** on Azure Kubernetes Service (AKS).
 
 ---
 
-## 1. Architectural Model
+## 1. Prerequisites
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor SecAdmin as Security Admin / CI-CD
-    participant KV as Azure Key Vault
-    participant EG as Azure Event Grid
-    participant ASB as Azure Service Bus Queue
-    participant DSO as DSO Controller (AKS)
-    participant Workload as Target Workload (App)
-
-    SecAdmin->>KV: Update Secret (New Version Created)
-    KV->>EG: Emit "SecretNewVersionCreated" Event
-    EG->>ASB: Route Event via Message Push
-    ASB->>DSO: Ingest via AMQP Peek-Lock (Workload Identity)
-    DSO->>KV: Fetch Secret Value via AzIdentity SDK
-    DSO->>DSO: Materialize Immutable Revision Secret
-    DSO->>DSO: Launch Isolated Canary + Synthetic Probes
-    DSO->>Workload: Zero-Downtime Rollout & Settle
-    DSO->>ASB: Complete / ACK Message
-```
-
-### Key Highlights
-- **Real-Time Push:** Azure Event Grid detects when `Microsoft.KeyVault.SecretNewVersionCreated` triggers and forwards it instantly to an Azure Service Bus queue.
-- **Zero Polling & Rate Limiting Immunity:** Traditional polling risks throttling Azure Key Vault API limits. DSO maintains a long-lived AMQP `Peek-Lock` receiver against Service Bus.
-- **Strict Passwordless Security:** The DSO pod runs under an AKS-federated **Azure User-Assigned Managed Identity** via Azure Workload Identity. No long-lived client secrets, certificates, or tokens are stored in the cluster.
+Before starting, ensure you have:
+- An active **Azure Subscription** with permissions to manage Key Vault, Service Bus, and Azure RBAC.
+- **Azure CLI** (`az`) installed and authenticated (`az login`).
+- An **AKS Cluster** with OIDC Issuer and Workload Identity enabled.
+- **Helm v3** installed locally.
+- **kubectl** configured to target your AKS cluster.
 
 ---
 
-## 2. Prerequisites & Azure Infrastructure Setup
+## 2. Infrastructure Setup (Azure Cloud)
 
-Ensure your AKS cluster has **OIDC Issuer** and **Workload Identity** enabled:
+### 2.1 Enable OIDC Issuer & Workload Identity on AKS
+If your AKS cluster was created without Workload Identity, enable it:
 
 ```bash
 az aks update \
@@ -48,12 +28,14 @@ az aks update \
   --enable-workload-identity
 ```
 
-### 2.1 Retrieve the Cluster OIDC Issuer URL
+Retrieve the cluster OIDC Issuer URL:
 ```bash
 AKS_OIDC_ISSUER="$(az aks show -n <AKS_CLUSTER_NAME> -g <RESOURCE_GROUP> --query "oidcIssuerProfile.issuerUrl" -o tsv)"
 ```
 
 ### 2.2 Create User-Assigned Managed Identity
+Create a dedicated identity for the DSO operator:
+
 ```bash
 az identity create \
   --name dso-identity \
@@ -62,25 +44,31 @@ az identity create \
 IDENTITY_CLIENT_ID="$(az identity show -n dso-identity -g <RESOURCE_GROUP> --query "clientId" -o tsv)"
 ```
 
-### 2.3 Assign Azure RBAC Roles
-The DSO identity requires two granular permissions:
-1. **Key Vault Secrets User** (on Key Vault) to fetch secret payloads:
+### 2.3 Assign Azure RBAC Permissions
+DSO requires two specific roles to operate under least privilege:
+
+1. **Key Vault Secrets User** (Scoped to target Key Vault):
    ```bash
+   VAULT_SCOPE="/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.KeyVault/vaults/<VAULT_NAME>"
+
    az role assignment create \
      --role "Key Vault Secrets User" \
      --assignee "$IDENTITY_CLIENT_ID" \
-     --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.KeyVault/vaults/<VAULT_NAME>"
+     --scope "$VAULT_SCOPE"
    ```
-2. **Azure Service Bus Data Receiver** (on Service Bus) to read and acknowledge rotation events:
+
+2. **Azure Service Bus Data Receiver** (Scoped to target Service Bus Namespace):
    ```bash
+   SB_SCOPE="/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.ServiceBus/namespaces/<SERVICEBUS_NAMESPACE>"
+
    az role assignment create \
      --role "Azure Service Bus Data Receiver" \
      --assignee "$IDENTITY_CLIENT_ID" \
-     --scope "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RESOURCE_GROUP>/providers/Microsoft.ServiceBus/namespaces/<SERVICEBUS_NAMESPACE>"
+     --scope "$SB_SCOPE"
    ```
 
 ### 2.4 Establish Workload Identity Federation
-Federate the Managed Identity with DSO's Kubernetes ServiceAccount (`dso-dynamic-secret-operator` in `dso-system` namespace):
+Federate the Managed Identity with the operator's Kubernetes ServiceAccount (`dso-dynamic-secret-operator` in namespace `dso-system`):
 
 ```bash
 az identity federated-credential create \
@@ -93,7 +81,7 @@ az identity federated-credential create \
 ```
 
 ### 2.5 Configure Event Grid Subscription
-Subscribe the Service Bus queue to Key Vault's secret creation events:
+Subscribe your Azure Service Bus queue to Key Vault's secret creation lifecycle events:
 
 ```bash
 KEYVAULT_ID="$(az keyvault show --name <VAULT_NAME> -g <RESOURCE_GROUP> --query id -o tsv)"
@@ -111,7 +99,7 @@ az eventgrid event-subscription create \
 
 ## 3. Helm Installation
 
-Install DSO configured with Azure Workload Identity and Service Bus parameters:
+Deploy the DSO Helm chart configured for Azure Event-Driven Mode:
 
 ### PowerShell (Windows)
 ```powershell
@@ -145,12 +133,12 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
 
 ---
 
-## 4. Configuring a DynamicSecretPolicy
+## 4. Declaring a DynamicSecretPolicy
 
-To bind an Azure Key Vault secret to a workload, declare a `DynamicSecretPolicy` with `source.type: AzureKeyVault`. Below are real-world policy patterns demonstrating various probe types:
+To bind an Azure Key Vault secret to a workload, declare a `DynamicSecretPolicy` with `source.type: AzureKeyVault`:
 
-### Pattern A: Relational Database with PostgreSQL / MySQL Probe
-*Direct database validation running a live SQL query (`SELECT 1`) with automatic credential sanitization in logs:*
+### Pattern A: Relational Database (PostgreSQL / MySQL Probe)
+Performs live connection tests (`SELECT 1`) against the candidate secret before updating the production workload:
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -171,7 +159,7 @@ spec:
   targetRef:
     volumeName: "db-secret-volume"
   validationProbes:
-    - type: "PostgreSQL" # Also supports "MySQL"
+    - type: "PostgreSQL"
       endpoint: "postgres.production.svc.cluster.local:5432"
       queryTimeout: 5
   rollbackConfig:
@@ -179,8 +167,8 @@ spec:
     circuitBreakerThreshold: 3
 ```
 
-### Pattern B: Ingress Gateway with TLS Certificate & Handshake Probe
-*Automatically intercepts Key Vault Certificates, splits them into `tls.crt` and `tls.key`, and tests live TLS handshakes and thumbprint matching:*
+### Pattern B: Ingress TLS Certificate & Handshake Probe
+Automatically intercepts Key Vault Certificates, splits them into `tls.crt` and `tls.key`, and tests live TLS handshakes:
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -194,14 +182,15 @@ spec:
     azureKeyVault:
       keyVaultURI: "https://my-prod-vault.vault.azure.net"
       objectName: "wildcard-prod-cert"
-      objectType: "Certificate" # Auto-partitioned into kubernetes.io/tls
+      objectType: "Certificate"
   workloadSelector:
     kind: "Deployment"
     name: "ingress-nginx-controller"
+  targetRef:
+    volumeName: "tls-cert-volume"
   validationProbes:
     - type: "TLS"
       endpoint: "edge-gateway.production.svc.cluster.local:8443"
-      thumbprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       queryTimeout: 10
   rollbackConfig:
     autoRollback: true
@@ -209,7 +198,7 @@ spec:
 ```
 
 ### Pattern C: Microservice with HTTP Health Probe
-*Executes synthetic HTTP status checks against the isolated canary pod:*
+Issues HTTP status checks against the isolated canary pod:
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -222,26 +211,24 @@ spec:
     type: "AzureKeyVault"
     azureKeyVault:
       keyVaultURI: "https://my-prod-vault.vault.azure.net"
-      objectName: "auth-api-jwt-secret"
+      objectName: "auth-jwt-secret"
       objectType: "Secret"
   workloadSelector:
     kind: "Deployment"
     name: "auth-service"
   targetRef:
-    volumeName: "jwt-keys-volume"
+    volumeName: "jwt-volume"
   validationProbes:
     - type: "HTTP"
       endpoint: "http://auth-service.production.svc.cluster.local:8080/healthz"
-      path: "/healthz"
-      expectedStatus: 200
       queryTimeout: 5
   rollbackConfig:
     autoRollback: true
     circuitBreakerThreshold: 3
 ```
 
-### Pattern D: "Bring Your Own Container" Ephemeral Batch Job Probe (Redis Cache)
-*Executes an isolated Kubernetes Job to validate custom protocols (e.g. `redis-cli PING` against Azure Cache for Redis), automatically injecting candidate credentials via `$(DSO_REVISION_SECRET_NAME)`:*
+### Pattern D: "Bring Your Own Container" Job Probe (Azure Cache for Redis)
+Executes a Kubernetes Job with custom protocol validators (e.g. `redis-cli PING`), injecting candidate credentials via `$(DSO_REVISION_SECRET_NAME)`:
 
 ```yaml
 apiVersion: dso.quantumsys.dev/v1alpha1
@@ -273,7 +260,7 @@ spec:
                     command: ["/bin/sh", "-c"]
                     args:
                       - |
-                        REDIS_PASS=$(cat /secrets/auth/password)
+                        REDIS_PASS=$(cat /secrets/auth/azure-redis-primary-key)
                         redis-cli -h my-redis.redis.cache.windows.net -p 6380 --tls -a "$REDIS_PASS" PING | grep PONG
                     volumeMounts:
                       - name: test-secret
@@ -291,22 +278,37 @@ spec:
 
 ## 5. End-to-End Verification
 
-1. **Check Operator Logs:**
+1. **Verify Operator Log Readiness:**
    ```bash
-   kubectl logs -n dso-system -l app.kubernetes.io/name=dynamic-secret-operator -f
+   kubectl logs -n dso-system deploy/dynamic-secret-operator -f
    ```
-   Ensure you see the message: `Listening for Azure Service Bus rotation events on queue <QUEUE_NAME>`.
+   Ensure you see the message indicating active queue listening:
+   `Listening for Azure Service Bus rotation events on queue <QUEUE_NAME>`.
 
-2. **Trigger a Rotation in Key Vault:**
+2. **Trigger a Secret Rotation in Key Vault:**
    ```bash
    az keyvault secret set \
      --vault-name <VAULT_NAME> \
      --name "payment-db-password" \
-     --value "super-secure-rotated-password-v2"
+     --value "my-new-secure-password-v2"
    ```
 
-3. **Observe Automated Canary & Promotion:**
+3. **Monitor the Reconciliation & Canary Rollout:**
    ```bash
    kubectl get dynamicsecretpolicies -n production -w
    ```
-   Within seconds, DSO receives the event from Service Bus, spins up an isomorphic canary pod, validates the database connection with the new password, and rolls over the production deployment with zero downtime.
+   You will observe the policy transition through:
+   `RevisionPrepared` $\to$ `CanaryProvisioning` $\to$ `Validating` $\to$ `Promoting` $\to$ `PromotionCompleted`.
+
+4. **Verify Workload State:**
+   Inspect the workload to confirm it has rolled over cleanly to the new secret revision:
+   ```bash
+   kubectl get pods -n production -l app=payment-service
+   ```
+
+---
+
+## 🔗 Next Steps & Troubleshooting
+
+- See the **[Azure Troubleshooting Guide](troubleshooting.md)** for resolving common authentication, RBAC, and Service Bus queue issues.
+- Browse ready-to-deploy examples in the **[Azure Examples Directory](../../../examples/azure/)**.

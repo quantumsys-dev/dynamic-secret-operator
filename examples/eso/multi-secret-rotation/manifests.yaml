@@ -3,23 +3,7 @@ kind: Namespace
 metadata:
   name: dso-examples
 ---
-apiVersion: external-secrets.io/v1beta1
-kind: SecretStore
-metadata:
-  name: eso-multi-store
-  namespace: dso-examples
-spec:
-  provider:
-    vault:
-      server: "http://vault.vault.svc.cluster.local:8200"
-      path: "secret"
-      version: "v2"
-      auth:
-        kubernetes:
-          mountPath: "kubernetes"
-          role: "eso-role"
----
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: db-password-eso
@@ -27,8 +11,8 @@ metadata:
 spec:
   refreshInterval: 15s
   secretStoreRef:
-    name: eso-multi-store
-    kind: SecretStore
+    name: ${SECRET_STORE_NAME}
+    kind: ${SECRET_STORE_KIND}
   target:
     name: db-password-synced
     creationPolicy: Owner
@@ -41,10 +25,9 @@ spec:
   data:
     - secretKey: db-password
       remoteRef:
-        key: secret/db
-        property: password
+        key: ${REMOTE_DB_SECRET_NAME}
 ---
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: redis-auth-token-eso
@@ -52,8 +35,8 @@ metadata:
 spec:
   refreshInterval: 15s
   secretStoreRef:
-    name: eso-multi-store
-    kind: SecretStore
+    name: ${SECRET_STORE_NAME}
+    kind: ${SECRET_STORE_KIND}
   target:
     name: redis-auth-token-synced
     creationPolicy: Owner
@@ -66,10 +49,9 @@ spec:
   data:
     - secretKey: redis-auth-token
       remoteRef:
-        key: secret/redis
-        property: token
+        key: ${REMOTE_REDIS_SECRET_NAME}
 ---
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: payment-api-key-eso
@@ -77,8 +59,8 @@ metadata:
 spec:
   refreshInterval: 15s
   secretStoreRef:
-    name: eso-multi-store
-    kind: SecretStore
+    name: ${SECRET_STORE_NAME}
+    kind: ${SECRET_STORE_KIND}
   target:
     name: payment-api-key-synced
     creationPolicy: Owner
@@ -91,8 +73,7 @@ spec:
   data:
     - secretKey: payment-api-key
       remoteRef:
-        key: secret/payment
-        property: apikey
+        key: ${REMOTE_PAYMENT_SECRET_NAME}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -305,7 +286,6 @@ data:
     import (
     	"context"
     	"database/sql"
-    	"encoding/json"
     	"fmt"
     	"html/template"
     	"log"

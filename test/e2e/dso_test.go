@@ -23,6 +23,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -407,6 +408,240 @@ func TestFailurePath_RollbackAndCircuitBreaker(t *testing.T) {
 						t.Fatalf("Lingering canary network policy found: %s", np.Name)
 					}
 				}
+			}
+
+			return ctx
+		}).
+		Teardown(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			r, err := resources.New(cfg.Client().RESTConfig())
+			if err == nil {
+				ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNs}}
+				_ = r.Delete(ctx, ns)
+			}
+			return ctx
+		}).
+		Feature()
+
+	testenv.Test(t, feat)
+}
+
+func TestJobProbe_ValidationAndPromotion(t *testing.T) {
+	testNs := "dso-job-probe"
+	targetDeployName := "redis-consumer"
+	policyName := "redis-job-probe-policy"
+
+	feat := features.New("Job-Based Validation Probe and Workload Promotion").
+		Setup(func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			r, err := resources.New(cfg.Client().RESTConfig())
+			if err != nil {
+				t.Fatalf("failed to create client: %v", err)
+			}
+			_ = secretv1alpha1.AddToScheme(r.GetScheme())
+			_ = batchv1.AddToScheme(r.GetScheme())
+
+			// 1. Create Namespace
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNs}}
+			if err := r.Create(ctx, ns); err != nil {
+				t.Fatalf("failed creating namespace %s: %v", testNs, err)
+			}
+
+			// 2. Create Initial Secret for target workload
+			initialSec := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "redis-auth-secret",
+					Namespace: testNs,
+				},
+				Data: map[string][]byte{
+					"redis-password": []byte("initial-redis-pass-1234"),
+				},
+			}
+			if err := r.Create(ctx, initialSec); err != nil {
+				t.Fatalf("failed creating initial secret: %v", err)
+			}
+
+			// 3. Create Target Workload Deployment
+			replicas := int32(1)
+			targetDeploy := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      targetDeployName,
+					Namespace: testNs,
+					Labels: map[string]string{
+						"app": targetDeployName,
+					},
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: &replicas,
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": targetDeployName},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"app": targetDeployName},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "consumer",
+									Image: "nginx:alpine",
+									Env: []corev1.EnvVar{
+										{
+											Name: "REDIS_PASSWORD",
+											ValueFrom: &corev1.EnvVarSource{
+												SecretKeyRef: &corev1.SecretKeySelector{
+													LocalObjectReference: corev1.LocalObjectReference{
+														Name: "redis-auth-secret",
+													},
+													Key: "redis-password",
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			if err := r.Create(ctx, targetDeploy); err != nil {
+				t.Fatalf("failed creating target deployment: %v", err)
+			}
+
+			// Wait for target deployment to become available
+			if err := wait.For(conditions.New(r).DeploymentConditionMatch(targetDeploy, appsv1.DeploymentAvailable, corev1.ConditionTrue), wait.WithTimeout(time.Minute*2)); err != nil {
+				t.Logf("warning: deployment availability check timed out: %v", err)
+			}
+
+			// 4. Apply DynamicSecretPolicy with Job validation probe
+			jobTimeout := int32(60)
+			policy := &secretv1alpha1.DynamicSecretPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      policyName,
+					Namespace: testNs,
+				},
+				Spec: secretv1alpha1.DynamicSecretPolicySpec{
+					VaultRef: secretv1alpha1.VaultReference{
+						KeyVaultURI: "https://synthetic-vault.vault.azure.net",
+						ObjectName:  "redis-password",
+						ObjectType:  secretv1alpha1.VaultObjectTypeSecret,
+					},
+					WorkloadSelector: secretv1alpha1.WorkloadSelector{
+						Kind: "Deployment",
+						Name: targetDeployName,
+					},
+					ValidationProbes: []secretv1alpha1.ValidationProbe{
+						{
+							Type: secretv1alpha1.ProbeTypeJob,
+							Job: &secretv1alpha1.JobProbeSpec{
+								TimeoutSeconds: &jobTimeout,
+								JobTemplate: batchv1.JobTemplateSpec{
+									Spec: batchv1.JobSpec{
+										Template: corev1.PodTemplateSpec{
+											Spec: corev1.PodSpec{
+												RestartPolicy: corev1.RestartPolicyNever,
+												Containers: []corev1.Container{
+													{
+														Name:  "probe-validator",
+														Image: "busybox:latest",
+														Command: []string{
+															"sh", "-c",
+															"echo Validating secret injection: DSO_REVISION_SECRET_NAME=$DSO_REVISION_SECRET_NAME && test -n \"$DSO_REVISION_SECRET_NAME\"",
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					RollbackConfig: &secretv1alpha1.RollbackConfig{
+						AutoRollback:            true,
+						CircuitBreakerThreshold: 3,
+					},
+				},
+			}
+			if err := r.Create(ctx, policy); err != nil {
+				t.Fatalf("failed creating DynamicSecretPolicy: %v", err)
+			}
+
+			return ctx
+		}).
+		Assess("Verify Ephemeral Job Execution, Environment Injection, Promotion, and Cleanup", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			r, err := resources.New(cfg.Client().RESTConfig())
+			if err != nil {
+				t.Fatalf("failed to create client: %v", err)
+			}
+			_ = secretv1alpha1.AddToScheme(r.GetScheme())
+			_ = batchv1.AddToScheme(r.GetScheme())
+
+			// Assertion 1: Wait for SecretRevision creation with label
+			t.Log("Assertion 1: Waiting for immutable SecretRevision materialization...")
+			err = wait.For(func(ctx context.Context) (bool, error) {
+				secretList := &corev1.SecretList{}
+				if err := r.List(ctx, secretList, resources.WithFieldSelector(fmt.Sprintf("metadata.namespace=%s", testNs))); err != nil {
+					return false, err
+				}
+				for _, s := range secretList.Items {
+					if rev, ok := s.Labels[labelRevision]; ok && rev != "" {
+						t.Logf("Materialized secret %s found with revision %s", s.Name, rev)
+						return true, nil
+					}
+				}
+				return false, nil
+			}, wait.WithTimeout(time.Second*30), wait.WithInterval(time.Second*1))
+			if err != nil {
+				t.Fatalf("SecretRevision was not materialized: %v", err)
+			}
+
+			// Assertion 2: Wait for Target Deployment PodTemplate revision annotation update
+			t.Log("Assertion 2: Waiting for target deployment promotion and rollover after Job probe pass...")
+			err = wait.For(func(ctx context.Context) (bool, error) {
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: targetDeployName, Namespace: testNs}}
+				if err := r.Get(ctx, targetDeployName, testNs, deploy); err != nil {
+					return false, err
+				}
+				if deploy.Spec.Template.Annotations != nil && deploy.Spec.Template.Annotations[labelRevision] != "" {
+					t.Logf("Target deployment rolled over with revision %s", deploy.Spec.Template.Annotations[labelRevision])
+					return true, nil
+				}
+				return false, nil
+			}, wait.WithTimeout(time.Second*60), wait.WithInterval(time.Second*2))
+			if err != nil {
+				t.Fatalf("Target deployment was not promoted after Job probe: %v", err)
+			}
+
+			// Assertion 3: Verify DynamicSecretPolicy Status reflects CurrentRevision
+			t.Log("Assertion 3: Verifying policy status reflects completed revision...")
+			err = wait.For(func(ctx context.Context) (bool, error) {
+				pol := &secretv1alpha1.DynamicSecretPolicy{}
+				if err := r.Get(ctx, policyName, testNs, pol); err != nil {
+					return false, err
+				}
+				return pol.Status.CurrentRevision != "", nil
+			}, wait.WithTimeout(time.Second*30), wait.WithInterval(time.Second*1))
+			if err != nil {
+				t.Fatalf("DynamicSecretPolicy status.currentRevision is empty: %v", err)
+			}
+
+			// Assertion 4: Verify ephemeral probe Job has been automatically cleaned up
+			t.Log("Assertion 4: Verifying ephemeral Job cleanup...")
+			err = wait.For(func(ctx context.Context) (bool, error) {
+				jobList := &batchv1.JobList{}
+				if err := r.List(ctx, jobList, resources.WithFieldSelector(fmt.Sprintf("metadata.namespace=%s", testNs))); err != nil {
+					return false, err
+				}
+				for _, j := range jobList.Items {
+					if j.Labels != nil && j.Labels["dso.quantumsys.dev/probe"] == "job" {
+						if j.GetDeletionTimestamp() == nil {
+							return false, nil // Lingering active job found (not yet marked for deletion)
+						}
+					}
+				}
+				return true, nil
+			}, wait.WithTimeout(time.Second*45), wait.WithInterval(time.Second*2))
+			if err != nil {
+				t.Fatalf("Ephemeral probe Job was not cleaned up after completion: %v", err)
 			}
 
 			return ctx

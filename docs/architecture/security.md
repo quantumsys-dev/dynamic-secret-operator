@@ -10,28 +10,32 @@ The Dynamic Secret Operator is designed from the ground up under the principle o
 
 ```mermaid
 flowchart TD
-    subgraph AzureCloud ["☁️ Azure Cloud"]
-        AKV["Azure Key Vault"]
-        ASB["Azure Service Bus (Peek-Lock)"]
-        MI["User-Assigned Managed Identity"]
+    subgraph CloudSources ["☁️ External Secret Sources & Brokers"]
+        VAULT["Multi-Cloud Vaults<br/>(Azure Key Vault / AWS Secrets Manager / GCP Secret Manager / Vault)"]
+        QUEUES["Cloud Message Queues<br/>(Azure Service Bus / AWS SQS / GCP Pub/Sub)"]
     end
 
     subgraph KubernetesCluster ["☸️ Kubernetes Cluster"]
+        subgraph IngestionLayer ["Ingestion Options"]
+            ESO["CNCF External Secrets Operator<br/>(Zero Cloud IAM / Decoupled)"]
+        end
+
         subgraph DSOSystem ["dso-system Namespace"]
-            DSO["⚙️ Dynamic Secret Operator<br/>(Chainguard Distroless / Non-Root)"]
+            DSO["⚙️ Dynamic Secret Operator<br/>(Chainguard Distroless / Non-Root 65532:65532)"]
         end
 
         subgraph ManagedWorkloads ["Target Workload Namespace"]
             SEC["🔒 Immutable SecretRevision<br/>(dso.quantumsys.dev/managed: 'true')"]
             CANARY["🐤 Ephemeral Canary Workload"]
-            NETPOL["🛡️ Strict NetworkPolicy"]
+            NETPOL["🛡️ Strict NetworkPolicy & Cilium eBPF Sandbox"]
             PROD["🚀 Production Workload"]
         end
     end
 
-    MI -.->|"OIDC Federated Token"| DSO
-    AKV -->|"Secret Payload (mTLS)"| DSO
-    ASB -->|"Rotation Event"| DSO
+    VAULT -->|"Direct Fetch via Workload Identity"| DSO
+    VAULT -->|"Synchronize"| ESO
+    ESO -->|"K8s Secret (Watch Informer)"| DSO
+    QUEUES -->|"Event Push (Peek-Lock)"| DSO
     DSO -->|"Materialize Revision"| SEC
     DSO -->|"Deploy & Validate"| CANARY
     CANARY --- NETPOL
@@ -54,7 +58,7 @@ Rather than relying on un-guaranteed in-memory zeroing, DSO implements concrete 
 | Security Control | Implementation & Enforcement |
 | :--- | :--- |
 | **Strict Process Isolation** | The operator runs in dedicated namespaces (`dso-system`) isolated from tenant workloads. |
-| **Non-Root Execution** | Container runs strictly as unprivileged user (`runAsNonRoot: true`, `runAsUser: 65534 / nobody`, `fsGroup: 65534`). |
+| **Non-Root Execution** | Container runs strictly as unprivileged user (`runAsNonRoot: true`, `runAsUser: 65532`, `runAsGroup: 65532`, `fsGroup: 65532`). |
 | **Read-Only Root Filesystem** | `readOnlyRootFilesystem: true` prevents an attacker from writing executables or dumping memory artifacts to disk. |
 | **Privilege Escalation Prevention** | `allowPrivilegeEscalation: false` and `capabilities.drop: ["ALL"]` prevent Linux capability exploits. |
 | **Seccomp Sandboxing** | `seccompProfile.type: RuntimeDefault` restricts system calls available to the container runtime. |
@@ -87,7 +91,7 @@ Cache: cache.Options{
    - `dso.quantumsys.dev/policy: <policy-name>`
    - `dso.quantumsys.dev/revision: <hash>`
    - `dso.quantumsys.dev/target-workload: <workload-name>`
-2. **Cache Restriction:** The operator's informer only requests and watches secrets bearing `dso.quantumsys.dev/managed: "true"` (secrets DSO owns) or `dso.quantumsys.dev/managed: "watch"` (externally owned source secrets DSO only observes, e.g. an ESO sync target - see [ADR-003](architecture/003-decoupling-secret-ingestion-eso.md)).
+2. **Cache Restriction:** The operator's informer only requests and watches secrets bearing `dso.quantumsys.dev/managed: "true"` (secrets DSO owns) or `dso.quantumsys.dev/managed: "watch"` (externally owned source secrets DSO only observes, e.g. an ESO sync target - see [ADR-003](../adr/003-decoupling-secret-ingestion-eso.md)).
 3. **Protection of Third-Party Secrets:** The operator never receives or caches `ServiceAccount` tokens, cluster TLS certificates, Helm release secrets, or unrelated tenant data.
 
 ### RBAC Is a Separate Boundary From the Cache
@@ -99,11 +103,15 @@ There is no way to close this gap with RBAC alone while still supporting cluster
 
 ## 4. Authentication & Identity Architecture
 
-### Passwordless Azure Workload Identity
-DSO completely eliminates static credentials:
-- **Projected ServiceAccount Tokens:** Kubernetes projects short-lived OIDC tokens (`/var/run/secrets/azure/tokens/azure-identity-token`).
-- **Federated Credential Exchange:** The Azure SDK exchanges the token with Microsoft Entra ID (Azure AD) for short-lived Key Vault access tokens.
-- **No Long-Lived Secrets:** No Azure client secrets, certificates, or static service principal credentials are stored in git, Helm values, or cluster storage.
+### 1. Passwordless Federated Cloud Identity (Event-Driven Mode)
+DSO completely eliminates static credentials when communicating with cloud backends:
+- **Microsoft Azure:** Uses **Azure Workload Identity**. Kubernetes projects short-lived OIDC tokens (`/var/run/secrets/azure/tokens/azure-identity-token`). The Azure SDK exchanges the token with Microsoft Entra ID (Azure AD) for short-lived Key Vault and Service Bus access tokens.
+- **Amazon Web Services (AWS):** Uses **AWS IAM Roles for Service Accounts (IRSA)** or **EKS Pod Identity**. Exchanges projected OIDC tokens with AWS STS for temporary IAM role credentials (`secretsmanager:GetSecretValue`, `sqs:ReceiveMessage/DeleteMessage`).
+- **Google Cloud Platform (GCP):** Uses **GCP Workload Identity Federation**. Short-lived Kubernetes service account tokens are exchanged via GCP STS for Google OAuth2 access tokens to access Cloud Secret Manager and Cloud Pub/Sub.
+- **Zero Static Secrets:** No cloud client secrets, API keys, certificates, or static service principal credentials are ever stored in Git, Helm values, or cluster storage.
+
+### 2. Decoupled Least-Privilege Ingestion (ESO Mode)
+In ESO Mode, DSO requires **no cloud IAM credentials at all**. Authentication to external secret vaults is handled by the CNCF External Secrets Operator. DSO operates solely on native Kubernetes RBAC, achieving complete isolation from external cloud control planes.
 
 ---
 
@@ -111,26 +119,48 @@ DSO completely eliminates static credentials:
 
 When a secret rotation occurs:
 1. **Immutable Secret Revision:** DSO materializes a unique secret `<workload>-<secret>-rev-<hash>`, leaving active production secrets untouched.
-2. **Ephemeral Canary Deployment:** DSO launches a 1-replica isolated canary workload.
-3. **Zero-Trust NetworkPolicy:** An ephemeral `NetworkPolicy` is applied to isolate the canary pod from internal cluster traffic while allowing only the required synthetic validation probe egress.
-4. **Validation Probes:** Synthetic probes (PostgreSQL, MySQL, HTTP, TLS, or Job-based) validate authentication before any production modification.
-5. **Automatic Teardown:** Upon success or failure, the canary deployment and network policy are deleted immediately.
+2. **Ephemeral Canary Deployment:** DSO launches an isolated 1-replica canary workload derived from the production pod specification.
+3. **Zero-Trust Network Isolation:**
+   - **Standard Kubernetes NetworkPolicy:** An ephemeral `NetworkPolicy` blocks all Ingress traffic (default-deny) and restricts Egress strictly to:
+     - In-cluster CoreDNS (`k8s-app in (kube-dns, coredns)`) on UDP/TCP port 53 across namespaces (preventing DNS tunneling exfiltration).
+     - Explicit target endpoint IP/CIDR and destination ports required by configured validation probes.
+   - **Cilium eBPF Sandbox (Optional):** When `spec.networkPolicy.provider: "Cilium"` is configured, DSO provisions a `CiliumNetworkPolicy` leveraging eBPF L3/L4/L7 filtering, FQDN egress rules, and Cilium Hubble network flow visibility.
+4. **Synthetic Validation Probes:** Synthetic probes (PostgreSQL, MySQL, HTTP, TLS, or Job-based) validate the candidate credentials before any production workload modification.
+5. **Automatic Sandbox Teardown:** Upon success or failure, the canary deployment and ephemeral network policies are deleted immediately.
 
 ---
 
 ## 6. Error Sanitization & Anti-Leakage Controls
 
-Database drivers and HTTP clients frequently embed credentials in raw connection errors (e.g., `postgres://user:password@host/db`).
+Database drivers and HTTP clients frequently embed credentials in raw connection errors (e.g., `postgres://user:password@host/db` or `password=secret`).
 
-DSO uses automated regex sanitization across all probe runners:
-- Strips passwords, connection strings, Basic Auth headers, and Bearer tokens before errors are passed to OpenTelemetry spans, Kubernetes Events, or CRD Conditions.
-- For Job-based probes, stdout/stderr is captured with length limits and sanitized before status surface.
+DSO implements multi-layered sanitization (`internal/probes/sanitize.go`):
+- **Exact Token Redaction:** Automatically redacts all explicitly supplied passwords, tokens, and sensitive strings.
+- **URL-Escaped Token Redaction:** Accounts for `url.QueryEscape` conversions performed by DSN builders, preventing drivers from echoing escaped passwords.
+- **Pattern-Based Regex Redaction:** Aggressively redacts DSN parameters (`password=[REDACTED]`) and URI credentials (`://user:[REDACTED]@host`).
+- **Continuous Fuzz Testing:** The sanitization engine is continuously validated by automated fuzz testing (`FuzzSanitizeDBError` in `internal/probes/sanitize_test.go`) to mathematically guarantee that credentials never leak into OpenTelemetry spans, Kubernetes Events, or CRD Conditions.
+- **Job Probes:** Ephemeral Job stdout/stderr output is captured with strict buffer limits and sanitized before surfacing in policy status.
 
 ---
 
 ## 7. Supply Chain & Container Hardening
 
 - **Base Image:** Built on zero-CVE **Chainguard Static Distroless** (`cgr.dev/chainguard/static:latest`).
+- **Unprivileged Runtime:** Runs as `USER 65532:65532` with no package managers, shells, or core utilities present in the final image.
 - **Cryptographic Signing:** Images are signed keylessly with **Cosign** using GitHub Actions OIDC identity.
 - **SBOM Generation:** Software Bill of Materials (SPDX JSON format) is attached and published with every release.
 - **Security Scanning:** Continuous vulnerability scanning in CI with **Trivy** and **Govulncheck**.
+
+---
+
+## 🔗 Related Resources
+
+- [Operator Configuration Reference](configuration.md)
+- [Operating Modes: ESO vs. Event-Driven](operating-modes.md)
+- [GitOps Integration: Managing Argo CD Drift](gitops-argo-cd.md)
+- [Architecture Decision Records (ADRs)](../adr/)
+  - [ADR-001: Azure Service Bus Peek-Lock vs Webhooks](../adr/001-asb-peek-lock-vs-webhooks.md)
+  - [ADR-002: Immutable Revisions vs Mutable In-Place](../adr/002-immutable-revisions-vs-mutable.md)
+  - [ADR-003: Decoupling Secret Ingestion & ESO Standard](../adr/003-decoupling-secret-ingestion-eso.md)
+- [Vulnerability Reporting & Security Policy](../../SECURITY.md)
+

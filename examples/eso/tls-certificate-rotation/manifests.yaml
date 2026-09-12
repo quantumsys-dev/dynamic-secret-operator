@@ -1,26 +1,35 @@
-apiVersion: external-secrets.io/v1beta1
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eso-azure-sa
+  namespace: dso-examples
+  annotations:
+    azure.workload.identity/client-id: "${AZURE_CLIENT_ID}"
+    azure.workload.identity/tenant-id: "${AZURE_TENANT_ID}"
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: external-secrets.io/v1
 kind: SecretStore
 metadata:
   name: eso-tls-store
   namespace: dso-examples
 spec:
   provider:
-    vault:
-      server: "http://vault.vault.svc.cluster.local:8200"
-      path: "secret"
-      version: "v2"
-      auth:
-        kubernetes:
-          mountPath: "kubernetes"
-          role: "eso-role"
+    azurekv:
+      authType: WorkloadIdentity
+      vaultUrl: "https://${KEYVAULT_NAME}.vault.azure.net"
+      tenantId: "${AZURE_TENANT_ID}"
+      serviceAccountRef:
+        name: eso-azure-sa
 ---
-apiVersion: external-secrets.io/v1beta1
+apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
   name: ingress-tls-cert-eso
   namespace: dso-examples
 spec:
-  refreshInterval: 15s
+  refreshInterval: 10s
   secretStoreRef:
     name: eso-tls-store
     kind: SecretStore
@@ -30,19 +39,16 @@ spec:
       type: kubernetes.io/tls
       metadata:
         labels:
-          # Required for DSO to detect changes synced to this secret by ESO; see
-          # docs/architecture/003-decoupling-secret-ingestion-eso.md
+          # Required for DSO to detect changes synced to this secret by ESO
           dso.quantumsys.dev/managed: "watch"
+      data:
+        tls.crt: "{{ .cert | filterPEM \"CERTIFICATE\" }}"
+        tls.key: "{{ .cert | filterPEM \"PRIVATE KEY\" }}"
     creationPolicy: Owner
   data:
-    - secretKey: tls.crt
+    - secretKey: cert
       remoteRef:
-        key: secret/certs/ingress
-        property: cert
-    - secretKey: tls.key
-      remoteRef:
-        key: secret/certs/ingress
-        property: key
+        key: ingress-tls-cert
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -55,7 +61,7 @@ data:
     http {
       server {
         listen 8443 ssl;
-        server_name localhost;
+        server_name ${DOMAIN} localhost;
 
         ssl_certificate     /etc/ssl/certs/tls.crt;
         ssl_certificate_key /etc/ssl/certs/tls.key;
@@ -65,7 +71,7 @@ data:
 
         location / {
           default_type application/json;
-          return 200 '{"status":"ok","tls":"active","message":"Secure TLS gateway running with ESO + DSO managed certificate"}\n';
+          return 200 '{"status":"ok","tls":"active","domain":"${DOMAIN}","mode":"eso","message":"Secure TLS gateway running with ESO + DSO managed certificate"}\n';
         }
 
         location /health {
@@ -156,7 +162,7 @@ spec:
     volumeName: "tls-cert-volume"
   validationProbes:
     - type: "TLS"
-      endpoint: "127.0.0.1:8443"
+      endpoint: "tls-gateway.dso-examples.svc.cluster.local:8443"
       queryTimeout: 10
   rollbackConfig:
     autoRollback: true
