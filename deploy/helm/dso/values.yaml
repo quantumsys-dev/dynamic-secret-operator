@@ -39,7 +39,7 @@ mode: "event-driven"
 
 # Secret provider backend (required only when mode: "event-driven"):
 # - "azure": Microsoft Azure Key Vault & Azure Service Bus (Production Ready)
-# - "aws": AWS Secrets Manager & Amazon SQS (In Development - Roadmap v0.3)
+# - "aws": AWS Secrets Manager & Amazon SQS (Production Ready)
 # - "gcp": Google Cloud Secret Manager & Cloud Pub/Sub (In Development - Roadmap v0.3)
 # Note: In "eso" mode, provider is not used (simply configure mode: "eso").
 provider: "azure"
@@ -60,9 +60,9 @@ azure:
     # Name of the queue receiving Key Vault EventGrid events
     queueName: ""
 
-# AWS configuration (In Development - Roadmap v0.3; used when mode: "event-driven" and provider: "aws")
+# AWS configuration (used when mode: "event-driven" and provider: "aws")
 aws:
-  enabled: false
+  enabled: true
   # AWS IAM Role ARN for Service Accounts (IRSA) or EKS Pod Identity
   roleArn: ""
   # SQS queue URL receiving rotation notifications

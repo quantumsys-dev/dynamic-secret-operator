@@ -103,6 +103,11 @@ type AWSSecretsManagerSource struct {
 	// Region is the AWS region (e.g. us-east-1).
 	// +kubebuilder:validation:Optional
 	Region string `json:"region,omitempty"`
+
+	// RoleARN is an IAM Role ARN to assume (STS AssumeRole) for fetching secrets across different AWS accounts.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^arn:aws:iam::\d{12}:role/.*$`
+	RoleARN string `json:"roleARN,omitempty"`
 }
 
 // GCPSecretManagerSource reserved stub for native GCP Secret Manager + Pub/Sub provider.

@@ -224,10 +224,10 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 				defer completeCancel()
 
 				if err := receiver.CompleteMessage(completeCtx, msg, nil); err != nil {
-					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
+					telemetry.QueueMessagesTotal.WithLabelValues("nack").Inc()
 					return err
 				}
-				telemetry.ServiceBusMessagesTotal.WithLabelValues("ack").Inc()
+				telemetry.QueueMessagesTotal.WithLabelValues("ack").Inc()
 				return nil
 			})
 
@@ -235,7 +235,7 @@ func (l *ServiceBusListener) Start(ctx context.Context) error {
 			if l.handler != nil {
 				if err := l.handler(msgCtx, msg.Body, ackFunc); err != nil {
 					log.Error(err, "handler failed to process message, abandoning lock", "messageID", msg.MessageID)
-					telemetry.ServiceBusMessagesTotal.WithLabelValues("nack").Inc()
+					telemetry.QueueMessagesTotal.WithLabelValues("nack").Inc()
 					span.RecordError(err)
 
 					// Release the peek-lock immediately so the message becomes available for

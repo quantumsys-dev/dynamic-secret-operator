@@ -59,11 +59,11 @@ var (
 		[]string{"namespace", "probe_type"},
 	)
 
-	// ServiceBusMessagesTotal tracks total Azure Service Bus messages processed, partitioned by status.
-	ServiceBusMessagesTotal = prometheus.NewCounterVec(
+	// QueueMessagesTotal tracks total message queue events processed, partitioned by status.
+	QueueMessagesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "dso_servicebus_messages_total",
-			Help: "Total number of Azure Service Bus messages processed, partitioned by status.",
+			Name: "dso_queue_messages_total",
+			Help: "Total number of message queue events processed, partitioned by status.",
 		},
 		[]string{"status"}, // ack, nack, dlq
 	)
@@ -88,7 +88,7 @@ func init() {
 		RotationsFailed,
 		CircuitBreakersTripped,
 		ProbeDurationSeconds,
-		ServiceBusMessagesTotal,
+		QueueMessagesTotal,
 		KeyVaultFetchLatency,
 	)
 }

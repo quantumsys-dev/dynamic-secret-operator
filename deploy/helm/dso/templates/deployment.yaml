@@ -82,7 +82,7 @@ spec:
             - name: SERVICEBUS_QUEUE_NAME
               value: {{ .Values.azure.serviceBus.queueName | quote }}
             {{- end }}
-            {{- if and (not $isESO) (eq .Values.provider "aws") .Values.aws.sqs.queueUrl }}
+            {{- if and (not $isESO) (eq .Values.provider "aws") }}
             - name: AWS_SQS_QUEUE_URL
               value: {{ .Values.aws.sqs.queueUrl | quote }}
             - name: AWS_REGION
