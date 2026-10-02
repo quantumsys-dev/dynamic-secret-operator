@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -46,6 +47,7 @@ import (
 	argov1alpha1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	argorolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	secretv1alpha1 "github.com/quantumsys-dev/dynamic-secret-operator/api/v1alpha1"
+	dsoaws "github.com/quantumsys-dev/dynamic-secret-operator/internal/aws"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/azure"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/controller"
 	"github.com/quantumsys-dev/dynamic-secret-operator/internal/events"
@@ -57,6 +59,22 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+func extractAWSSecretName(secretID string) string {
+	if parsed, err := arn.Parse(secretID); err == nil && parsed.Service == "secretsmanager" {
+		// Resource format: secret:SecretName-6RandomChars
+		parts := strings.Split(parsed.Resource, ":")
+		if len(parts) == 2 {
+			nameWithSuffix := parts[1]
+			// Strip the -xxxxxx suffix (last 7 chars)
+			if len(nameWithSuffix) > 7 && nameWithSuffix[len(nameWithSuffix)-7] == '-' {
+				return nameWithSuffix[:len(nameWithSuffix)-7]
+			}
+			return nameWithSuffix
+		}
+	}
+	return secretID
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -145,6 +163,8 @@ func main() {
 
 	var secretFetcher azure.SecretFetcher
 	var sbListener *azure.ServiceBusListener
+	var awsProvider sourceProvider.Provider
+	var sqsListener *dsoaws.SQSListener
 
 	// In E2E synthetic testing mode, bypass Azure cloud dependencies
 	if os.Getenv("E2E_SYNTHETIC_MODE") == "true" {
@@ -184,8 +204,22 @@ func main() {
 			setupLog.Info("configured Azure Service Bus peek-lock listener", "namespace", sbNamespace, "queue", sbQueue)
 		}
 	} else if provider == "aws" {
-		setupLog.Info("AWS provider selected (Roadmap v0.3.0); native event-driven worker in development. For production AWS setups, please configure mode=eso.",
-			"mode", mode, "provider", provider)
+		awsRegion := os.Getenv("AWS_REGION")
+		awsQueueURL := os.Getenv("AWS_SQS_QUEUE_URL")
+
+		cfg, err := dsoaws.NewAWSConfig(context.Background(), awsRegion)
+		if err != nil {
+			setupLog.Error(err, "unable to initialize AWS configuration; refusing to start")
+			os.Exit(1)
+		}
+		setupLog.Info("successfully initialized AWS SDK configuration", "region", cfg.Region)
+
+		awsProvider = dsoaws.NewAWSSecretsManagerProvider(cfg)
+
+		if awsQueueURL != "" {
+			sqsListener = dsoaws.NewSQSListener(cfg, awsQueueURL)
+			setupLog.Info("configured AWS SQS long-polling listener", "queueUrl", awsQueueURL)
+		}
 	} else if provider == "gcp" {
 		setupLog.Info("GCP provider selected (Roadmap v0.3.0); native event-driven worker in development. For production GCP setups, please configure mode=eso.",
 			"mode", mode, "provider", provider)
@@ -199,6 +233,8 @@ func main() {
 	var eventIngester events.EventIngester
 	if sbListener != nil {
 		eventIngester = sbListener
+	} else if sqsListener != nil {
+		eventIngester = sqsListener
 	}
 
 	// A single Kubernetes label selector can only AND requirements together, so secrets DSO
@@ -270,6 +306,9 @@ func main() {
 	}
 
 	providerRegistry := sourceProvider.SetupDefaultRegistry(mgr.GetAPIReader(), secretFetcher)
+	if awsProvider != nil {
+		providerRegistry.Register(secretv1alpha1.SourceTypeAWSSecretsManager, awsProvider)
+	}
 
 	if err = (&controller.DynamicSecretPolicyReconciler{
 		Client:                  mgr.GetClient(),
@@ -290,18 +329,32 @@ func main() {
 			handlerLog := ctrl.LoggerFrom(ctx).WithName("event-ingester-handler")
 			handlerLog.Info("processing rotation event")
 
-			eventPayload, err := events.ParseRotationEventPayload(body)
-			if err != nil {
-				handlerLog.Error(err, "failed to parse rotation event payload")
-				return err
-			}
+			var targetObjectName string
+			var targetNamespace string
+			var targetPolicyName string
 
-			targetObjectName := eventPayload.ObjectName
+			if provider == "aws" {
+				secretID, err := events.ParseAWSRotationEvent(body)
+				if err != nil {
+					handlerLog.Error(err, "failed to parse AWS rotation event payload")
+					return err
+				}
+				targetObjectName = secretID
+			} else {
+				eventPayload, err := events.ParseRotationEventPayload(body)
+				if err != nil {
+					handlerLog.Error(err, "failed to parse rotation event payload")
+					return err
+				}
+				targetObjectName = eventPayload.ObjectName
+				targetNamespace = eventPayload.Namespace
+				targetPolicyName = eventPayload.PolicyName
+			}
 
 			policyList := &secretv1alpha1.DynamicSecretPolicyList{}
 			listOpts := []client.ListOption{}
-			if eventPayload.Namespace != "" {
-				listOpts = append(listOpts, client.InNamespace(eventPayload.Namespace))
+			if targetNamespace != "" {
+				listOpts = append(listOpts, client.InNamespace(targetNamespace))
 			}
 
 			if err := mgr.GetClient().List(ctx, policyList, listOpts...); err != nil {
@@ -310,9 +363,11 @@ func main() {
 			}
 
 			matchedCount := 0
+			cleanTargetName := extractAWSSecretName(targetObjectName)
 			for i := range policyList.Items {
 				p := &policyList.Items[i]
-				if targetObjectName == "" || p.Spec.GetVaultObjectName() == targetObjectName || p.Name == eventPayload.PolicyName {
+				vaultObjName := p.Spec.GetVaultObjectName()
+				if targetObjectName == "" || vaultObjName == cleanTargetName || strings.HasSuffix(cleanTargetName, vaultObjName) || (targetPolicyName != "" && p.Name == targetPolicyName) {
 					timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Second)
 					select {
 					case eventsChannel <- event.GenericEvent{Object: p}:
