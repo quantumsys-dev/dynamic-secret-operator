@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/testcontainers/testcontainers-go/modules/localstack"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -47,6 +49,8 @@ var (
 	operatorImage   = "quantumsys-dev/dso:e2e"
 	systemNamespace = "dso-system"
 	crdBasePath     = filepath.Join("..", "..", "config", "crd", "bases")
+	lsEndpoint      string
+	lsContainer     *localstack.LocalStackContainer
 )
 
 func TestMain(m *testing.M) {
@@ -61,6 +65,22 @@ func TestMain(m *testing.M) {
 	// Setup cluster lifecycle hooks
 	testenv.Setup(
 		envfuncs.CreateCluster(kind.NewProvider(), clusterName),
+		func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
+			ls, err := localstack.Run(ctx, "localstack/localstack:3.4.0")
+			if err != nil {
+				return ctx, err
+			}
+			lsContainer = ls
+			
+			// Get mapped port for host access, but for Kind pods to reach host we use host.docker.internal
+			// If docker Desktop is not used, Kind nodes run on a docker bridge. For simplicity in e2e:
+			ip, err := ls.ContainerIP(ctx)
+			if err != nil {
+				return ctx, err
+			}
+			lsEndpoint = fmt.Sprintf("http://%s:4566", ip)
+			return ctx, nil
+		},
 		envfuncs.LoadDockerImageToCluster(clusterName, operatorImage),
 		envfuncs.CreateNamespace(systemNamespace),
 		installCRDs(crdBasePath),
@@ -72,6 +92,12 @@ func TestMain(m *testing.M) {
 
 	// Teardown cluster after suite
 	testenv.Finish(
+		func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
+			if lsContainer != nil {
+				_ = lsContainer.Terminate(ctx)
+			}
+			return ctx, nil
+		},
 		envfuncs.DestroyCluster(clusterName),
 	)
 
@@ -170,7 +196,23 @@ func deployOperator(namespace, image string) env.Func {
 								},
 								Env: []corev1.EnvVar{
 									{
-										Name:  "E2E_SYNTHETIC_MODE",
+										Name:  "AWS_ENDPOINT_URL",
+										Value: lsEndpoint,
+									},
+									{
+										Name:  "AWS_REGION",
+										Value: "us-east-1",
+									},
+									{
+										Name:  "AWS_ACCESS_KEY_ID",
+										Value: "test",
+									},
+									{
+										Name:  "AWS_SECRET_ACCESS_KEY",
+										Value: "test",
+									},
+									{
+										Name:  "DSO_ALLOW_STATIC_AWS_CREDS",
 										Value: "true",
 									},
 								},
