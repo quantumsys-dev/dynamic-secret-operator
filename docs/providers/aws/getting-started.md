@@ -3,12 +3,12 @@
 This guide explains how to configure and deploy the **Dynamic Secret Operator (DSO)** for workloads consuming secrets from **AWS Secrets Manager** on Amazon Elastic Kubernetes Service (EKS).
 
 Two implementation tracks are available:
-1. **[Track 1: Production Ready Today (ESO Mode)](#track-1-production-ready-today-eso-mode)** *(Recommended)*
-2. **[Track 2: Preview of Native Event-Driven Ingestion (Roadmap v0.3.0)](#track-2-preview-native-event-driven-mode-v030)**
+1. **[Track 1: ESO Mode](#track-1-eso-mode)** *(Decoupled)*
+2. **[Track 2: Native Event-Driven Mode](#track-2-native-event-driven-mode)** *(Recommended)*
 
 ---
 
-## Track 1: Production Ready Today (ESO Mode)
+## Track 1: ESO Mode
 
 In this decoupled model, the CNCF [External Secrets Operator (ESO)](https://external-secrets.io/) synchronizes credentials from AWS Secrets Manager into an intermediate Kubernetes Secret, while DSO manages progressive canary validation, synthetic probes, and zero-downtime workload updates without needing any AWS IAM permissions.
 
@@ -142,10 +142,7 @@ spec:
 
 ---
 
-## Track 2: Preview: Native Event-Driven Mode (v0.3.0)
-
-> [!WARNING]
-> Native direct event-driven ingestion for AWS is currently in active development for **Release v0.3.0**. The instructions below show the planned configuration.
+## Track 2: Native Event-Driven Mode
 
 ### 1. Infrastructure Architecture
 - **Amazon EventBridge Rule:** Filters for AWS Secrets Manager rotation events and delivers to an Amazon SQS queue:
@@ -161,10 +158,21 @@ spec:
     }
   }
   ```
-- **Amazon SQS Queue:** Holds event messages for consumption with visibility timeout.
-- **AWS IRSA:** Grants DSO permissions to `secretsmanager:GetSecretValue` and `sqs:ReceiveMessage/DeleteMessage`.
+- **Amazon SQS Queue:** Holds event messages for consumption with visibility timeout. 
+  - **Note (Visibility Timeout):** Set your SQS Default Visibility Timeout to **>= 2 minutes**. If it is set too low (e.g., 30s), SQS may redeliver the rotation event while the DSO is still running the canary health checks.
+  - **Note (Resource Policy):** The queue must have a Resource-Based Policy allowing EventBridge to send messages to it:
+  ```json
+  {
+    "Effect": "Allow",
+    "Principal": { "Service": "events.amazonaws.com" },
+    "Action": "sqs:SendMessage",
+    "Resource": "arn:aws:sqs:<REGION>:<ACCOUNT_ID>:<QUEUE_NAME>"
+  }
+  ```
+- **OpenTelemetry Context Propagation:** To properly link distributed tracing spans, ensure that your EventBridge rule is configured to pass `traceparent` attributes through to the SQS message attributes. Without this, DSO will start a new root trace for every event.
+- **AWS IRSA:** Grants DSO permissions to `secretsmanager:GetSecretValue` and `sqs:ReceiveMessage/DeleteMessage/ChangeMessageVisibility`.
 
-### 2. Preview Helm Installation
+### 2. Event-Driven Mode Installation
 Deploy DSO configured with AWS native event-driven parameters:
 
 #### PowerShell (Windows)
@@ -206,7 +214,7 @@ spec:
   source:
     type: AWSSecretsManager
     awsSecretsManager:
-      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:production/order-db"
+      secretID: "arn:aws:secretsmanager:us-east-1:123456789012:secret:production/order-db"
   workloadSelector:
     kind: Deployment
     name: order-service

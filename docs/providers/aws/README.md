@@ -4,8 +4,8 @@ The **Dynamic Secret Operator (DSO)** supports secret rotation for **AWS Secrets
 
 > [!NOTE]
 > **Current Support Status:**
-> - 🟢 **Production Ready Today:** **[Universal ESO Mode](../eso/README.md)** (Decoupled multi-cloud architecture utilizing CNCF External Secrets Operator with AWS IRSA).
-> - 🟡 **Under Active Development (Roadmap v0.3.0):** Native event-driven push ingestion using Amazon EventBridge and Amazon SQS queues.
+> - 🟢 **Production Ready:** **[Universal ESO Mode](../eso/README.md)** (Decoupled multi-cloud architecture utilizing CNCF External Secrets Operator with AWS IRSA).
+> - 🟢 **Production Ready:** Native event-driven push ingestion using Amazon EventBridge and Amazon SQS queues.
 
 ---
 
@@ -18,9 +18,9 @@ The **Dynamic Secret Operator (DSO)** supports secret rotation for **AWS Secrets
 
 ---
 
-## 🏗️ Architectural Model (Native v0.3.0 Target)
+## 🏗️ Architectural Model
 
-Once released in v0.3.0, DSO's native AWS provider will deliver real-time, event-driven secret rotation without continuous polling:
+DSO's native AWS provider delivers real-time, event-driven secret rotation without continuous polling:
 
 ```mermaid
 sequenceDiagram
@@ -50,14 +50,25 @@ sequenceDiagram
 
 ## ⚖️ Architectural Options for AWS Environments
 
-| Dimension | Option A: ESO Mode (Production Ready Today) | Option B: Native Event-Driven (Roadmap v0.3.0) |
+| Dimension | Option A: ESO Mode | Option B: Native Event-Driven |
 | :--- | :--- | :--- |
-| **Status** | 🟢 **Production Ready** | 🟡 **In Development** |
+| **Status** | 🟢 **Production Ready** | 🟢 **Production Ready** |
 | **Ingestion Type** | Level-triggered drift detection via ESO | Push-accelerated event stream via SQS |
 | **Latency** | Governed by ESO `refreshInterval` or webhook | Sub-second (< 500ms from Secrets Manager commit) |
 | **DSO Cloud Credentials** | **None** (100% Kubernetes RBAC only) | AWS IRSA / EKS Pod Identity (`secretsmanager:*`, `sqs:*`) |
 | **Infrastructure Setup** | Minimal (Standard ESO Helm Chart) | EventBridge Rule, SQS Queue, IAM Policy |
 | **Recommendation** | **Recommended for all AWS production clusters today** | For organizations requiring sub-second rotation latency |
+
+---
+
+## 💡 AWS Secret Naming and ARNs
+
+AWS Secrets Manager uniquely identifies secrets using an ARN format that automatically appends a 6-character random suffix to your secret name (e.g., `arn:aws:secretsmanager:us-east-1:1234567890:secret:my-db-prod-a1b2c3`). 
+
+When configuring a `DynamicSecretPolicy`, you may specify the full ARN or just the friendly name (`my-db-prod`). DSO's internal engine natively parses AWS EventBridge rotation events and automatically trims the trailing `-xxxxxx` random suffix before evaluating matches against your policy. This ensures robust and intuitive matching, whether you provided the friendly name or the full ARN, without triggering spurious cross-talk between secrets sharing similar prefixes.
+
+> [!WARNING]
+> **ARN Stripping Edge Case:** Because DSO automatically strips the last 7 characters if they match the `-xxxxxx` pattern, **do not** name your secrets with a friendly name that ends in a hyphen followed by exactly 6 characters (e.g., `my-secret-123456`). If you do, DSO will incorrectly assume this is the AWS random suffix and strip it, causing matching to fail.
 
 ---
 

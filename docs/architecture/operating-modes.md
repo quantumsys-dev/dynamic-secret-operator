@@ -391,21 +391,20 @@ spec:
 
 ##### 🟧 Amazon Web Services (AWS Secrets Manager + EventBridge + SQS)
 
-> [!WARNING]
-> **Status: 🟡 Under Active Development (Roadmap v0.3.0)**  
-> Direct event-driven ingestion for AWS is currently in development. For production AWS environments today, use **[Option A: ESO Mode](#option-a-installing-dso-for-eso-mode-decoupled--multi-cloud)**. See the [AWS Secrets Manager Provider Guide](../providers/aws/aws.md) for details.
+> [!NOTE]
+> **Status: 🟢 Production Ready**  
+> Direct event-driven ingestion for AWS is fully supported and production ready. See the [AWS Secrets Manager Provider Guide](../providers/aws/README.md) for details.
 
 **Prerequisites:**
 - AWS Secrets Manager secret.
 - Amazon SQS queue (e.g. `dso-vault-events`).
 - Amazon EventBridge rule filtering for `AWS Secrets Manager Secret Rotation` events, routing to the SQS queue.
-- AWS IAM Role for Service Accounts (IRSA) / EKS Pod Identity bound to the `dso-system:dso-controller-manager` service account with `secretsmanager:GetSecretValue` and `sqs:ReceiveMessage/DeleteMessage` permissions.
+- AWS IAM Role for Service Accounts (IRSA) / EKS Pod Identity bound to the `dso-system:dso-controller-manager` service account with `secretsmanager:GetSecretValue` and `sqs:ReceiveMessage/DeleteMessage/ChangeMessageVisibility` permissions.
 
-**Helm Installation (v0.3 Preview):**
+**Helm Installation:**
 
 *PowerShell (Windows):*
 ```powershell
-# Note: Native AWS provider is currently under development (Roadmap v0.3.0)
 helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
   --namespace dso-system `
   --create-namespace `
@@ -420,7 +419,6 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator `
 
 *Bash (Linux / macOS):*
 ```bash
-# Note: Native AWS provider is currently under development (Roadmap v0.3.0)
 helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
   --namespace dso-system \
   --create-namespace \
@@ -444,7 +442,7 @@ spec:
   source:
     type: AWSSecretsManager
     awsSecretsManager:
-      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:payment-db-cred"
+      secretID: "arn:aws:secretsmanager:us-east-1:123456789012:secret:payment-db-cred"
   workloadSelector:
     kind: Deployment
     name: payment-service

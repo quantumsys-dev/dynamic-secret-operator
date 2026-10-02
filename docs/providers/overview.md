@@ -77,7 +77,7 @@ spec:
   source:
     type: "AWSSecretsManager"
     awsSecretsManager:
-      secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:payment-db-cred"
+      secretID: "arn:aws:secretsmanager:us-east-1:123456789012:secret:payment-db-cred"
   workloadSelector:
     kind: "Deployment"
     name: "payment-api"

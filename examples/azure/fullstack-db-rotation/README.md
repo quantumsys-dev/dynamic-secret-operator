@@ -97,10 +97,10 @@ helm install dso oci://ghcr.io/quantumsys-dev/charts/dynamic-secret-operator \
 
 > 💡 **Other Cloud Providers & Operating Modes:**  
 > While this example demonstrates native Azure Key Vault rotation, DSO supports 4 provider installation profiles:
-> - 🟢 **[Microsoft Azure](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/azure.md)** *(Production Ready)*
-> - 🟢 **[Universal Multi-Cloud via ESO](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/eso.md)** *(Production Ready – for AWS, GCP, Vault, and hybrid)*
-> - 🟡 **[Amazon Web Services - AWS](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/aws.md)** *(In Development – Roadmap v0.3)*
-> - 🟡 **[Google Cloud Platform - GCP](file:///c:/Users/JoãoCassanji/Desktop/dynamic-secret-operator/docs/providers/gcp.md)** *(In Development – Roadmap v0.3)*
+> - 🟢 **[Microsoft Azure](../../../docs/providers/azure/README.md)** *(Production Ready)*
+> - 🟢 **[Universal Multi-Cloud via ESO](../../../docs/providers/eso/README.md)** *(Production Ready – for AWS, GCP, Vault, and hybrid)*
+> - 🟢 **[Amazon Web Services - AWS](../../../docs/providers/aws/README.md)** *(Production Ready)*
+> - 🟡 **[Google Cloud Platform - GCP](../../../docs/providers/gcp/README.md)** *(In Development – Roadmap v0.3)*
 > 
 > See the [Getting Started Guide](../../../docs/getting-started.md) or [Pluggable Providers Overview](../../../docs/providers/overview.md) for details.
 

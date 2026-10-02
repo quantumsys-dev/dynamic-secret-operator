@@ -245,10 +245,10 @@ DSO features a modular architecture where the **secret source backend** (`spec.s
 
 For complete, copy-paste ready `DynamicSecretPolicy` manifests featuring diverse probe types (`HTTP`, `TLS`, `PostgreSQL`, `MySQL`, `Job`) tailored to each cloud ecosystem, consult our dedicated provider documentation:
 
-- 🟢 **[Universal Multi-Cloud via ESO Guide](docs/providers/eso.md)** – *Production Ready* (Patterns for HTTP Health, Redis Job, PostgreSQL/MySQL, and Ingress TLS probes)
-- 🟢 **[Microsoft Azure Key Vault Guide](docs/providers/azure.md)** – *Production Ready* (Patterns for Relational Database, Ingress TLS Handshake, Microservice HTTP, and Redis Job probes)
-- 🟡 **[Amazon Web Services (AWS) Guide](docs/providers/aws.md)** – *In Development (Roadmap v0.3)* (Patterns for Aurora MySQL, Microservice HTTP, Ingress TLS, and ElastiCache Redis Job probes)
-- 🟡 **[Google Cloud Platform (GCP) Guide](docs/providers/gcp.md)** – *In Development (Roadmap v0.3)* (Patterns for Memorystore Redis Job, Microservice HTTP, Cloud SQL Database, and Ingress TLS probes)
+- 🟢 **[Universal Multi-Cloud via ESO Guide](docs/providers/eso/README.md)** – *Production Ready* (Patterns for HTTP Health, Redis Job, PostgreSQL/MySQL, and Ingress TLS probes)
+- 🟢 **[Microsoft Azure Key Vault Guide](docs/providers/azure/README.md)** – *Production Ready* (Patterns for Relational Database, Ingress TLS Handshake, Microservice HTTP, and Redis Job probes)
+- 🟢 **[Amazon Web Services (AWS) Guide](docs/providers/aws/README.md)** – *Production Ready* (Patterns for Aurora MySQL, Microservice HTTP, Ingress TLS, and ElastiCache Redis Job probes)
+- 🟡 **[Google Cloud Platform (GCP) Guide](docs/providers/gcp/README.md)** – *In Development (Roadmap v0.3)* (Patterns for Memorystore Redis Job, Microservice HTTP, Cloud SQL Database, and Ingress TLS probes)
 - 📖 **[Pluggable Providers Overview](docs/providers/overview.md)** – Architectural model of the provider registry and ingestion engine
 - 📖 **[Comprehensive CRD API Reference](docs/api-reference.md)** – Full schema field definitions, status conditions, and Kyverno policy rules
 
@@ -300,10 +300,10 @@ For comprehensive details on enterprise integration, architecture, and operation
 - [GitOps: Argo CD Self-Heal Integration](docs/gitops-argo-cd.md)
 - [Security & Threat Model](docs/security.md)
 - [Pluggable Providers Overview](docs/providers/overview.md)
-  - [Microsoft Azure Key Vault Guide (Production Ready)](docs/providers/azure.md)
-  - [Universal Multi-Cloud via ESO Guide (Production Ready)](docs/providers/eso.md)
-  - [AWS Secrets Manager Guide (In Development)](docs/providers/aws.md)
-  - [Google Cloud Secret Manager Guide (In Development)](docs/providers/gcp.md)
+  - [Microsoft Azure Key Vault Guide (Production Ready)](docs/providers/azure/README.md)
+  - [Universal Multi-Cloud via ESO Guide (Production Ready)](docs/providers/eso/README.md)
+  - [AWS Secrets Manager Guide (Production Ready)](docs/providers/aws/README.md)
+  - [Google Cloud Secret Manager Guide (In Development)](docs/providers/gcp/README.md)
 
 **Architecture Decision Records (ADRs):**
 - [ADR-001: Azure Service Bus Peek-Lock vs Webhooks](docs/architecture/001-asb-peek-lock-vs-webhooks.md)
