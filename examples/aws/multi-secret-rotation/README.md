@@ -1,0 +1,184 @@
+# EKS Production Example: Multi-Secret Microservice with Dedicated Probes
+
+This example demonstrates how the **Dynamic Secret Operator (DSO)** safely manages **multiple distinct secrets** consumed simultaneously by a single Kubernetes workload on **AWS Kubernetes Service (EKS)**, using **independent `DynamicSecretPolicy` resources** and **specialized validation probes** for each secret.
+
+---
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TD
+    subgraph AWSCloud ["☁️ AWS Cloud"]
+        ASM["🔑 AWS Secrets Manager"]
+        S1["Secret: db-password"]
+        S2["Secret: redis-auth-token"]
+        S3["Secret: payment-api-key"]
+        EG["⚡ Event Grid System Topic"]
+        ASB["📨 AWS Service Bus<br/>(Queue: dso-vault-events)"]
+    end
+
+    ASM --- S1
+    ASM --- S2
+    ASM --- S3
+    S1 & S2 & S3 -->|"Secret Updated"| EG
+    EG --> ASB
+
+    subgraph EKS ["☸️ AWS Kubernetes Service (EKS)"]
+        subgraph DSOSystem ["dso-system Namespace"]
+            DSO["⚙️ Dynamic Secret Operator"]
+        end
+
+        ASB -->|"Event Stream"| DSO
+
+        subgraph DemoApp ["dso-examples Namespace"]
+            APP["🌐 Orders & Payments Microservice<br/>(multi-secret-app)"]
+
+            subgraph Policies ["DynamicSecretPolicy Resources"]
+                P1["📄 multi-secret-db-policy<br/>• targetRef: db-secret-volume<br/>• Probe: PostgreSQL (SELECT 1)"]
+                P2["📄 multi-secret-redis-policy<br/>• targetRef: redis-secret-volume<br/>• Probe: Job (redis-cli ping)"]
+                P3["📄 multi-secret-payment-policy<br/>• targetRef: payment-secret-volume<br/>• Probe: HTTP (200 OK)"]
+            end
+
+            subgraph Backends ["Dependencies"]
+                DB[("🐘 PostgreSQL DB")]
+                CACHE[("⚡ Redis Cache")]
+                GW["💳 Mock Payment Gateway"]
+            end
+        end
+    end
+
+    DSO -->|"Reconciles"| P1 & P2 & P3
+    P1 -->|"Validates"| DB
+    P2 -->|"Validates"| CACHE
+    P3 -->|"Validates"| GW
+
+    P1 -->|"Mutates db-secret-volume"| APP
+    P2 -->|"Mutates redis-secret-volume"| APP
+    P3 -->|"Mutates payment-secret-volume"| APP
+```
+
+---
+
+## 💡 How Multi-Secret Rotation Works
+
+In microservices architectures, an application frequently depends on multiple external resources (databases, cache layers, payment gateways, API keys). DSO allows each secret to be rotated independently with zero downtime and strict isolation:
+
+| Secret Name | Secrets Manager Object | Volume Mount | Validation Probe Type | Probe Target |
+| :--- | :--- | :--- | :--- | :--- |
+| **Database Password** | `db-password` | `/mnt/secrets/db` | `PostgreSQL` | `postgres:5432/appdb` |
+| **Cache Token** | `redis-auth-token` | `/mnt/secrets/redis` | `Job` (ephemeral) | `redis:6379` |
+| **Payment API Key** | `payment-api-key` | `/mnt/secrets/payment` | `HTTP` | `payment-gateway:8080/v1/health` |
+
+### 🎯 Key Advantages of DSO's Multi-Secret Design
+1. **Target Isolation (`targetRef.volumeName`)**: When `db-password` changes, DSO generates a new revision secret only for the database, updating `db-secret-volume` in the Pod template while keeping `redis-secret-volume` and `payment-secret-volume` completely untouched.
+2. **Dedicated Validation Probes**: Each secret is validated using the exact protocol it uses in production (PostgreSQL TCP ping, Redis AUTH Job, HTTP health check).
+3. **Independent Rollbacks**: If a rotated secret fails validation (e.g., an invalid Redis password), only the Redis rollout is aborted and rolled back. The database and payment integrations continue operating normally.
+
+---
+
+## 🚀 Quickstart Deployment
+
+### Prerequisites
+- Running EKS cluster connected via `kubectl`
+- AWS Secrets Manager provisioned (e.g., via `./setup-AWS-resources.ps1`)
+- Dynamic Secret Operator installed in `dso-system` namespace
+
+### Step 1: Deploy the Multi-Secret Example
+
+**PowerShell (Windows):**
+```powershell
+cd examples/EKS/multi-secret-rotation
+.\deploy-EKS.ps1 -SecretId "kv-dso-dev"
+```
+
+**Bash (Linux / WSL / macOS):**
+```bash
+cd examples/EKS/multi-secret-rotation
+chmod +x deploy-EKS.sh
+./deploy-EKS.sh -k kv-dso-dev
+```
+
+---
+
+## 📊 Step 2: Access the Multi-Secret Dashboard
+
+- **Public URL (LoadBalancer):**
+  ```bash
+  kubectl get svc multi-secret-app -n dso-examples
+  # Open http://<EXTERNAL-IP> in your browser
+  ```
+- **Fallback (Port-Forward):**
+  ```bash
+  kubectl port-forward svc/multi-secret-app 8080:80 -n dso-examples
+  # Open http://localhost:8080 in your browser
+  ```
+
+Open the dashboard in your browser. You will see a live interface displaying the health, active secret mask, probe latency, and status for all three dependencies simultaneously.
+
+---
+
+## 🔄 Step 3: Test Independent Secret Rotations
+
+### Scenario A: Rotate the PostgreSQL Database Password Only
+1. Update Postgres user password in cluster:
+   ```bash
+   kubectl exec deployment/postgres -n dso-examples -- psql -U postgres -d appdb -c "ALTER USER postgres WITH PASSWORD 'RotatedPostgresPass789!';"
+   ```
+2. Update the database secret in AWS Secrets Manager:
+   ```bash
+   aws secretsmanager put-secret-value --secret-id "kv-dso-dev" --secret-id "db-password" --secret-string "RotatedPostgresPass789!"
+   ```
+
+**Observe DSO in action:**
+1. Event Grid notifies Service Bus; DSO creates a canary pod.
+2. The `PostgreSQL` probe executes `SELECT count(*) FROM orders`.
+3. DSO performs a rolling update of `multi-secret-app`, modifying **only** `db-secret-volume`.
+4. Refresh the dashboard to observe the updated DB credential mask while Redis and Payment secrets remain unchanged.
+
+---
+
+### Scenario B: Rotate the Redis Cache Token Only
+1. Update Redis password in cluster:
+   ```bash
+   kubectl exec deployment/redis -n dso-examples -- redis-cli -a InitialRedisToken456! CONFIG SET requirepass "RotatedRedisToken999!"
+   ```
+2. Update the Redis secret in AWS Secrets Manager:
+   ```bash
+   aws secretsmanager put-secret-value --secret-id "kv-dso-dev" --secret-id "redis-auth-token" --secret-string "RotatedRedisToken999!"
+   ```
+
+**Observe DSO in action:**
+1. DSO launches an ephemeral `Job` pod executing `redis-cli ping` with the new credential.
+2. Upon job success, DSO rolls out the new `redis-secret-volume`.
+
+---
+
+### Scenario C: Rotate the Payment Gateway API Key
+Update the payment API key in AWS Secrets Manager:
+```bash
+aws secretsmanager put-secret-value --secret-id "kv-dso-dev" --secret-id "payment-api-key" --secret-string "sk_live_pay_updated_456"
+```
+
+**Observe DSO in action:**
+1. DSO executes the `HTTP` validation probe against `http://payment-gateway:8080/v1/health`.
+2. DSO promotes the deployment safely.
+
+---
+
+## 🛡️ Step 4: Verify Circuit Breaker & Automatic Rollback
+
+Test DSO's safety by injecting an invalid secret into Secrets Manager:
+```bash
+aws secretsmanager put-secret-value --secret-id "kv-dso-dev" --secret-id "db-password" --secret-string "WrongInvalidPassword!"
+```
+
+1. DSO creates a canary pod and runs the `PostgreSQL` probe.
+2. The probe fails (`FATAL: password authentication failed`).
+3. DSO triggers **Auto-Rollback**, preventing the invalid secret from reaching production pods.
+4. The production pods remain `HEALTHY` and zero user traffic is disrupted!
+
+Check policy status:
+```bash
+kubectl get dynamicsecretpolicies -n dso-examples
+kubectl describe dynamicsecretpolicy multi-secret-db-policy -n dso-examples
+```

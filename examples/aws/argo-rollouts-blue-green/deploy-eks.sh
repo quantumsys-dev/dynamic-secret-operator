@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Dynamic Secret Operator (DSO) – Deploy Argo Rollouts Blue/Green Example on EKS
+# ==============================================================================
+
+set -euo pipefail
+
+KEYVAULT_NAME=""
+ARGO_ROLLOUTS_VERSION="v1.7.2"
+
+print_usage() {
+    echo "Usage: $0 -k <KEYVAULT_NAME>"
+    echo "  -k    Name of the AWS Secrets Manager (e.g., kv-dso-dev)"
+    exit 1
+}
+
+while getopts "k:h" opt; do
+    case "${opt}" in
+        k) KEYVAULT_NAME="${OPTARG}" ;;
+        h) print_usage ;;
+        *) print_usage ;;
+    esac
+done
+
+if [ -z "${KEYVAULT_NAME}" ]; then
+    echo "❌ Error: Secrets Manager name is required."
+    print_usage
+fi
+
+echo "=================================================================="
+echo "🚀 Deploying Argo Rollouts Blue/Green Example to EKS Cluster..."
+echo "🔑 Target Secrets Manager: ${KEYVAULT_NAME}"
+echo "=================================================================="
+
+# 1. Check prerequisites
+command -v kubectl >/dev/null 2>&1 || { echo "❌ Error: 'kubectl' is required."; exit 1; }
+command -v az >/dev/null 2>&1 || { echo "❌ Error: 'az' AWS CLI is required."; exit 1; }
+
+# 2. Check cluster connection
+CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+if [ -z "${CURRENT_CONTEXT}" ]; then
+    echo "❌ Error: Not connected to any Kubernetes cluster. Please run 'az EKS get-credentials' first."
+    exit 1
+fi
+echo "☸️  Using Kubernetes Context: ${CURRENT_CONTEXT}"
+
+# 3. Verify Secrets Manager accessibility
+echo "🔑 Verifying access to AWS Secrets Manager '${KEYVAULT_NAME}'..."
+if ! aws secretsmanager describe-secret --secret-id "${KEYVAULT_NAME}" >/dev/null 2>&1; then
+    echo "❌ Error: Unable to access Secrets Manager '${KEYVAULT_NAME}'. Please verify the name and your AWS permissions."
+    exit 1
+fi
+echo "✅ Secrets Manager '${KEYVAULT_NAME}' verified."
+
+# 4. Seed initial secret in AWS Secrets Manager if not exists
+echo "🔑 Checking secret 'payment-db-password' in AWS Secrets Manager '${KEYVAULT_NAME}'..."
+if ! aws secretsmanager get-secret-value --secret-id "${KEYVAULT_NAME}" --secret-id "payment-db-password" >/dev/null 2>&1; then
+    echo "ℹ️  Creating initial secret 'payment-db-password' in Secrets Manager..."
+    aws secretsmanager put-secret-value \
+        --secret-id "${KEYVAULT_NAME}" \
+        --secret-id "payment-db-password" \
+        --secret-string "initial-database-password-v1" \
+        --output none || { echo "❌ Error: Failed to create secret 'payment-db-password' in Secrets Manager '${KEYVAULT_NAME}'."; exit 1; }
+    echo "✅ Initial secret 'payment-db-password' seeded in Secrets Manager."
+else
+    echo "ℹ️  Secret 'payment-db-password' already exists in Secrets Manager."
+fi
+
+# 5. Install Argo Rollouts controller if not present
+if ! kubectl get namespace argo-rollouts >/dev/null 2>&1; then
+    echo "📦 Installing Argo Rollouts (${ARGO_ROLLOUTS_VERSION}) on EKS..."
+    kubectl create namespace argo-rollouts --dry-run=client -o yaml | kubectl apply -f - || { echo "❌ Error: Failed to create namespace 'argo-rollouts'."; exit 1; }
+    kubectl apply -n argo-rollouts -f "https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}/install.yaml" || { echo "❌ Error: Failed to install Argo Rollouts controller."; exit 1; }
+    echo "⏳ Waiting for Argo Rollouts controller to become ready..."
+    kubectl rollout status deployment/argo-rollouts -n argo-rollouts --timeout=120s || { echo "❌ Error: Argo Rollouts rollout failed or timed out."; exit 1; }
+else
+    echo "ℹ️  Argo Rollouts namespace already exists on cluster."
+fi
+
+# 6. Ensure target namespace exists and install DSO CRD
+echo "📦 Ensuring namespace 'dso-examples' exists..."
+kubectl create namespace dso-examples --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
+if [ -d "${REPO_ROOT}/config/crd/bases" ]; then
+    echo "🛠️  Applying DynamicSecretPolicy CRD..."
+    kubectl apply --server-side --force-conflicts -f "${REPO_ROOT}/config/crd/bases" || { echo "❌ Error: Failed to apply DynamicSecretPolicy CRD."; exit 1; }
+    echo "✅ CRD applied."
+fi
+
+# 7. Apply manifests with Secrets Manager replacement
+echo "📄 Deploying Rollout, Services, and DynamicSecretPolicy manifests..."
+if [ ! -f "${SCRIPT_DIR}/manifests.yaml" ]; then
+    echo "❌ Error: Manifest file not found at ${SCRIPT_DIR}/manifests.yaml"
+    exit 1
+fi
+sed "s/\${KEYVAULT_NAME}/${KEYVAULT_NAME}/g" "${SCRIPT_DIR}/manifests.yaml" | kubectl apply -f - || { echo "❌ Error: Failed to apply manifests."; exit 1; }
+
+# 8. Check and display Public LoadBalancer Service IP
+echo "🔍 Checking Public LoadBalancer IP for payment-service-active..."
+EXT_IP="$(kubectl get svc payment-service-active -n dso-examples -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+if [ -z "${EXT_IP}" ]; then
+    echo "ℹ️  LoadBalancer Public IP is still being provisioned by AWS (status: <pending>)."
+    echo "ℹ️  Run 'kubectl get svc payment-service-active -n dso-examples -w' to view the public IP as soon as AWS assigns it."
+else
+    echo "✅ Public IP assigned: http://${EXT_IP}"
+fi
+
+echo "=================================================================="
+echo "✅ Argo Rollouts Blue/Green Example deployed successfully on EKS!"
+echo "=================================================================="
+echo ""
+echo "📋 STEP-BY-STEP VERIFICATION GUIDE:"
+echo "------------------------------------------------------------------"
+echo ""
+echo "1️⃣ Access the Active Payment Service:"
+echo "   - Public URL (LoadBalancer):"
+echo "     kubectl get svc payment-service-active -n dso-examples"
+echo "     (Open http://<EXTERNAL-IP> in your browser)"
+echo ""
+echo "   - Fallback (Port-Forward):"
+echo "     kubectl port-forward svc/payment-service-active 8080:80 -n dso-examples"
+echo "     (Open http://localhost:8080)"
+echo ""
+echo "2️⃣ Monitor Argo Rollouts and DSO in Real Time (in separate terminals):"
+echo "   - Watch Argo Rollouts Blue/Green Progression:"
+echo "     kubectl argo rollouts get rollout rollout-payment-service -n dso-examples --watch"
+echo ""
+echo "   - Watch DSO State Machine & Validation Conditions:"
+echo "     kubectl get dynamicsecretpolicy -n dso-examples -w"
+echo ""
+echo "   - Stream Operator Logs:"
+echo "     kubectl logs -n dso-system deployment/dso-dynamic-secret-operator -f"
+echo ""
+echo "3️⃣ Trigger a Secret Rotation in AWS Secrets Manager:"
+echo "   aws secretsmanager put-secret-value --secret-id ${KEYVAULT_NAME} --secret-id 'payment-db-password' --secret-string 'NewPaymentPassword2026_Rotated!'"
+echo ""
+echo "4️⃣ Observe Blue/Green Promotion Flow:"
+echo "   - DSO detects the secret rotation event and prepares the new secret revision."
+echo "   - Argo Rollouts provisions the new Green preview ReplicaSet."
+echo "   - DSO triggers synthetic validation probes against the preview pod."
+echo "   - Once validated, Argo Rollouts performs an atomic cutover of live traffic to the Green version!"
+echo "   - The old Blue ReplicaSet is safely scaled down with zero downtime."
+echo "=================================================================="
